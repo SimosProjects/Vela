@@ -6,6 +6,7 @@ namespace TradeFlow.Worker.Services;
 /// <summary>
 /// Shared broker execution logic called by both AlertPollingService and SignalRListenerService.
 /// Handles order placement for approved BTO entries and position closing for STC/BTC exits.
+/// Also writes trade analytics to the trade_metrics table for performance reporting.
 /// </summary>
 public class BrokerExecutionService
 {
@@ -14,6 +15,7 @@ public class BrokerExecutionService
     private readonly TradeGuard _guard;
     private readonly CsvTradeLogger _csv;
     private readonly DiscordNotificationService _discord;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<BrokerExecutionService> _logger;
 
     public BrokerExecutionService(
@@ -22,6 +24,7 @@ public class BrokerExecutionService
         TradeGuard guard,
         CsvTradeLogger csv,
         DiscordNotificationService discord,
+        IServiceScopeFactory scopeFactory,
         ILogger<BrokerExecutionService> logger)
     {
         _broker = broker;
@@ -29,6 +32,7 @@ public class BrokerExecutionService
         _guard = guard;
         _csv = csv;
         _discord = discord;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
@@ -47,6 +51,11 @@ public class BrokerExecutionService
         bool isAverage = false,
         CancellationToken ct = default)
     {
+        // Capture the moment this alert entered our execution pipeline.
+        // This is the start of the latency measurement, everything from here
+        // to the broker fill confirmation counts as TradeFlow-controlled latency.
+        var alertReceivedAt = DateTimeOffset.UtcNow;
+
         if (!IsMarketOpen())
         {
             _logger.LogDebug("Market closed, skipping order for {Symbol}", alert.Symbol);
@@ -70,6 +79,12 @@ public class BrokerExecutionService
                 alert.Symbol, blocked);
             return;
         }
+
+        // Snapshot account state before placing the order, used for exposure analytics
+        var accountBalance = await _broker.GetAccountBalanceAsync(ct);
+        var openPositionsValue = await _broker.GetOpenPositionsValueAsync(ct);
+
+        var orderSubmittedAt = DateTimeOffset.UtcNow;
 
         BrokerOrderResult result;
         try
@@ -105,6 +120,45 @@ public class BrokerExecutionService
             order.StopPrice, order.TargetPrice, result.OrderId);
 
         await _discord.NotifyOrderPlacedAsync(trade, ct);
+
+        // Write analytics metric — fire after all critical path work is done
+        // so a metrics failure never affects trading execution
+        var alertedPrice = alert.PricePaid ?? 0m;
+        var slippagePct = alertedPrice > 0
+            ? (result.FillPrice - alertedPrice) / alertedPrice * 100
+            : 0m;
+
+        var exposurePct = accountBalance > 0
+            ? (openPositionsValue + order.BudgetUsed) / accountBalance * 100
+            : 0m;
+
+        using var scope = _scopeFactory.CreateScope();
+        var metrics = scope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+        await metrics.OpenAsync(new TradeMetric
+        {
+            Id                        = result.OrderId,
+            AlertId                   = alert.Id,
+            TraderName                = order.UserName,
+            Symbol                    = order.Symbol,
+            TradeType                 = order.TradeType.ToString(),
+            Direction                 = order.Direction,
+            OptionsContract           = order.OptionsContractSymbol,
+            IsAverage                 = isAverage,
+            AlertReceivedAt           = alertReceivedAt,
+            OrderSubmittedAt          = orderSubmittedAt,
+            OrderFilledAt             = result.FilledAt,
+            LatencyMs                 = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds,
+            AlertedPrice              = alertedPrice,
+            FillPrice                 = result.FillPrice,
+            SlippagePct               = slippagePct,
+            Quantity                  = result.FillQuantity,
+            EntryAmount               = result.FillAmount,
+            StopPrice                 = order.StopPrice,
+            TargetPrice               = order.TargetPrice,
+            AccountBalanceAtEntry     = accountBalance,
+            OpenPositionsValueAtEntry = openPositionsValue,
+            ExposurePct               = exposurePct,
+        }, ct);
     }
 
     /// <summary>
@@ -130,9 +184,6 @@ public class BrokerExecutionService
                 alert.Symbol);
             return;
         }
-
-        // Use the exit price from the alert if available, otherwise fall back to last known price
-        var exitPrice = alert.PriceAtExit ?? alert.LastCheckedPrice ?? trade.EntryPrice;
 
         BrokerOrderResult closeResult;
         try
@@ -164,6 +215,22 @@ public class BrokerExecutionService
             closedTrade.PnL ?? 0, closedTrade.PnLPercent ?? 0, closedTrade.Result);
 
         await _discord.NotifyPositionClosedAsync(closedTrade, ct);
+
+        // Update analytics metric with exit data
+        if (closedTrade.PnL.HasValue && closedTrade.PnLPercent.HasValue)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var metrics = scope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+            await metrics.CloseAsync(
+                orderId:   trade.OrderId,
+                exitPrice: closeResult.FillPrice,
+                exitAmount: closeResult.FillAmount,
+                pnl:       closedTrade.PnL.Value,
+                pnlPct:    closedTrade.PnLPercent.Value,
+                outcome:   closedTrade.Result.ToString(),
+                closedAt:  closedTrade.ClosedAt ?? DateTimeOffset.UtcNow,
+                ct:        ct);
+        }
     }
 
     // Returns true if the current time falls within regular market hours (9:30am to 4:00pm ET, Mon-Fri)
