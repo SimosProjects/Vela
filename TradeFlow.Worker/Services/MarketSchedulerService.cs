@@ -4,9 +4,10 @@ using TradeFlow.Worker.Engine;
 namespace TradeFlow.Worker.Services;
 
 /// <summary>
-/// Background service that fires scheduled health checks and position summaries
-/// at fixed times throughout the trading day. Only runs on market days,
-/// skipping weekends and fixed US market holidays.
+/// Background service that fires scheduled health checks, position summaries,
+/// and analytics reports at fixed times throughout the trading day.
+/// Only runs on market days, skipping weekends and fixed US market holidays.
+/// All scheduled times are in ET.
 /// </summary>
 public class MarketSchedulerService : BackgroundService
 {
@@ -21,7 +22,9 @@ public class MarketSchedulerService : BackgroundService
     private readonly string? _summaryWebhookUrl;
     private readonly HttpClient _httpClient;
 
-    // Scheduled task times in ET (hour, minute)
+    // Scheduled task times in ET (hour, minute).
+    // WeeklyReport fires every Friday at 4:30pm ET.
+    // MonthlyReport fires on the last trading day of each month at 4:30pm ET.
     private static readonly (int Hour, int Minute, string Task)[] Schedule =
     [
         (8,  30, "HealthCheck"),
@@ -31,6 +34,8 @@ public class MarketSchedulerService : BackgroundService
         (15, 10, "HealthCheck"),
         (16,  5, "HealthCheck"),
         (16, 15, "PositionSummary"),
+        (16, 30, "WeeklyReport"),
+        (16, 30, "MonthlyReport")
     ];
 
     // Fixed US market holidays that fall on the same date every year
@@ -67,17 +72,17 @@ public class MarketSchedulerService : BackgroundService
         _logger.LogInformation("Market scheduler service started.");
 
         // Track which tasks have already fired today to avoid duplicate triggers
-        var firedToday = new HashSet<string>();
+        var firedToday      = new HashSet<string>();
         var lastCheckedDate = DateOnly.MinValue;
 
         while (!stoppingToken.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
-            var et = GetEasternTime();
+            var et    = GetEasternTime();
             var today = DateOnly.FromDateTime(et.DateTime);
 
-            // Reset fired tasks at the start of each new day
+            // Reset fired tasks at the start of each new ET day
             if (today != lastCheckedDate)
             {
                 firedToday.Clear();
@@ -94,11 +99,11 @@ public class MarketSchedulerService : BackgroundService
                 if (firedToday.Contains(key))
                     continue;
 
-                // Fire if we are within the 30s window of the scheduled time
+                // Fire if we are within the 30s polling window of the scheduled ET time
                 if (et.Hour == hour && et.Minute == minute)
                 {
                     firedToday.Add(key);
-                    await FireTaskAsync(task, stoppingToken);
+                    await FireTaskAsync(task, et, stoppingToken);
                 }
             }
         }
@@ -106,18 +111,110 @@ public class MarketSchedulerService : BackgroundService
         _logger.LogInformation("Market scheduler service stopped.");
     }
 
-    private async Task FireTaskAsync(string task, CancellationToken ct)
+    private async Task FireTaskAsync(string task, DateTimeOffset et, CancellationToken ct)
     {
         try
         {
-            if (task == "HealthCheck")
-                await SendHealthCheckAsync(ct);
-            else if (task == "PositionSummary")
-                await SendPositionSummaryAsync(ct);
+            switch (task)
+            {
+                case "HealthCheck":
+                    await SendHealthCheckAsync(ct);
+                    break;
+
+                case "PositionSummary":
+                    await SendPositionSummaryAsync(ct);
+                    break;
+
+                case "WeeklyReport":
+                    // Only fires on Fridays
+                    if (et.DayOfWeek == DayOfWeek.Friday)
+                        await GenerateAnalyticsReportAsync("weekly", ct);
+                    break;
+
+                case "MonthlyReport":
+                    // Only fires on the last trading day of the month
+                    if (IsLastTradingDayOfMonth(et))
+                        await GenerateAnalyticsReportAsync("monthly", ct);
+                    break;
+            }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Market scheduler failed to execute task {Task}.", task);
+        }
+    }
+
+    /// <summary>
+    /// Generates an analytics report for the given period by instantiating the
+    /// AnalyticsEngine and HtmlReportGenerator directly using a scoped DbContext.
+    /// Report is saved to the configured reports directory.
+    /// </summary>
+    private async Task GenerateAnalyticsReportAsync(string reportType, CancellationToken ct)
+    {
+        _logger.LogInformation(
+            "Market scheduler generating {ReportType} analytics report.", reportType);
+
+        try
+        {
+            var reportsDir = _config["Analytics:ReportsDirectory"];
+
+            reportsDir = reportsDir is not null
+                ? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, reportsDir))
+                : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "reports"));
+            //_logger.LogInformation("Analytics reports directory resolved to: {Dir}", reportsDir);
+
+            var analyticsDll = Path.Combine(AppContext.BaseDirectory, "TradeFlow.Analytics.dll");
+
+            // In production the Analytics DLL is published alongside the Worker.
+            // In development use dotnet run against the project directly.
+            string fileName, arguments;
+            if (File.Exists(analyticsDll))
+            {
+                fileName  = "dotnet";
+                arguments = $"{analyticsDll} --report {reportType} --output \"{reportsDir}\"";
+            }
+            else
+            {
+                var projectPath = Path.GetFullPath(
+                    Path.Combine(AppContext.BaseDirectory,
+                        "..", "..", "..", "..",
+                        "TradeFlow.Analytics",
+                        "TradeFlow.Analytics.csproj"));
+
+                fileName  = "dotnet";
+                arguments = $"run --project \"{projectPath}\" -- --report {reportType} --output \"{reportsDir}\"";
+            }
+
+            var process = new System.Diagnostics.Process
+            {
+                StartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName               = fileName,
+                    Arguments              = arguments,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError  = true,
+                    UseShellExecute        = false,
+                }
+            };
+
+            process.Start();
+            await process.WaitForExitAsync(ct);
+
+            if (process.ExitCode == 0)
+                _logger.LogInformation(
+                    "{ReportType} analytics report generated successfully.", reportType);
+            else
+            {
+                var error = await process.StandardError.ReadToEndAsync(ct);
+                _logger.LogWarning(
+                    "{ReportType} analytics report exited with code {Code}. Error: {Error}",
+                    reportType, process.ExitCode, error);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to generate {ReportType} analytics report.", reportType);
         }
     }
 
@@ -131,12 +228,11 @@ public class MarketSchedulerService : BackgroundService
 
         _logger.LogInformation("Market scheduler firing health check.");
 
-        // Check each component and build status fields
         var workerStatus   = "✅ Running";
         var ibkrStatus     = await CheckIbkrAsync(ct);
         var postgresStatus = await CheckPostgresAsync(ct);
         var xtradesStatus  = await CheckXtradesAsync(ct);
-        var signalrStatus  = "✅ Connected"; // SignalR connection state not exposed yet, assume connected
+        var signalrStatus  = "✅ Connected";
 
         var fields = new[]
         {
@@ -169,17 +265,15 @@ public class MarketSchedulerService : BackgroundService
 
         _logger.LogInformation("Market scheduler firing position summary.");
 
-        var openTrades  = _guard.GetOpenTrades();
-        var balance     = await _broker.GetAccountBalanceAsync(ct);
-        var dailyCount  = _guard.GetDailyTradeCount();
+        var openTrades = _guard.GetOpenTrades();
+        var balance    = await _broker.GetAccountBalanceAsync(ct);
+        var dailyCount = _guard.GetDailyTradeCount();
 
-        // Build account summary section
         var accountSummary =
             $"Balance: **${balance:N2}**\n" +
             $"Open Positions: **{openTrades.Count}**\n" +
             $"Daily Trades: **{dailyCount} / 10**";
 
-        // Build open positions section
         var openSection = openTrades.Count > 0
             ? string.Join("\n", openTrades.Select(t =>
                 t.TradeType == TradeType.Options
@@ -187,7 +281,6 @@ public class MarketSchedulerService : BackgroundService
                     : $"{t.Symbol} x{t.Quantity} @ ${t.EntryPrice:F2}"))
             : "No open positions";
 
-        // Read closed trades for today from CSV
         var closedToday = ReadClosedTodayFromCsv();
         var closedSection = closedToday.Count > 0
             ? string.Join("\n", closedToday.Select(t =>
@@ -221,7 +314,6 @@ public class MarketSchedulerService : BackgroundService
         await PostToWebhookAsync(_summaryWebhookUrl, embed, ct);
     }
 
-    // Checks IB Gateway connectivity by attempting to get account balance
     private async Task<string> CheckIbkrAsync(CancellationToken ct)
     {
         try
@@ -235,7 +327,6 @@ public class MarketSchedulerService : BackgroundService
         }
     }
 
-    // Checks PostgreSQL by opening a scoped DbContext and running a simple query
     private async Task<string> CheckPostgresAsync(CancellationToken ct)
     {
         try
@@ -251,13 +342,11 @@ public class MarketSchedulerService : BackgroundService
         }
     }
 
-    // Checks Xtrades REST API reachability with a HEAD request
     private async Task<string> CheckXtradesAsync(CancellationToken ct)
     {
         try
         {
-            var response = await _httpClient.GetAsync(
-                "https://app.xtrades.net", ct);
+            var response = await _httpClient.GetAsync("https://app.xtrades.net", ct);
             return response.IsSuccessStatusCode ? "✅ Reachable" : "⚠️ Degraded";
         }
         catch
@@ -279,7 +368,6 @@ public class MarketSchedulerService : BackgroundService
         }
     }
 
-    // Reads closed trades from today from both CSV files
     private List<TradeRecord> ReadClosedTodayFromCsv()
     {
         var tradesDir = _config["Trades:Directory"]
@@ -315,8 +403,7 @@ public class MarketSchedulerService : BackgroundService
 
             var cols = line.Split(',');
 
-            // Check Status column and Date Closed column
-            var statusIndex = tradeType == TradeType.Options ? 14 : 10;
+            var statusIndex     = tradeType == TradeType.Options ? 14 : 10;
             var closedDateIndex = 2;
 
             if (cols.Length <= statusIndex) continue;
@@ -324,7 +411,6 @@ public class MarketSchedulerService : BackgroundService
             if (!DateOnly.TryParse(cols[closedDateIndex], out var closedDate)) continue;
             if (closedDate != today) continue;
 
-            // Parse enough fields for the summary display
             var entryPriceIndex = tradeType == TradeType.Options ? 10 : 6;
             var exitPriceIndex  = tradeType == TradeType.Options ? 12 : 8;
             var pnlIndex        = tradeType == TradeType.Options ? 16 : 12;
@@ -346,31 +432,54 @@ public class MarketSchedulerService : BackgroundService
 
             trades.Add(new TradeRecord
             {
-                AlertId = string.Empty,
-                OrderId = string.Empty,
-                StopOrderId = null,
+                AlertId       = string.Empty,
+                OrderId       = string.Empty,
+                StopOrderId   = null,
                 TargetOrderId = null,
-                Symbol = cols[4],
-                TradeType = tradeType,
+                Symbol        = cols[4],
+                TradeType     = tradeType,
                 OptionsContract = null,
-                Direction = null,
-                Strike = null,
-                Expiration = null,
-                Quantity = qty,
-                EntryPrice = entryPrice,
-                EntryAmount = 0,
-                StopPrice = 0,
-                TargetPrice = 0,
-                ExitPrice = exitPrice,
-                PnL = pnl,
-                PnLPercent = pnlPct,
-                Status = TradeStatus.Closed,
-                Result = result,
-                OpenedAt = DateTimeOffset.UtcNow,
+                Direction     = null,
+                Strike        = null,
+                Expiration    = null,
+                Quantity      = qty,
+                EntryPrice    = entryPrice,
+                EntryAmount   = 0,
+                StopPrice     = 0,
+                TargetPrice   = 0,
+                ExitPrice     = exitPrice,
+                PnL           = pnl,
+                PnLPercent    = pnlPct,
+                Status        = TradeStatus.Closed,
+                Result        = result,
+                OpenedAt      = DateTimeOffset.UtcNow,
             });
         }
 
         return trades;
+    }
+
+    // Returns true if today is the last market day of the current month in ET.
+    // Checks if tomorrow (or any day until month end) is still a trading day.
+    private static bool IsLastTradingDayOfMonth(DateTimeOffset et)
+    {
+        var today     = DateOnly.FromDateTime(et.DateTime);
+        var lastOfMonth = new DateOnly(today.Year, today.Month,
+            DateTime.DaysInMonth(today.Year, today.Month));
+
+        // Walk forward from tomorrow to end of month — if no trading day exists, today is last
+        for (var d = today.AddDays(1); d <= lastOfMonth; d = d.AddDays(1))
+        {
+            var dow = d.DayOfWeek;
+            if (dow is DayOfWeek.Saturday or DayOfWeek.Sunday)
+                continue;
+            if (FixedHolidays.Contains((d.Month, d.Day)))
+                continue;
+            // Found a future trading day this month — today is not the last
+            return false;
+        }
+
+        return true;
     }
 
     private static bool IsMarketDay(DateTimeOffset et)
