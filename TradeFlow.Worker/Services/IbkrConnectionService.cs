@@ -14,6 +14,7 @@ public class IbkrConnectionService : IDisposable
     private readonly EReaderSignal _signal;
 
     private bool _connected = false;
+    private CancellationTokenSource? _keepaliveCts;
 
     public bool IsConnected => _connected && _client.IsConnected();
 
@@ -40,6 +41,8 @@ public class IbkrConnectionService : IDisposable
     /// <summary>
     /// Connects to IB Gateway via the TWS socket API. Must be called before any broker API calls.
     /// Starts the EReader message processing thread on successful connection.
+    /// Also starts a keepalive loop that pings Gateway every 60 seconds to prevent
+    /// idle disconnection during quiet market periods.
     /// </summary>
     /// <returns>True if connected successfully, false otherwise.</returns>
     public bool Connect()
@@ -76,13 +79,19 @@ public class IbkrConnectionService : IDisposable
             _connected = _client.IsConnected();
 
             if (_connected)
+            {
                 _logger.LogInformation(
                     "Connected to IB Gateway at {Host}:{Port} | ClientId: {ClientId}",
                     _options.Host, _options.Port, _options.ClientId);
+
+                StartKeepalive();
+            }
             else
+            {
                 _logger.LogError(
                     "Failed to connect to IB Gateway at {Host}:{Port}",
                     _options.Host, _options.Port);
+            }
 
             return _connected;
         }
@@ -98,6 +107,8 @@ public class IbkrConnectionService : IDisposable
     /// </summary>
     public void Disconnect()
     {
+        StopKeepalive();
+
         if (_client.IsConnected())
         {
             _client.eDisconnect();
@@ -116,5 +127,61 @@ public class IbkrConnectionService : IDisposable
     {
         Disconnect();
         _client.Close();
+    }
+
+    // Sends reqCurrentTime() every 60 seconds to keep the socket alive during
+    // quiet periods when no alerts are qualifying for broker execution.
+    // Gateway will drop idle connections and this prevents that without any
+    // meaningful API overhead. currentTime() callback is a no-op in IbkrEWrapper.
+    private void StartKeepalive()
+    {
+        StopKeepalive();
+
+        _keepaliveCts = new CancellationTokenSource();
+        var ct = _keepaliveCts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            _logger.LogInformation("IB Gateway keepalive started (60s interval).");
+
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(60), ct);
+
+                    if (IsConnected)
+                    {
+                        _client.reqCurrentTime();
+                        _logger.LogDebug("IB Gateway keepalive ping sent.");
+                    }
+                    else
+                    {
+                        _logger.LogDebug("IB Gateway keepalive skipped — not connected.");
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    // Never let a keepalive failure crash the loop
+                    _logger.LogWarning(ex, "IB Gateway keepalive ping failed.");
+                }
+            }
+
+            _logger.LogInformation("IB Gateway keepalive stopped.");
+        }, ct);
+    }
+
+    private void StopKeepalive()
+    {
+        if (_keepaliveCts is not null)
+        {
+            _keepaliveCts.Cancel();
+            _keepaliveCts.Dispose();
+            _keepaliveCts = null;
+        }
     }
 }
