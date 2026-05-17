@@ -32,6 +32,10 @@ services:
       XTRADES_TOKEN: ${XTRADES_TOKEN}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
       DOTNET_ENVIRONMENT: Development
+      Analytics__ReportsDirectory: /app/reports
+    volumes:
+      - trades_data:/app/trades
+      - reports_data:/app/reports
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,6 +64,8 @@ services:
 
 volumes:
   postgres_data:
+  trades_data:
+  reports_data:
 
 networks:
   tradeflow-net:
