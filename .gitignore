@@ -5,3 +5,5 @@ obj/
 .env
 appsettings.Development.json
 logs/
+reports/
+TradeFlow.Analytics/reports/
