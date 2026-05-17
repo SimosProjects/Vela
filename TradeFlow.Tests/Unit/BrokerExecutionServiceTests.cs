@@ -3,12 +3,15 @@ using Microsoft.Extensions.Logging.Abstractions;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Models;
 using TradeFlow.Worker.Services;
+using TradeFlow.Worker.Data;
 
 namespace TradeFlow.Tests.Unit;
 
 public class BrokerExecutionServiceTests
 {
     private readonly Mock<IBrokerService> _brokerMock = new();
+    private readonly Mock<ITradeMetricsRepository> _metricsMock = new();
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly TradeGuard _guard;
     private readonly PositionSizer _sizer = new();
     private readonly BrokerExecutionService _execution;
@@ -43,6 +46,10 @@ public class BrokerExecutionServiceTests
 
         _guard = new TradeGuard(_brokerMock.Object, NullLogger<TradeGuard>.Instance);
 
+        var services = new ServiceCollection();
+        services.AddScoped<ITradeMetricsRepository>(_ => _metricsMock.Object);
+        _scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+
         var config = new ConfigurationBuilder().Build();
 
         _execution = new BrokerExecutionService(
@@ -51,6 +58,7 @@ public class BrokerExecutionServiceTests
             _guard,
             new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
             new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
+            _scopeFactory,
             NullLogger<BrokerExecutionService>.Instance);
     }
 

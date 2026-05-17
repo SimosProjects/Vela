@@ -9,3 +9,4 @@ global using Serilog;
 global using System.Net.Http.Headers;
 global using TradeFlow.Worker.Services; 
 global using System.Net.Http.Json;
+global using Microsoft.Extensions.DependencyInjection;
