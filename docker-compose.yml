@@ -32,6 +32,7 @@ services:
       XTRADES_TOKEN: ${XTRADES_TOKEN}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
       DOTNET_ENVIRONMENT: Development
+      IBKR_ENABLED: ${IBKR_ENABLED}
       Analytics__ReportsDirectory: /app/reports
     volumes:
       - trades_data:/app/trades

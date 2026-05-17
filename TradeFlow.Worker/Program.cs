@@ -90,11 +90,17 @@ builder.Services.AddSingleton<CsvTradeLogger>();
 builder.Services.AddSingleton<BrokerExecutionService>();
 builder.Services.AddHostedService<MarketSchedulerService>();
 
-// Broker, swap IBrokerService registration to IbkrBrokerService when IB Gateway is confirmed working
 builder.Services.AddSingleton<IbkrConnectionService>();
 builder.Services.AddSingleton<IbkrBrokerService>();
-builder.Services.AddSingleton<IBrokerService, NullBrokerService>();
-//builder.Services.AddSingleton<IBrokerService, IbkrBrokerService>();
+
+// Switch between paper/live trading and simulation via environment variable.
+// Set IBKR_ENABLED=true in .env to activate IbkrBrokerService.
+// Defaults to NullBrokerService when not set or set to anything else.
+if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+    builder.Services.AddSingleton<IBrokerService, IbkrBrokerService>();
+else
+    builder.Services.AddSingleton<IBrokerService, NullBrokerService>();
+
 builder.Services.AddScoped<ITradeMetricsRepository, TradeMetricsRepository>();
 
 // Hosted services
