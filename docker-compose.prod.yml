@@ -8,6 +8,7 @@ services:
     restart: always
     environment:
       DOTNET_ENVIRONMENT: Production
+      IBKR_ENABLED: ${IBKR_ENABLED}
       Analytics__ReportsDirectory: /app/reports
     volumes:
       - trades_data:/app/trades
