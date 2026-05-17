@@ -95,6 +95,7 @@ builder.Services.AddSingleton<IbkrConnectionService>();
 builder.Services.AddSingleton<IbkrBrokerService>();
 builder.Services.AddSingleton<IBrokerService, NullBrokerService>();
 //builder.Services.AddSingleton<IBrokerService, IbkrBrokerService>();
+builder.Services.AddScoped<ITradeMetricsRepository, TradeMetricsRepository>();
 
 // Hosted services
 builder.Services.AddHostedService<PositionMonitorService>();

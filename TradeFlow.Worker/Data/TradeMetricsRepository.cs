@@ -1,0 +1,107 @@
+namespace TradeFlow.Worker.Data;
+
+/// <summary>
+/// Defines the contract for writing and updating trade analytics records.
+/// Intentionally write-only from the Worker's perspective, reads are done
+/// by the TradeFlow.Analytics project directly via DbContext.
+/// </summary>
+public interface ITradeMetricsRepository
+{
+    /// <summary>
+    /// Writes a new trade metric row when a position is opened.
+    /// Called immediately after a successful broker fill.
+    /// </summary>
+    Task OpenAsync(TradeMetric metric, CancellationToken ct = default);
+
+    /// <summary>
+    /// Updates an existing trade metric row with exit data when a position closes.
+    /// Called after RegisterClose confirms the position is closed.
+    /// </summary>
+    Task CloseAsync(
+        string orderId,
+        decimal exitPrice,
+        decimal exitAmount,
+        decimal pnl,
+        decimal pnlPct,
+        string outcome,
+        DateTimeOffset closedAt,
+        CancellationToken ct = default);
+}
+
+/// <inheritdoc/>
+public class TradeMetricsRepository : ITradeMetricsRepository
+{
+    private readonly TradeFlowDbContext _db;
+    private readonly ILogger<TradeMetricsRepository> _logger;
+
+    public TradeMetricsRepository(TradeFlowDbContext db, ILogger<TradeMetricsRepository> logger)
+    {
+        _db = db;
+        _logger = logger;
+    }
+
+    /// <inheritdoc/>
+    public async Task OpenAsync(TradeMetric metric, CancellationToken ct = default)
+    {
+        try
+        {
+            _db.TradeMetrics.Add(metric);
+            await _db.SaveChangesAsync(ct);
+
+            _logger.LogInformation(
+                "Trade metric opened — {Symbol} {TradeType} | Latency: {LatencyMs}ms | Slippage: {SlippagePct:F2}%",
+                metric.Symbol, metric.TradeType, metric.LatencyMs, metric.SlippagePct);
+        }
+        catch (Exception ex)
+        {
+            // Never let analytics failures affect trading execution
+            _logger.LogError(ex,
+                "Failed to write open trade metric for {Symbol} OrderId: {OrderId}",
+                metric.Symbol, metric.Id);
+        }
+        finally
+        {
+            _db.ChangeTracker.Clear();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task CloseAsync(
+        string orderId,
+        decimal exitPrice,
+        decimal exitAmount,
+        decimal pnl,
+        decimal pnlPct,
+        string outcome,
+        DateTimeOffset closedAt,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            // Use ExecuteUpdateAsync — no change tracker overhead, single SQL statement
+            var updated = await _db.TradeMetrics
+                .Where(m => m.Id == orderId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(m => m.ExitPrice,  exitPrice)
+                    .SetProperty(m => m.ExitAmount, exitAmount)
+                    .SetProperty(m => m.PnL,        pnl)
+                    .SetProperty(m => m.PnLPct,     pnlPct)
+                    .SetProperty(m => m.Outcome,    outcome)
+                    .SetProperty(m => m.ClosedAt,   closedAt),
+                ct);
+
+            if (updated == 0)
+                _logger.LogWarning(
+                    "Trade metric close: no row found for OrderId {OrderId}", orderId);
+            else
+                _logger.LogInformation(
+                    "Trade metric closed — OrderId: {OrderId} | P&L: {PnL:+$#,##0.00;-$#,##0.00} ({PnLPct:+0.00;-0.00}%) | Outcome: {Outcome}",
+                    orderId, pnl, pnlPct, outcome);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to update close trade metric for OrderId: {OrderId}", orderId);
+        }
+    }
+}
