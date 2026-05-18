@@ -1,7 +1,7 @@
 namespace TradeFlow.Worker.Models;
 
 /// <summary>
-/// Represents a trade lifecycle entry for CSV tracking.
+/// Represents a trade lifecycle entry for CSV tracking and in-memory position management.
 /// Written on open, updated on close.
 /// </summary>
 public record TradeRecord
@@ -11,6 +11,9 @@ public record TradeRecord
     public required string OrderId { get; init; }
     public required string? StopOrderId { get; init; }
     public required string? TargetOrderId { get; init; }
+
+    // Trader — needed to match exit alerts back to the position that opened them
+    public required string UserName { get; init; }
 
     // Instrument
     public required string Symbol { get; init; }

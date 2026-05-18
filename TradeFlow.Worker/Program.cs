@@ -1,6 +1,7 @@
 using TradeFlow.Worker;
-using TradeFlow.Worker.Metrics;
+using TradeFlow.Worker.Data;
 using TradeFlow.Worker.Engine;
+using TradeFlow.Worker.Metrics;
 
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
@@ -84,6 +85,8 @@ builder.Services.AddSingleton<RiskEngineService>(sp =>
 
 builder.Services.AddSingleton<DiscordNotificationService>();
 builder.Services.AddScoped<IAlertRepository, AlertRepository>();
+builder.Services.AddScoped<IOpenPositionRepository, OpenPositionRepository>();
+builder.Services.AddScoped<ITradeMetricsRepository, TradeMetricsRepository>();
 builder.Services.AddSingleton<PositionSizer>();
 builder.Services.AddSingleton<TradeGuard>();
 builder.Services.AddSingleton<CsvTradeLogger>();
@@ -96,12 +99,10 @@ builder.Services.AddSingleton<IbkrBrokerService>();
 // Switch between paper/live trading and simulation via environment variable.
 // Set IBKR_ENABLED=true in .env to activate IbkrBrokerService.
 // Defaults to NullBrokerService when not set or set to anything else.
-if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true") 
+if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
     builder.Services.AddSingleton<IBrokerService, IbkrBrokerService>();
 else
     builder.Services.AddSingleton<IBrokerService, NullBrokerService>();
-
-builder.Services.AddScoped<ITradeMetricsRepository, TradeMetricsRepository>();
 
 // Hosted services
 builder.Services.AddHostedService<PositionMonitorService>();
@@ -110,11 +111,27 @@ builder.Services.AddHostedService<SignalRListenerService>();
 
 var host = builder.Build();
 
-// Connect to IB Gateway on startup so connection is ready before first trade
+// Startup sequence: connect to Gateway, sync order IDs, then reload TradeGuard state from DB
 if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
 {
     var connection = host.Services.GetRequiredService<IbkrConnectionService>();
     connection.Connect();
+
+    // Wait for nextValidId callback to fire before syncing — it is async from Gateway
+    await Task.Delay(2000);
+
+    var broker = host.Services.GetRequiredService<IbkrBrokerService>();
+    broker.SyncOrderId();
+}
+
+// Reload open positions from DB into TradeGuard so exit alerts work after restart
+using (var scope = host.Services.CreateScope())
+{
+    var repo  = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+    var guard = host.Services.GetRequiredService<TradeGuard>();
+    var positions = await repo.GetAllAsync();
+    if (positions.Count > 0)
+        guard.LoadFromDatabase(positions);
 }
 
 host.Run();

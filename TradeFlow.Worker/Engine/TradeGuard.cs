@@ -1,3 +1,4 @@
+using TradeFlow.Worker.Data;
 using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Engine;
@@ -20,13 +21,62 @@ public class TradeGuard
     private readonly Lock _lock = new();
 
     // Daily trade counter that resets at midnight ET
-    private int    _dailyTradeCount = 0;
-    private DateOnly _countDate     = DateOnly.MinValue;
+    private int     _dailyTradeCount = 0;
+    private DateOnly _countDate      = DateOnly.MinValue;
 
     public TradeGuard(IBrokerService broker, ILogger<TradeGuard> logger)
     {
         _broker = broker;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Seeds TradeGuard in-memory state from persisted open positions on startup.
+    /// Ensures exit alerts and position monitoring work correctly after a Worker restart.
+    /// </summary>
+    public void LoadFromDatabase(IEnumerable<OpenPosition> positions)
+    {
+        lock (_lock)
+        {
+            foreach (var p in positions)
+            {
+                var tradeType = Enum.TryParse<TradeType>(p.TradeType, out var tt)
+                    ? tt : TradeType.Options;
+
+                var record = new TradeRecord
+                {
+                    AlertId        = p.AlertId,
+                    OrderId        = p.OrderId,
+                    StopOrderId    = p.StopOrderId,
+                    TargetOrderId  = p.TargetOrderId,
+                    UserName       = p.UserName,
+                    Symbol         = p.Symbol,
+                    TradeType      = tradeType,
+                    OptionsContract = p.OptionsContract,
+                    Direction      = p.Direction,
+                    Strike         = p.Strike,
+                    Expiration     = p.Expiration,
+                    Quantity       = p.Quantity,
+                    EntryPrice     = p.EntryPrice,
+                    EntryAmount    = p.EntryAmount,
+                    StopPrice      = p.StopPrice,
+                    TargetPrice    = p.TargetPrice,
+                    OpenedAt       = p.OpenedAt,
+                    IsAverage      = p.IsAverage,
+                    HasAveraged    = p.HasAveraged,
+                };
+
+                var matchKey = BuildMatchKey(p.UserName, p.OptionsContract, p.Symbol);
+                _openTrades[matchKey] = record;
+
+                _logger.LogInformation(
+                    "TradeGuard: restored position {Symbol} OrderId: {OrderId} from database",
+                    p.Symbol, p.OrderId);
+            }
+
+            _logger.LogInformation(
+                "TradeGuard: loaded {Count} open position(s) from database", _openTrades.Count);
+        }
     }
 
     // Returns null if the order is allowed, or a reason string if blocked
@@ -36,9 +86,7 @@ public class TradeGuard
 
         // 1. Daily limit
         if (_dailyTradeCount >= MaxDailyTrades)
-        {
             return $"Daily trade limit reached ({MaxDailyTrades}/day)";
-        }
 
         // 2. Duplicate position check
         var matchKey = BuildMatchKey(order.UserName, order.OptionsContractSymbol, order.Symbol);
@@ -49,7 +97,6 @@ public class TradeGuard
                 if (!order.IsAverage)
                     return $"Position already open for {order.Symbol} — use averaging";
 
-                // Averaging checks
                 if (existing.HasAveraged)
                     return $"Already averaged into {order.Symbol} — only one average allowed";
             }
@@ -59,10 +106,10 @@ public class TradeGuard
             }
         }
 
-        // 3. Exposure check, ask broker for live balance and open position value
-        var balance     = await _broker.GetAccountBalanceAsync(ct);
-        var openValue   = await _broker.GetOpenPositionsValueAsync(ct);
-        var available   = balance - openValue;
+        // 3. Exposure check
+        var balance   = await _broker.GetAccountBalanceAsync(ct);
+        var openValue = await _broker.GetOpenPositionsValueAsync(ct);
+        var available = balance - openValue;
 
         if (order.BudgetUsed > available)
         {
@@ -70,10 +117,10 @@ public class TradeGuard
                    $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})";
         }
 
-        return null; // all checks passed
+        return null;
     }
 
-    // Called after a successful PlaceOrderAsync, registers the position
+    // Called after a successful PlaceOrderAsync, registers the position in memory
     public void RegisterOpen(TradeOrder order, BrokerOrderResult result)
     {
         ResetDailyCountIfNewDay();
@@ -92,23 +139,24 @@ public class TradeGuard
 
             var record = new TradeRecord
             {
-                AlertId        = order.AlertId,
-                OrderId        = result.OrderId,
-                StopOrderId    = result.StopOrderId,
-                TargetOrderId  = result.TargetOrderId,
-                Symbol         = order.Symbol,
-                TradeType      = order.TradeType,
+                AlertId         = order.AlertId,
+                OrderId         = result.OrderId,
+                StopOrderId     = result.StopOrderId,
+                TargetOrderId   = result.TargetOrderId,
+                UserName        = order.UserName,
+                Symbol          = order.Symbol,
+                TradeType       = order.TradeType,
                 OptionsContract = order.OptionsContractSymbol,
-                Direction      = order.Direction,
-                Strike         = order.Strike,
-                Expiration     = order.Expiration,
-                Quantity       = result.FillQuantity,
-                EntryPrice     = result.FillPrice,
-                EntryAmount    = result.FillAmount,
-                StopPrice      = order.StopPrice,
-                TargetPrice    = order.TargetPrice,
-                OpenedAt       = result.FilledAt,
-                IsAverage      = order.IsAverage,
+                Direction       = order.Direction,
+                Strike          = order.Strike,
+                Expiration      = order.Expiration,
+                Quantity        = result.FillQuantity,
+                EntryPrice      = result.FillPrice,
+                EntryAmount     = result.FillAmount,
+                StopPrice       = order.StopPrice,
+                TargetPrice     = order.TargetPrice,
+                OpenedAt        = result.FilledAt,
+                IsAverage       = order.IsAverage,
             };
 
             _openTrades[matchKey] = record;
@@ -144,13 +192,13 @@ public class TradeGuard
             var pnl        = exitAmount - trade.EntryAmount;
             var pnlPct     = pnl / trade.EntryAmount * 100;
 
-            trade.ExitPrice   = exitPrice;
-            trade.ExitAmount  = exitAmount;
-            trade.PnL         = pnl;
-            trade.PnLPercent  = pnlPct;
-            trade.ClosedAt    = DateTimeOffset.UtcNow;
-            trade.Status      = TradeStatus.Closed;
-            trade.Result      = outcome;
+            trade.ExitPrice  = exitPrice;
+            trade.ExitAmount = exitAmount;
+            trade.PnL        = pnl;
+            trade.PnLPercent = pnlPct;
+            trade.ClosedAt   = DateTimeOffset.UtcNow;
+            trade.Status     = TradeStatus.Closed;
+            trade.Result     = outcome;
 
             _openTrades.Remove(matchKey);
             return trade;
@@ -176,16 +224,11 @@ public class TradeGuard
         }
     }
 
-    /// <summary>
-    /// Returns the number of trades placed today. Resets at midnight ET.
-    /// </summary>
+    /// <summary>Returns the number of trades placed today. Resets at midnight ET.</summary>
     public int GetDailyTradeCount()
     {
         ResetDailyCountIfNewDay();
-        lock (_lock)
-        {
-            return _dailyTradeCount;
-        }
+        lock (_lock) { return _dailyTradeCount; }
     }
 
     // Options: userName + OCC symbol. Stocks: userName + ticker symbol
