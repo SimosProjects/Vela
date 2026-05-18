@@ -12,12 +12,14 @@ public class DiscordNotificationService
     private readonly HttpClient _httpClient;
     private readonly ILogger<DiscordNotificationService> _logger;
     private readonly string? _webhookUrl;
+    private readonly string? _criticalWebhookUrl;
 
     public DiscordNotificationService(
         ILogger<DiscordNotificationService> logger)
     {
         _logger     = logger;
         _webhookUrl = Environment.GetEnvironmentVariable("DISCORD_WEBHOOK_URL");
+        _criticalWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_CRITICAL_WEBHOOK_URL");
         _httpClient = new HttpClient();
 
         if (string.IsNullOrWhiteSpace(_webhookUrl))
@@ -148,6 +150,39 @@ public class DiscordNotificationService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to send position closed Discord notification.");
+        }
+    }
+
+    /// <summary>
+    /// Posts a critical system alert to the dedicated critical Discord channel.
+    /// Used for infrastructure problems requiring immediate intervention.
+    /// </summary>
+    public async Task NotifyCriticalAsync(
+        string title,
+        string message,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(_criticalWebhookUrl))
+            return;
+
+        try
+        {
+            var embed = new
+            {
+                title,
+                description = message,
+                color       = 0xFF0000, // red
+                footer      = new { text = "TradeFlow Critical" },
+                timestamp   = DateTimeOffset.UtcNow.ToString("o")
+            };
+
+            var payload = new { embeds = new[] { embed } };
+            await _httpClient.PostAsJsonAsync(
+                _criticalWebhookUrl, payload, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send critical Discord notification.");
         }
     }
 

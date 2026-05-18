@@ -12,7 +12,7 @@ public class IbkrConnectionService : IDisposable
     private readonly EClientSocket _client;
     private readonly IbkrEWrapper _wrapper;
     private readonly EReaderSignal _signal;
-
+    private readonly DiscordNotificationService _discord;
     private bool _connected = false;
     private CancellationTokenSource? _keepaliveCts;
 
@@ -21,13 +21,15 @@ public class IbkrConnectionService : IDisposable
     public IbkrConnectionService(
         IOptions<IbkrOptions> options,
         ILogger<IbkrConnectionService> logger,
-        ILogger<IbkrEWrapper> wrapperLogger)
+        ILogger<IbkrEWrapper> wrapperLogger,
+        DiscordNotificationService discord)
     {
         _options = options.Value;
         _logger  = logger;
         _wrapper = new IbkrEWrapper(wrapperLogger);
         _signal  = new EReaderMonitorSignal();
         _client  = new EClientSocket(_wrapper, _signal);
+        _discord = discord;
 
         // When Gateway drops the connection, update _connected so IsConnected
         // reflects the real state immediately without waiting for the next API call
@@ -35,6 +37,9 @@ public class IbkrConnectionService : IDisposable
         {
             _connected = false;
             _logger.LogWarning("IB Gateway connection closed unexpectedly.");
+            _ = _discord.NotifyCriticalAsync(
+                "🔴 IB Gateway Disconnected",
+                "TradeFlow lost connection to IB Gateway. Orders cannot be placed until reconnected.");
         });
     }
 
@@ -83,6 +88,14 @@ public class IbkrConnectionService : IDisposable
                 _logger.LogInformation(
                     "Connected to IB Gateway at {Host}:{Port} | ClientId: {ClientId}",
                     _options.Host, _options.Port, _options.ClientId);
+
+                _logger.LogInformation(
+                    "Connected to IB Gateway at {Host}:{Port} | ClientId: {ClientId}",
+                    _options.Host, _options.Port, _options.ClientId);
+
+                _ = _discord.NotifyCriticalAsync(
+                    "🟢 IB Gateway Connected",
+                    $"TradeFlow connected to IB Gateway at {_options.Host}:{_options.Port}");
 
                 StartKeepalive();
             }
