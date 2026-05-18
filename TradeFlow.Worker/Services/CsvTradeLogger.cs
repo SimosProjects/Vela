@@ -34,11 +34,13 @@ public class CsvTradeLogger
     {
         _logger = logger;
 
-        // Default to trades/ folder relative to working directory
-        var tradesDir = config["Trades:Directory"]
-            ?? Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "trades");
+        // Anchor to binary directory to ensure consistent path resolution
+        // regardless of the working directory when the process starts.
+        var configuredDir = config["Trades:Directory"];
+        var tradesDir = configuredDir is not null
+            ? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, configuredDir))
+            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "trades"));
 
-        tradesDir = Path.GetFullPath(tradesDir);
         Directory.CreateDirectory(tradesDir);
 
         _optionsPath = Path.Combine(tradesDir, "options_trades.csv");

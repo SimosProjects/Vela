@@ -436,6 +436,7 @@ public class MarketSchedulerService : BackgroundService
                 OrderId       = string.Empty,
                 StopOrderId   = null,
                 TargetOrderId = null,
+                UserName      = string.Empty,
                 Symbol        = cols[4],
                 TradeType     = tradeType,
                 OptionsContract = null,

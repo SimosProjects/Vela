@@ -4,7 +4,8 @@ namespace TradeFlow.Worker.Data;
 
 /// <summary>
 /// Entity Framework Core DbContext for the TradeFlow application,
-/// representing the database session and providing access to the Alerts and TradeMetrics tables.
+/// representing the database session and providing access to the Alerts, TradeMetrics,
+/// and OpenPositions tables.
 /// </summary>
 public class TradeFlowDbContext : DbContext
 {
@@ -13,6 +14,7 @@ public class TradeFlowDbContext : DbContext
 
     public DbSet<AlertEntity> Alerts { get; set; }
     public DbSet<TradeMetric> TradeMetrics { get; set; }
+    public DbSet<OpenPosition> OpenPositions { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -21,17 +23,10 @@ public class TradeFlowDbContext : DbContext
             entity.ToTable("alerts");
             entity.HasKey(a => a.Id);
 
-            entity.HasIndex(a => a.UserName)
-                  .HasDatabaseName("idx_alerts_username");
-
-            entity.HasIndex(a => a.Symbol)
-                  .HasDatabaseName("idx_alerts_symbol");
-
-            entity.HasIndex(a => a.TimeOfEntryAlert)
-                  .HasDatabaseName("idx_alerts_time_of_entry");
-
-            entity.HasIndex(a => new { a.Side, a.TimeOfEntryAlert })
-                  .HasDatabaseName("idx_alerts_side_time");
+            entity.HasIndex(a => a.UserName).HasDatabaseName("idx_alerts_username");
+            entity.HasIndex(a => a.Symbol).HasDatabaseName("idx_alerts_symbol");
+            entity.HasIndex(a => a.TimeOfEntryAlert).HasDatabaseName("idx_alerts_time_of_entry");
+            entity.HasIndex(a => new { a.Side, a.TimeOfEntryAlert }).HasDatabaseName("idx_alerts_side_time");
 
             entity.Property(a => a.Id).HasColumnName("id");
             entity.Property(a => a.UserId).HasColumnName("user_id");
@@ -74,19 +69,10 @@ public class TradeFlowDbContext : DbContext
             entity.ToTable("trade_metrics");
             entity.HasKey(m => m.Id);
 
-            // Most analytics queries filter or group by trader, symbol, or time
-            entity.HasIndex(m => m.TraderName)
-                  .HasDatabaseName("idx_trade_metrics_trader");
-
-            entity.HasIndex(m => m.Symbol)
-                  .HasDatabaseName("idx_trade_metrics_symbol");
-
-            entity.HasIndex(m => m.AlertReceivedAt)
-                  .HasDatabaseName("idx_trade_metrics_received_at");
-
-            // Allows efficient open-only queries (closed_at IS NULL)
-            entity.HasIndex(m => m.ClosedAt)
-                  .HasDatabaseName("idx_trade_metrics_closed_at");
+            entity.HasIndex(m => m.TraderName).HasDatabaseName("idx_trade_metrics_trader");
+            entity.HasIndex(m => m.Symbol).HasDatabaseName("idx_trade_metrics_symbol");
+            entity.HasIndex(m => m.AlertReceivedAt).HasDatabaseName("idx_trade_metrics_received_at");
+            entity.HasIndex(m => m.ClosedAt).HasDatabaseName("idx_trade_metrics_closed_at");
 
             entity.Property(m => m.Id).HasColumnName("id");
             entity.Property(m => m.AlertId).HasColumnName("alert_id");
@@ -116,6 +102,32 @@ public class TradeFlowDbContext : DbContext
             entity.Property(m => m.ClosedAt).HasColumnName("closed_at");
             entity.Property(m => m.PnL).HasColumnName("pnl");
             entity.Property(m => m.PnLPct).HasColumnName("pnl_pct");
+        });
+
+        modelBuilder.Entity<OpenPosition>(entity =>
+        {
+            entity.ToTable("open_positions");
+            entity.HasKey(p => p.OrderId);
+
+            entity.Property(p => p.OrderId).HasColumnName("order_id");
+            entity.Property(p => p.StopOrderId).HasColumnName("stop_order_id");
+            entity.Property(p => p.TargetOrderId).HasColumnName("target_order_id");
+            entity.Property(p => p.AlertId).HasColumnName("alert_id");
+            entity.Property(p => p.UserName).HasColumnName("user_name");
+            entity.Property(p => p.Symbol).HasColumnName("symbol");
+            entity.Property(p => p.TradeType).HasColumnName("trade_type");
+            entity.Property(p => p.OptionsContract).HasColumnName("options_contract");
+            entity.Property(p => p.Direction).HasColumnName("direction");
+            entity.Property(p => p.Strike).HasColumnName("strike");
+            entity.Property(p => p.Expiration).HasColumnName("expiration");
+            entity.Property(p => p.Quantity).HasColumnName("quantity");
+            entity.Property(p => p.EntryPrice).HasColumnName("entry_price");
+            entity.Property(p => p.EntryAmount).HasColumnName("entry_amount");
+            entity.Property(p => p.StopPrice).HasColumnName("stop_price");
+            entity.Property(p => p.TargetPrice).HasColumnName("target_price");
+            entity.Property(p => p.OpenedAt).HasColumnName("opened_at");
+            entity.Property(p => p.IsAverage).HasColumnName("is_average");
+            entity.Property(p => p.HasAveraged).HasColumnName("has_averaged");
         });
     }
 }

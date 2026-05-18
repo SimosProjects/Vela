@@ -1,0 +1,81 @@
+namespace TradeFlow.Worker.Data;
+
+/// <summary>
+/// Persists open trade positions so TradeGuard can reload its state after a Worker restart.
+/// </summary>
+public interface IOpenPositionRepository
+{
+    /// <summary>Gets all currently open positions from the database.</summary>
+    Task<List<OpenPosition>> GetAllAsync(CancellationToken ct = default);
+
+    /// <summary>Saves a new open position when a trade is entered.</summary>
+    Task SaveAsync(OpenPosition position, CancellationToken ct = default);
+
+    /// <summary>Removes a position when it closes.</summary>
+    Task DeleteAsync(string orderId, CancellationToken ct = default);
+}
+
+/// <inheritdoc/>
+public class OpenPositionRepository : IOpenPositionRepository
+{
+    private readonly TradeFlowDbContext _db;
+    private readonly ILogger<OpenPositionRepository> _logger;
+
+    public OpenPositionRepository(TradeFlowDbContext db, ILogger<OpenPositionRepository> logger)
+    {
+        _db = db;
+        _logger = logger;
+    }
+
+    /// <inheritdoc/>
+    public async Task<List<OpenPosition>> GetAllAsync(CancellationToken ct = default)
+    {
+        return await _db.OpenPositions.AsTracking().ToListAsync(ct);
+    }
+
+    /// <inheritdoc/>
+    public async Task SaveAsync(OpenPosition position, CancellationToken ct = default)
+    {
+        try
+        {
+            // Insert or update — safe across Worker restarts if same order ID is seen again
+            var existing = await _db.OpenPositions.AsTracking()
+                .FirstOrDefaultAsync(p => p.OrderId == position.OrderId, ct);
+
+            if (existing is null)
+                _db.OpenPositions.Add(position);
+            else
+            {
+                existing.HasAveraged   = position.HasAveraged;
+                existing.StopOrderId   = position.StopOrderId;
+                existing.TargetOrderId = position.TargetOrderId;
+            }
+
+            await _db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to save open position for {Symbol} OrderId: {OrderId}",
+                position.Symbol, position.OrderId);
+        }
+        finally
+        {
+            _db.ChangeTracker.Clear();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task DeleteAsync(string orderId, CancellationToken ct = default)
+    {
+        try
+        {
+            await _db.OpenPositions
+                .Where(p => p.OrderId == orderId)
+                .ExecuteDeleteAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to delete open position OrderId: {OrderId}", orderId);
+        }
+    }
+}

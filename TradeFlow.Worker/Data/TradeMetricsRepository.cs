@@ -52,6 +52,15 @@ public class TradeMetricsRepository : ITradeMetricsRepository
                 "Trade metric opened — {Symbol} {TradeType} | Latency: {LatencyMs}ms | Slippage: {SlippagePct:F2}%",
                 metric.Symbol, metric.TradeType, metric.LatencyMs, metric.SlippagePct);
         }
+        catch (DbUpdateException ex)
+            when (ex.InnerException is Npgsql.PostgresException pg && pg.SqlState == "23505")
+        {
+            // Duplicate key — order ID already exists from a previous session.
+            // Safe to skip; the existing row in trade_metrics is still valid.
+            _logger.LogWarning(
+                "Trade metric skipped — duplicate OrderId {OrderId} for {Symbol} (order ID reused across restart)",
+                metric.Id, metric.Symbol);
+        }
         catch (Exception ex)
         {
             // Never let analytics failures affect trading execution
@@ -78,7 +87,6 @@ public class TradeMetricsRepository : ITradeMetricsRepository
     {
         try
         {
-            // Use ExecuteUpdateAsync — no change tracker overhead, single SQL statement
             var updated = await _db.TradeMetrics
                 .Where(m => m.Id == orderId)
                 .ExecuteUpdateAsync(s => s

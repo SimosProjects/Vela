@@ -1,3 +1,4 @@
+using TradeFlow.Worker.Data;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Models;
 
@@ -17,6 +18,7 @@ public class BrokerExecutionService
     private readonly DiscordNotificationService _discord;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<BrokerExecutionService> _logger;
+    private readonly Func<bool> _isMarketOpen;
 
     public BrokerExecutionService(
         IBrokerService broker,
@@ -25,15 +27,18 @@ public class BrokerExecutionService
         CsvTradeLogger csv,
         DiscordNotificationService discord,
         IServiceScopeFactory scopeFactory,
-        ILogger<BrokerExecutionService> logger)
+        ILogger<BrokerExecutionService> logger,
+        Func<bool>? isMarketOpen = null)
     {
-        _broker = broker;
-        _sizer = sizer;
-        _guard = guard;
-        _csv = csv;
-        _discord = discord;
+        _broker       = broker;
+        _sizer        = sizer;
+        _guard        = guard;
+        _csv          = csv;
+        _discord      = discord;
         _scopeFactory = scopeFactory;
-        _logger = logger;
+        _logger       = logger;
+        // Injectable for testing; defaults to real ET market hours check
+        _isMarketOpen = isMarketOpen ?? IsMarketOpenDefault;
     }
 
     /// <summary>
@@ -41,22 +46,15 @@ public class BrokerExecutionService
     /// placing the order with the broker, and logging the result to CSV and Discord.
     /// Skips silently if the market is closed or any safety check fails.
     /// </summary>
-    /// <param name="alert">The approved alert to act on.</param>
-    /// <param name="classification">The alert classification from the risk engine.</param>
-    /// <param name="isAverage">True if this is an averaging order on an existing position.</param>
-    /// <param name="ct">Cancellation token.</param>
     public async Task HandleEntryAsync(
         Alert alert,
         AlertClassification classification,
         bool isAverage = false,
         CancellationToken ct = default)
     {
-        // Capture the moment this alert entered our execution pipeline.
-        // This is the start of the latency measurement, everything from here
-        // to the broker fill confirmation counts as TradeFlow-controlled latency.
         var alertReceivedAt = DateTimeOffset.UtcNow;
 
-        if (!IsMarketOpen())
+        if (!_isMarketOpen())
         {
             _logger.LogDebug("Market closed, skipping order for {Symbol}", alert.Symbol);
             return;
@@ -80,11 +78,9 @@ public class BrokerExecutionService
             return;
         }
 
-        // Snapshot account state before placing the order, used for exposure analytics
-        var accountBalance = await _broker.GetAccountBalanceAsync(ct);
+        var accountBalance     = await _broker.GetAccountBalanceAsync(ct);
         var openPositionsValue = await _broker.GetOpenPositionsValueAsync(ct);
-
-        var orderSubmittedAt = DateTimeOffset.UtcNow;
+        var orderSubmittedAt   = DateTimeOffset.UtcNow;
 
         BrokerOrderResult result;
         try
@@ -105,10 +101,65 @@ public class BrokerExecutionService
             return;
         }
 
-        // Register position in TradeGuard memory and write to CSV
+        // If the fill confirmation timed out, verify the position actually exists in Gateway
+        // before recording it. A pending status does not guarantee the order was filled —
+        // it may have been rejected or expired with no fill. Querying GrossPositionValue
+        // confirms capital was actually deployed before we open the TradeGuard position.
+        if (result.Status == OrderStatus.Pending)
+        {
+            _logger.LogWarning(
+                "Order timed out for {Symbol} — verifying position exists in Gateway before recording.",
+                alert.Symbol);
+
+            await Task.Delay(TimeSpan.FromSeconds(3), ct);
+
+            var positionsValue = await _broker.GetOpenPositionsValueAsync(ct);
+            if (positionsValue <= 0)
+            {
+                _logger.LogWarning(
+                    "Gateway shows no open positions after timeout for {Symbol} — order not recorded. " +
+                    "The order was likely rejected or unfilled.",
+                    alert.Symbol);
+                return;
+            }
+
+            _logger.LogInformation(
+                "Gateway confirmed open positions ${Value:F2} after timeout for {Symbol} — recording trade.",
+                positionsValue, alert.Symbol);
+        }
+
+        // Register position in TradeGuard memory and persist to database
         _guard.RegisterOpen(order, result);
         var trade = _guard.FindOpenTrade(
             order.UserName, order.OptionsContractSymbol, order.Symbol)!;
+
+        // Persist open position to DB so TradeGuard can reload it after a restart
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+            await repo.SaveAsync(new OpenPosition
+            {
+                OrderId        = trade.OrderId,
+                StopOrderId    = trade.StopOrderId,
+                TargetOrderId  = trade.TargetOrderId,
+                AlertId        = trade.AlertId,
+                UserName       = trade.UserName,
+                Symbol         = trade.Symbol,
+                TradeType      = trade.TradeType.ToString(),
+                OptionsContract = trade.OptionsContract,
+                Direction      = trade.Direction,
+                Strike         = trade.Strike,
+                Expiration     = trade.Expiration,
+                Quantity       = trade.Quantity,
+                EntryPrice     = trade.EntryPrice,
+                EntryAmount    = trade.EntryAmount,
+                StopPrice      = trade.StopPrice,
+                TargetPrice    = trade.TargetPrice,
+                OpenedAt       = trade.OpenedAt,
+                IsAverage      = trade.IsAverage,
+                HasAveraged    = trade.HasAveraged,
+            }, ct);
+        }
 
         await _csv.OpenTradeAsync(trade, ct);
 
@@ -121,10 +172,8 @@ public class BrokerExecutionService
 
         await _discord.NotifyOrderPlacedAsync(trade, ct);
 
-        // Write analytics metric — fire after all critical path work is done
-        // so a metrics failure never affects trading execution
         var alertedPrice = alert.PricePaid ?? 0m;
-        var slippagePct = alertedPrice > 0
+        var slippagePct  = alertedPrice > 0
             ? (result.FillPrice - alertedPrice) / alertedPrice * 100
             : 0m;
 
@@ -132,8 +181,8 @@ public class BrokerExecutionService
             ? (openPositionsValue + order.BudgetUsed) / accountBalance * 100
             : 0m;
 
-        using var scope = _scopeFactory.CreateScope();
-        var metrics = scope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+        using var metricScope = _scopeFactory.CreateScope();
+        var metrics = metricScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
         await metrics.OpenAsync(new TradeMetric
         {
             Id                        = result.OrderId,
@@ -166,8 +215,6 @@ public class BrokerExecutionService
     /// the position with the broker, and updating the CSV and Discord with the P&amp;L result.
     /// Skips silently if no matching open position is found.
     /// </summary>
-    /// <param name="alert">The exit alert to act on.</param>
-    /// <param name="ct">Cancellation token.</param>
     public async Task HandleExitAsync(
         Alert alert,
         CancellationToken ct = default)
@@ -206,6 +253,13 @@ public class BrokerExecutionService
 
         if (closedTrade is null) return;
 
+        // Remove persisted open position now that it is closed
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+            await repo.DeleteAsync(trade.OrderId, ct);
+        }
+
         await _csv.CloseTradeAsync(closedTrade, ct);
 
         _logger.LogInformation(
@@ -216,25 +270,24 @@ public class BrokerExecutionService
 
         await _discord.NotifyPositionClosedAsync(closedTrade, ct);
 
-        // Update analytics metric with exit data
         if (closedTrade.PnL.HasValue && closedTrade.PnLPercent.HasValue)
         {
-            using var scope = _scopeFactory.CreateScope();
-            var metrics = scope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+            using var metricScope = _scopeFactory.CreateScope();
+            var metrics = metricScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
             await metrics.CloseAsync(
-                orderId:   trade.OrderId,
-                exitPrice: closeResult.FillPrice,
+                orderId:    trade.OrderId,
+                exitPrice:  closeResult.FillPrice,
                 exitAmount: closeResult.FillAmount,
-                pnl:       closedTrade.PnL.Value,
-                pnlPct:    closedTrade.PnLPercent.Value,
-                outcome:   closedTrade.Result.ToString(),
-                closedAt:  closedTrade.ClosedAt ?? DateTimeOffset.UtcNow,
-                ct:        ct);
+                pnl:        closedTrade.PnL.Value,
+                pnlPct:     closedTrade.PnLPercent.Value,
+                outcome:    closedTrade.Result.ToString(),
+                closedAt:   closedTrade.ClosedAt ?? DateTimeOffset.UtcNow,
+                ct:         ct);
         }
     }
 
     // Returns true if the current time falls within regular market hours (9:30am to 4:00pm ET, Mon-Fri)
-    private static bool IsMarketOpen()
+    private static bool IsMarketOpenDefault()
     {
         var et = TimeZoneInfo.ConvertTime(
             DateTimeOffset.UtcNow,

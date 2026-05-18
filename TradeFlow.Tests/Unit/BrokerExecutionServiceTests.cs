@@ -15,6 +15,7 @@ public class BrokerExecutionServiceTests
     private readonly TradeGuard _guard;
     private readonly PositionSizer _sizer = new();
     private readonly BrokerExecutionService _execution;
+    private readonly BrokerExecutionService _executionMarketOpen;
 
     public BrokerExecutionServiceTests()
     {
@@ -48,10 +49,12 @@ public class BrokerExecutionServiceTests
 
         var services = new ServiceCollection();
         services.AddScoped<ITradeMetricsRepository>(_ => _metricsMock.Object);
+        services.AddScoped<IOpenPositionRepository>(_ => Mock.Of<IOpenPositionRepository>());
         _scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         var config = new ConfigurationBuilder().Build();
 
+        // Default instance — market always closed (for tests that expect no order)
         _execution = new BrokerExecutionService(
             _brokerMock.Object,
             _sizer,
@@ -59,7 +62,19 @@ public class BrokerExecutionServiceTests
             new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
             new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
             _scopeFactory,
-            NullLogger<BrokerExecutionService>.Instance);
+            NullLogger<BrokerExecutionService>.Instance,
+            isMarketOpen: () => false);
+
+        // Market-open instance — for tests that exercise the trading path
+        _executionMarketOpen = new BrokerExecutionService(
+            _brokerMock.Object,
+            _sizer,
+            _guard,
+            new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
+            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
+            _scopeFactory,
+            NullLogger<BrokerExecutionService>.Instance,
+            isMarketOpen: () => true);
     }
 
     private static Alert BuildAlert(
@@ -112,8 +127,7 @@ public class BrokerExecutionServiceTests
     [Fact]
     public async Task HandleEntryAsync_SkipsWhenMarketClosed()
     {
-        // BrokerExecutionService checks IsMarketOpen() before placing any order.
-        // Since tests run outside market hours, no order should be placed.
+        // _execution is configured with isMarketOpen: () => false
         var alert = BuildAlert();
         var classification = CallClassification();
 
@@ -149,7 +163,6 @@ public class BrokerExecutionServiceTests
     [Fact]
     public async Task HandleExitAsync_ClosesWhenOpenPositionExists()
     {
-        // Pre-register an open trade in TradeGuard to simulate an existing position
         var order = new TradeOrder(
             AlertId: Guid.NewGuid().ToString(),
             UserName: "TestTrader",
@@ -177,9 +190,8 @@ public class BrokerExecutionServiceTests
 
         _guard.RegisterOpen(order, result);
 
-        // Send an exit alert for the same trader + contract
         var exitAlert = BuildAlert(side: "stc", userName: "TestTrader");
-        await _execution.HandleExitAsync(exitAlert);
+        await _executionMarketOpen.HandleExitAsync(exitAlert);
 
         _brokerMock.Verify(b => b.ClosePositionAsync(
             It.Is<TradeRecord>(t => t.Symbol == "TSLA"),
@@ -190,7 +202,6 @@ public class BrokerExecutionServiceTests
     [Fact]
     public async Task HandleExitAsync_SkipsWhenTraderMismatch()
     {
-        // Register a trade under one trader
         var order = new TradeOrder(
             AlertId: Guid.NewGuid().ToString(),
             UserName: "TestTrader",
@@ -216,9 +227,8 @@ public class BrokerExecutionServiceTests
             Status: OrderStatus.Filled,
             FilledAt: DateTimeOffset.UtcNow));
 
-        // Exit alert from a different trader — should not close
         var exitAlert = BuildAlert(side: "stc", userName: "DifferentTrader");
-        await _execution.HandleExitAsync(exitAlert);
+        await _executionMarketOpen.HandleExitAsync(exitAlert);
 
         _brokerMock.Verify(b => b.ClosePositionAsync(
             It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), default), Times.Never);

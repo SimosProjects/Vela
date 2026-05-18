@@ -23,6 +23,11 @@ public class IbkrEWrapper : EWrapper
 
     private readonly Lock _lock = new();
 
+    // Tracks the next valid order ID as reported by Gateway on connect and after each order.
+    // Used by IbkrBrokerService to avoid ID collisions across Worker restarts.
+    private int _nextValidOrderId = 1;
+    public int NextValidOrderId => _nextValidOrderId;
+
     public IbkrEWrapper(ILogger<IbkrEWrapper> logger)
     {
         _logger = logger;
@@ -68,7 +73,6 @@ public class IbkrEWrapper : EWrapper
     // Resolves position price callbacks used by PositionMonitorService
     public void position(string account, Contract contract, double pos, double avgCost)
     {
-        // Build the same match key used by TradeGuard to correlate positions
         var key = contract.SecType == "OPT"
             ? $"{contract.Symbol}::{contract.LocalSymbol}"
             : $"{contract.Symbol}::STK";
@@ -89,8 +93,6 @@ public class IbkrEWrapper : EWrapper
     /// <summary>
     /// Registers a callback that resolves when IBKR returns position data for the given symbol key.
     /// </summary>
-    /// <param name="key">Match key in the format Symbol::LocalSymbol for options or Symbol::STK for stocks.</param>
-    /// <returns>A <see cref="TaskCompletionSource{T}"/> that completes when position data arrives.</returns>
     public TaskCompletionSource<decimal> RegisterPositionCallback(string key)
     {
         var tcs = new TaskCompletionSource<decimal>();
@@ -101,8 +103,6 @@ public class IbkrEWrapper : EWrapper
     /// <summary>
     /// Registers a callback that resolves when IBKR confirms the order status for the given order ID.
     /// </summary>
-    /// <param name="orderId">The order ID to watch for.</param>
-    /// <returns>A <see cref="TaskCompletionSource{T}"/> that completes when the status arrives.</returns>
     public TaskCompletionSource<OrderState> RegisterOrderCallback(int orderId)
     {
         var tcs = new TaskCompletionSource<OrderState>();
@@ -113,8 +113,6 @@ public class IbkrEWrapper : EWrapper
     /// <summary>
     /// Registers a callback that resolves when IBKR returns the account summary value for the given request ID.
     /// </summary>
-    /// <param name="reqId">The request ID to watch for.</param>
-    /// <returns>A <see cref="TaskCompletionSource{T}"/> that completes when the value arrives.</returns>
     public TaskCompletionSource<string> RegisterAccountCallback(int reqId)
     {
         var tcs = new TaskCompletionSource<string>();
@@ -125,8 +123,13 @@ public class IbkrEWrapper : EWrapper
     public void connectAck() =>
         _logger.LogInformation("IBKR connection acknowledged.");
 
-    public void nextValidId(int orderId) =>
+    // Stores the next valid order ID from Gateway so IbkrBrokerService can seed
+    // its counter on startup, preventing order ID collisions across Worker restarts.
+    public void nextValidId(int orderId)
+    {
+        _nextValidOrderId = orderId;
         _logger.LogInformation("IBKR Next Valid OrderId: {OrderId}", orderId);
+    }
 
     public void managedAccounts(string accountsList) =>
         _logger.LogInformation("IBKR Managed Accounts: {Accounts}", accountsList);
