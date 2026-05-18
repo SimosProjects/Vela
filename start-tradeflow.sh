@@ -9,8 +9,8 @@ source "$SCRIPT_DIR/.env"
 set +a
 
 # Get current time in ET
-ET_HOUR=$(TZ="America/New_York" date +%H)
-ET_MIN=$(TZ="America/New_York" date +%M)
+ET_HOUR=$(TZ="America/New_York" date +%-H)
+ET_MIN=$(TZ="America/New_York" date +%-M)
 ET_DOW=$(TZ="America/New_York" date +%u)  # 1=Monday, 7=Sunday
 ET_TIME=$((ET_HOUR * 60 + ET_MIN))
 
