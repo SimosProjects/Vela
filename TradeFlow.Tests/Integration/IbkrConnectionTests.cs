@@ -22,10 +22,14 @@ public class IbkrConnectionTests
             TimeoutMs = 5000
         });
 
+        var discord = new DiscordNotificationService(
+            NullLogger<DiscordNotificationService>.Instance);
+
         return new IbkrConnectionService(
             options,
             NullLogger<IbkrConnectionService>.Instance,
-            NullLogger<IbkrEWrapper>.Instance);
+            NullLogger<IbkrEWrapper>.Instance,
+            discord);
     }
 
     private static IbkrBrokerService BuildBrokerService(IbkrConnectionService connection, int clientId = 99)
@@ -44,6 +48,21 @@ public class IbkrConnectionTests
             options,
             NullLogger<IbkrBrokerService>.Instance);
     }
+
+    // Builds a connection service pointing at a port with nothing running
+    private static IbkrConnectionService BuildDownConnectionService() =>
+        new IbkrConnectionService(
+            Options.Create(new IbkrOptions
+            {
+                Host      = "127.0.0.1",
+                Port      = 9999,
+                ClientId  = 99,
+                AccountId = "",
+                TimeoutMs = 2000
+            }),
+            NullLogger<IbkrConnectionService>.Instance,
+            NullLogger<IbkrEWrapper>.Instance,
+            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance));
 
     // -- Gateway running tests --
 
@@ -98,29 +117,17 @@ public class IbkrConnectionTests
     {
         if (ShouldSkip) return;
 
-        // Point to a port with nothing running
         var options = Options.Create(new IbkrOptions
         {
-            Host = "127.0.0.1",
-            Port = 9999,
-            ClientId = 99,
-            AccountId = "",
-            TimeoutMs = 2000
+            Host = "127.0.0.1", Port = 9999, ClientId = 99, AccountId = "", TimeoutMs = 2000
         });
 
-        var connection = new IbkrConnectionService(
-            options,
-            NullLogger<IbkrConnectionService>.Instance,
-            NullLogger<IbkrEWrapper>.Instance);
-
+        var connection = BuildDownConnectionService();
         var broker = new IbkrBrokerService(
-            connection,
-            options,
-            NullLogger<IbkrBrokerService>.Instance);
+            connection, options, NullLogger<IbkrBrokerService>.Instance);
 
         var balance = await broker.GetAccountBalanceAsync();
 
-        // Should return 0 gracefully rather than throwing
         balance.Should().Be(0);
 
         connection.Dispose();
@@ -133,26 +140,15 @@ public class IbkrConnectionTests
 
         var options = Options.Create(new IbkrOptions
         {
-            Host = "127.0.0.1",
-            Port = 9999,
-            ClientId = 99,
-            AccountId = "",
-            TimeoutMs = 2000
+            Host = "127.0.0.1", Port = 9999, ClientId = 99, AccountId = "", TimeoutMs = 2000
         });
 
-        var connection = new IbkrConnectionService(
-            options,
-            NullLogger<IbkrConnectionService>.Instance,
-            NullLogger<IbkrEWrapper>.Instance);
-
+        var connection = BuildDownConnectionService();
         var broker = new IbkrBrokerService(
-            connection,
-            options,
-            NullLogger<IbkrBrokerService>.Instance);
+            connection, options, NullLogger<IbkrBrokerService>.Instance);
 
         var value = await broker.GetOpenPositionsValueAsync();
 
-        // Should return 0 gracefully rather than throwing
         value.Should().Be(0);
 
         connection.Dispose();
@@ -163,20 +159,7 @@ public class IbkrConnectionTests
     {
         if (ShouldSkip) return;
 
-        var options = Options.Create(new IbkrOptions
-        {
-            Host = "127.0.0.1",
-            Port = 9999,
-            ClientId = 99,
-            AccountId = "",
-            TimeoutMs = 2000
-        });
-
-        var connection = new IbkrConnectionService(
-            options,
-            NullLogger<IbkrConnectionService>.Instance,
-            NullLogger<IbkrEWrapper>.Instance);
-
+        var connection = BuildDownConnectionService();
         var connected = connection.Connect();
 
         connected.Should().BeFalse();

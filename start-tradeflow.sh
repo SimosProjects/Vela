@@ -53,4 +53,5 @@ fi
 
 # Start Worker with caffeinate to prevent Mac sleep
 cd "$SCRIPT_DIR/TradeFlow.Worker"
-caffeinate -d dotnet run
+# -d to prevent sleeping, screen statys on.  -i to prevent sleeping but screen can still sleep
+caffeinate -i dotnet run
