@@ -96,7 +96,7 @@ builder.Services.AddSingleton<IbkrBrokerService>();
 // Switch between paper/live trading and simulation via environment variable.
 // Set IBKR_ENABLED=true in .env to activate IbkrBrokerService.
 // Defaults to NullBrokerService when not set or set to anything else.
-if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true") 
     builder.Services.AddSingleton<IBrokerService, IbkrBrokerService>();
 else
     builder.Services.AddSingleton<IBrokerService, NullBrokerService>();
@@ -109,4 +109,12 @@ builder.Services.AddHostedService<AlertPollingService>();
 builder.Services.AddHostedService<SignalRListenerService>();
 
 var host = builder.Build();
+
+// Connect to IB Gateway on startup so connection is ready before first trade
+if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+{
+    var connection = host.Services.GetRequiredService<IbkrConnectionService>();
+    connection.Connect();
+}
+
 host.Run();
