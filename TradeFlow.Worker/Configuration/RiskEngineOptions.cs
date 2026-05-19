@@ -13,4 +13,10 @@ public class RiskEngineOptions
     public List<string> ApprovedTraders { get; init; } = [];
 
     public bool AllowLotto { get; init; } = false;
+
+    // Minimum stock price in dollars. Stock entry alerts below this threshold are rejected.
+    // Defaults to $3.00 to exclude penny stocks and OTC equities with high gap-down risk.
+    // Set to 0 to disable the filter entirely.
+    [Range(0, 10000, ErrorMessage = "MinStockPriceDollars must be between 0 and 10000.")]
+    public decimal MinStockPriceDollars { get; init; } = 3.00m;
 }

@@ -2,7 +2,7 @@ namespace TradeFlow.Tests.Unit;
 
 public class RiskEngineTests
 {
-    // Helper — builds a minimal valid alert
+    // Helpers
     private static Alert BuildAlert(
         string side = "bto",
         string risk = "standard",
@@ -19,6 +19,42 @@ public class RiskEngineTests
             LastCheckedPrice: null, Risk: risk,
             LastKnownPercentProfit: null, IsProfitableTrade: null,
             XScore: xScore, CanAverage: null,
+            TimeOfEntryAlert: null, TimeOfFullExitAlert: null,
+            FormattedLength: null, IsSwing: null,
+            IsBullish: null, IsShort: null,
+            Strategy: null, OriginalMessage: null,
+            OriginalExitMessage: null);
+
+    private static Alert BuildStockAlert(decimal? price) =>
+        new(Id: "test-id", UserId: null, UserName: "yoyomun",
+            Symbol: "SBFM", Type: "commons", Direction: "none",
+            Strike: null, Expiration: null,
+            OptionsContractSymbol: null, ContractDescription: null,
+            Side: "bto", Status: null, Result: null,
+            ActualPriceAtTimeOfAlert: price, ActualPriceAtTimeOfExit: null,
+            PricePaid: price, PriceAtExit: null,
+            HighestPrice: null, LowestPrice: null,
+            LastCheckedPrice: null, Risk: "standard",
+            LastKnownPercentProfit: null, IsProfitableTrade: null,
+            XScore: 75.0, CanAverage: null,
+            TimeOfEntryAlert: null, TimeOfFullExitAlert: null,
+            FormattedLength: null, IsSwing: null,
+            IsBullish: null, IsShort: null,
+            Strategy: null, OriginalMessage: null,
+            OriginalExitMessage: null);
+
+    private static Alert BuildOptionAlert(decimal? price) =>
+        new(Id: "test-id", UserId: null, UserName: "Fibonaccizer",
+            Symbol: "SPX", Type: "options", Direction: "put",
+            Strike: 5000m, Expiration: "2026-06-20T00:00:00",
+            OptionsContractSymbol: "SPXW260620P05000000", ContractDescription: null,
+            Side: "bto", Status: null, Result: null,
+            ActualPriceAtTimeOfAlert: price, ActualPriceAtTimeOfExit: null,
+            PricePaid: price, PriceAtExit: null,
+            HighestPrice: null, LowestPrice: null,
+            LastCheckedPrice: null, Risk: "standard",
+            LastKnownPercentProfit: null, IsProfitableTrade: null,
+            XScore: 75.0, CanAverage: null,
             TimeOfEntryAlert: null, TimeOfFullExitAlert: null,
             FormattedLength: null, IsSwing: null,
             IsBullish: null, IsShort: null,
@@ -183,5 +219,69 @@ public class RiskEngineTests
         // Both rules should have been called
         passingRule1.Verify(r => r.Evaluate(It.IsAny<Alert>()), Times.Once);
         passingRule2.Verify(r => r.Evaluate(It.IsAny<Alert>()), Times.Once);
+    }
+
+    // -- MinStockPriceRule --
+
+    [Fact]
+    public void MinStockPriceRule_StockAtMinimum_Passes()
+    {
+        var rule  = new MinStockPriceRule(minimumPrice: 3.00m);
+        var alert = BuildStockAlert(price: 3.00m);
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void MinStockPriceRule_StockAboveMinimum_Passes()
+    {
+        var rule  = new MinStockPriceRule(minimumPrice: 3.00m);
+        var alert = BuildStockAlert(price: 25.50m);
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void MinStockPriceRule_StockBelowMinimum_Fails()
+    {
+        var rule  = new MinStockPriceRule(minimumPrice: 3.00m);
+        var alert = BuildStockAlert(price: 1.19m); // SBFM scenario
+        var result = rule.Evaluate(alert);
+        Assert.False(result.Passed);
+        Assert.Contains("penny stock filter", result.Reason);
+    }
+
+    [Fact]
+    public void MinStockPriceRule_OptionAlert_AlwaysPasses()
+    {
+        // Options below $3 are fine — a $1.50 option is not a penny stock
+        var rule  = new MinStockPriceRule(minimumPrice: 3.00m);
+        var alert = BuildOptionAlert(price: 0.50m);
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void MinStockPriceRule_NullPrice_Fails()
+    {
+        var rule  = new MinStockPriceRule(minimumPrice: 3.00m);
+        var alert = BuildStockAlert(price: null);
+        var result = rule.Evaluate(alert);
+        Assert.False(result.Passed);
+    }
+
+    [Theory]
+    [InlineData(3.00,  2.99, false)]  // just below threshold
+    [InlineData(3.00,  3.00, true)]   // exactly at threshold
+    [InlineData(3.00,  3.01, true)]   // just above threshold
+    [InlineData(5.00,  4.99, false)]  // custom threshold
+    [InlineData(0.00,  0.01, true)]   // zero threshold disables filter
+    public void MinStockPriceRule_Threshold_CorrectResult(
+        decimal threshold, decimal price, bool expectedPassed)
+    {
+        var rule   = new MinStockPriceRule(minimumPrice: threshold);
+        var alert  = BuildStockAlert(price: price);
+        var result = rule.Evaluate(alert);
+        Assert.Equal(expectedPassed, result.Passed);
     }
 }

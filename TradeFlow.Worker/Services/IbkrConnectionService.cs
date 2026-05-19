@@ -63,14 +63,31 @@ public class IbkrConnectionService : IDisposable
             var reader = new EReader(_client, _signal);
             reader.Start();
 
-            // Background thread that processes messages as they arrive
+            // Background thread that processes messages as they arrive.
+            // The try/catch inside the loop is critical.  Without it, a single bad packet
+            // from an illiquid OTC stock (EndOfStreamException) kills this thread silently,
+            // leaving Gateway in a zombie state that eventually crashes the process entirely.
             var readerThread = new Thread(() =>
             {
                 while (_client.IsConnected())
                 {
-                    _signal.waitForSignal();
-                    reader.processMsgs();
+                    try
+                    {
+                        _signal.waitForSignal();
+                        reader.processMsgs();
+                    }
+                    catch (Exception ex)
+                    {
+                        // Log and continue, one bad packet must not kill the reader thread.
+                        // If the connection is genuinely lost, _client.IsConnected() will
+                        // return false on the next loop iteration and exit cleanly.
+                        _logger.LogError(ex,
+                            "EReader thread caught exception while processing messages. " +
+                            "Continuing — connection state: {Connected}", _client.IsConnected());
+                    }
                 }
+
+                _logger.LogWarning("EReader thread exiting — client no longer connected.");
             })
             {
                 IsBackground = true,
@@ -85,10 +102,6 @@ public class IbkrConnectionService : IDisposable
 
             if (_connected)
             {
-                _logger.LogInformation(
-                    "Connected to IB Gateway at {Host}:{Port} | ClientId: {ClientId}",
-                    _options.Host, _options.Port, _options.ClientId);
-
                 _logger.LogInformation(
                     "Connected to IB Gateway at {Host}:{Port} | ClientId: {ClientId}",
                     _options.Host, _options.Port, _options.ClientId);

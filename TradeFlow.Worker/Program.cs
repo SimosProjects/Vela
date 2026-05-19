@@ -80,6 +80,12 @@ builder.Services.AddSingleton<RiskEngineService>(sp =>
     if (!riskOptions.AllowLotto)
         rules.Insert(1, new NoLottoRule());
 
+    // Add penny stock filter if a minimum price is configured.
+    // Inserted after EntryOnlyRule so non-entry alerts skip it cheaply,
+    // but before the more expensive XScore and trader lookups.
+    if (riskOptions.MinStockPriceDollars > 0)
+        rules.Insert(1, new MinStockPriceRule(riskOptions.MinStockPriceDollars));
+
     return new RiskEngineService(rules);
 });
 

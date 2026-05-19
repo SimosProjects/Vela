@@ -33,7 +33,7 @@ public class IbkrEWrapper : EWrapper
         _logger = logger;
     }
 
-    // Notifies awaiting PlaceOrderAsync calls when an order status changes
+    // Notifies awaiting PlaceOrderAsync calls when an order is confirmed filled.
     public void orderStatus(int orderId, string status, double filled, double remaining,
         double avgFillPrice, int permId, int parentId, double lastFillPrice,
         int clientId, string whyHeld, double mktCapPrice)
@@ -46,7 +46,9 @@ public class IbkrEWrapper : EWrapper
         {
             if (_orderCallbacks.TryGetValue(orderId, out var tcs))
             {
-                if (status is "Filled" or "Submitted" or "PreSubmitted")
+                // Only resolve on an actual fill, not PreSubmitted or Submitted.
+                // This ensures OCA bracket orders are placed against a confirmed position.
+                if (status is "Filled")
                 {
                     tcs.TrySetResult(new OrderState { Status = status });
                     _orderCallbacks.Remove(orderId);
@@ -101,13 +103,30 @@ public class IbkrEWrapper : EWrapper
     }
 
     /// <summary>
-    /// Registers a callback that resolves when IBKR confirms the order status for the given order ID.
+    /// Removes a position callback that timed out before the Gateway responded.
+    /// Prevents orphaned TCS entries accumulating across PositionMonitorService poll cycles.
+    /// </summary>
+    public void UnregisterPositionCallback(string key)
+    {
+        lock (_lock) { _positionCallbacks.Remove(key); }
+    }
+
+    /// <summary>
+    /// Registers a callback that resolves when IBKR confirms the order is filled.
     /// </summary>
     public TaskCompletionSource<OrderState> RegisterOrderCallback(int orderId)
     {
         var tcs = new TaskCompletionSource<OrderState>();
         lock (_lock) { _orderCallbacks[orderId] = tcs; }
         return tcs;
+    }
+
+    /// <summary>
+    /// Removes an order callback that timed out before the fill was confirmed.
+    /// </summary>
+    public void UnregisterOrderCallback(int orderId)
+    {
+        lock (_lock) { _orderCallbacks.Remove(orderId); }
     }
 
     /// <summary>
@@ -118,6 +137,14 @@ public class IbkrEWrapper : EWrapper
         var tcs = new TaskCompletionSource<string>();
         lock (_lock) { _accountCallbacks[reqId] = tcs; }
         return tcs;
+    }
+
+    /// <summary>
+    /// Removes an account summary callback that timed out before Gateway responded.
+    /// </summary>
+    public void UnregisterAccountCallback(int reqId)
+    {
+        lock (_lock) { _accountCallbacks.Remove(reqId); }
     }
 
     public void connectAck() =>

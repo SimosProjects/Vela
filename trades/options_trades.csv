@@ -1,13 +1,1 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike,Expiration,Contracts,Entry Price,Entry Amount,Exit Price,Exit Amount,Status,Result,P&L,P&L %
-2026-05-18,21:17:02,,,PATH,PATH270115C00010000,call,10,Jan 15 2027,3,3.00,900.00,,,Open,Open,,
-
-
-
-2026-05-18,23:34:52,2026-05-19,01:18:56,SPX,SPXW260518P07360000,put,7360,May 18 2026,1,6.70,670.00,0.00,0.00,Closed,XtradesExit,-670.00,-100.00%
-
-
-,,SUMMARY
-,,Total Trades,2
-,,Open,1,Closed,1
-,,Wins,0,Losses,1,Win Rate,0.0%
-,,Total P&L,-670.00
