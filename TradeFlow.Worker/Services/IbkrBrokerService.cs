@@ -15,6 +15,7 @@ public class IbkrBrokerService : IBrokerService
     private readonly ILogger<IbkrBrokerService> _logger;
 
     private int _nextReqId = 1;
+    private int _nextOrderId = 1;
 
     public IbkrBrokerService(
         IbkrConnectionService connection,
@@ -320,7 +321,7 @@ public class IbkrBrokerService : IBrokerService
     private int NextReqId() => Interlocked.Increment(ref _nextReqId);
 
     // Leaves gaps of 10 between parent IDs to accommodate stop, target, and OCA child order IDs
-    private int GetNextOrderId() => Interlocked.Add(ref _nextReqId, 10);
+    private int GetNextOrderId() => Interlocked.Add(ref _nextOrderId, 10);
 
     /// <summary>
     /// Syncs the internal order ID counter from Gateway's next valid order ID.
@@ -329,8 +330,11 @@ public class IbkrBrokerService : IBrokerService
     public void SyncOrderId()
     {
         var gatewayId = _connection.Wrapper.NextValidOrderId;
-        if (gatewayId > _nextReqId)
-            Interlocked.Exchange(ref _nextReqId, gatewayId);
+        var target = Math.Max(gatewayId - 10, 1);
+        Interlocked.Exchange(ref _nextOrderId, target);
+        _logger.LogInformation(
+            "IBKR order ID synced — Gateway: {GatewayId}, next order will use: {Next}",
+            gatewayId, target + 10);
     }
 
     private static Contract BuildContract(TradeOrder order)
