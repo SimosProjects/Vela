@@ -100,7 +100,8 @@ builder.Services.AddSingleton<IbkrBrokerService>();
 // Set IBKR_ENABLED=true in .env to activate IbkrBrokerService.
 // Defaults to NullBrokerService when not set or set to anything else.
 if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
-    builder.Services.AddSingleton<IBrokerService, IbkrBrokerService>();
+    builder.Services.AddSingleton<IBrokerService>(sp =>
+        sp.GetRequiredService<IbkrBrokerService>());
 else
     builder.Services.AddSingleton<IBrokerService, NullBrokerService>();
 
@@ -118,7 +119,7 @@ if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
     connection.Connect();
 
     // Wait for nextValidId callback to fire before syncing — it is async from Gateway
-    await Task.Delay(2000);
+    await Task.Delay(5000);
 
     var broker = host.Services.GetRequiredService<IbkrBrokerService>();
     broker.SyncOrderId();
