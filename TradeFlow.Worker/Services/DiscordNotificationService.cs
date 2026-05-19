@@ -3,33 +3,38 @@ using TradeFlow.Worker.Models;
 namespace TradeFlow.Worker.Services;
 
 /// <summary>
-/// Sends trading alert notifications to a Discord channel via webhook.
-/// Called when an alert is approved by the risk engine, both from
-/// the REST polling service and the SignalR live feed.
+/// Sends trading notifications to Discord via webhooks.
+/// Two channels are used: the main alerts channel for approved risk engine signals,
+/// and the trade execution channel for broker-confirmed fills and closes.
 /// </summary>
 public class DiscordNotificationService
 {
     private readonly HttpClient _httpClient;
     private readonly ILogger<DiscordNotificationService> _logger;
     private readonly string? _webhookUrl;
+    private readonly string? _executionWebhookUrl;
     private readonly string? _criticalWebhookUrl;
 
     public DiscordNotificationService(
         ILogger<DiscordNotificationService> logger)
     {
-        _logger     = logger;
-        _webhookUrl = Environment.GetEnvironmentVariable("DISCORD_WEBHOOK_URL");
-        _criticalWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_CRITICAL_WEBHOOK_URL");
-        _httpClient = new HttpClient();
+        _logger              = logger;
+        _webhookUrl          = Environment.GetEnvironmentVariable("DISCORD_WEBHOOK_URL");
+        _executionWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_TRADE_EXECUTION_WEBHOOK_URL");
+        _criticalWebhookUrl  = Environment.GetEnvironmentVariable("DISCORD_CRITICAL_WEBHOOK_URL");
+        _httpClient          = new HttpClient();
 
         if (string.IsNullOrWhiteSpace(_webhookUrl))
-            _logger.LogWarning(
-                "DISCORD_WEBHOOK_URL not set — notifications disabled.");
+            _logger.LogWarning("DISCORD_WEBHOOK_URL not set — alert notifications disabled.");
+
+        if (string.IsNullOrWhiteSpace(_executionWebhookUrl))
+            _logger.LogWarning("DISCORD_TRADE_EXECUTION_WEBHOOK_URL not set — execution notifications disabled.");
     }
 
     /// <summary>
-    /// Posts an approved alert to Discord as an embedded message.
-    /// Silently skips if webhook URL is not configured.
+    /// Posts an approved alert to the alerts Discord channel.
+    /// Fires when the risk engine approves an alert, before any order is placed.
+    /// Independent of IB Gateway, this is a signal notification, not a trade confirmation.
     /// </summary>
     public async Task NotifyApprovedAlertAsync(
         Alert alert,
@@ -41,7 +46,7 @@ public class DiscordNotificationService
 
         try
         {
-            var embed = BuildEmbed(alert, classification);
+            var embed   = BuildAlertEmbed(alert, classification);
             var payload = new { embeds = new[] { embed } };
 
             var response = await _httpClient.PostAsJsonAsync(
@@ -49,32 +54,27 @@ public class DiscordNotificationService
 
             if (!response.IsSuccessStatusCode)
             {
-                var body = await response.Content
-                    .ReadAsStringAsync(cancellationToken);
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
                 _logger.LogWarning(
-                    "Discord webhook returned {Status}: {Body}",
+                    "Discord alert webhook returned {Status}: {Body}",
                     (int)response.StatusCode, body);
             }
         }
         catch (Exception ex)
         {
-            // Never let notification failure affect the main pipeline
-            _logger.LogWarning(ex,
-                "Failed to send Discord notification — continuing.");
+            _logger.LogWarning(ex, "Failed to send Discord alert notification — continuing.");
         }
     }
 
     /// <summary>
-    /// Posts an order placed notification to Discord showing fill details and bracket prices.
-    /// Silently skips if the webhook URL is not configured.
+    /// Posts an order filled notification to the trade execution Discord channel.
+    /// Only fires after IB Gateway confirms the entry fill, not on alert approval.
     /// </summary>
-    /// <param name="trade">The trade record with fill details.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task NotifyOrderPlacedAsync(
         TradeRecord trade,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(_webhookUrl)) return;
+        if (string.IsNullOrWhiteSpace(_executionWebhookUrl)) return;
 
         try
         {
@@ -84,47 +84,45 @@ public class DiscordNotificationService
 
             var embed = new
             {
-                title  = $"{typeEmoji} ORDER PLACED — {trade.Symbol}",
+                title  = $"{typeEmoji} ORDER FILLED — {trade.Symbol}",
                 color  = trade.Direction == "call" ? 0x2ECC71 : trade.Direction == "put" ? 0xE74C3C : 0x3498DB,
                 fields = new[]
                 {
-                    new { name = "Symbol", value = trade.Symbol, inline = true },
-                    new { name = "Contracts", value = trade.Quantity.ToString(), inline = true },
-                    new { name = "Entry", value = $"${trade.EntryPrice:F2}", inline = true },
-                    new { name = "Stop", value = $"${trade.StopPrice:F2}", inline = true },
-                    new { name = "Target", value = $"${trade.TargetPrice:F2}", inline = true },
-                    new { name = "Amount", value = $"${trade.EntryAmount:F2}", inline = true },
+                    new { name = "Symbol",   value = trade.Symbol,                    inline = true },
+                    new { name = "Qty",      value = trade.Quantity.ToString(),        inline = true },
+                    new { name = "Entry",    value = $"${trade.EntryPrice:F2}",        inline = true },
+                    new { name = "Stop",     value = $"${trade.StopPrice:F2}",         inline = true },
+                    new { name = "Target",   value = $"${trade.TargetPrice:F2}",       inline = true },
+                    new { name = "Amount",   value = $"${trade.EntryAmount:F2}",       inline = true },
                 },
-                footer    = new { text = "TradeFlow Order" },
+                footer    = new { text = "TradeFlow Execution" },
                 timestamp = DateTimeOffset.UtcNow.ToString("o")
             };
 
             var payload = new { embeds = new[] { embed } };
-            await _httpClient.PostAsJsonAsync(_webhookUrl, payload, cancellationToken);
+            await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to send order placed Discord notification.");
+            _logger.LogWarning(ex, "Failed to send order filled Discord notification.");
         }
     }
 
     /// <summary>
-    /// Posts a position closed notification to Discord showing the P&amp;L result.
-    /// Silently skips if the webhook URL is not configured.
+    /// Posts a position closed notification to the trade execution Discord channel.
+    /// Only fires after IB Gateway confirms the exit fill.
     /// </summary>
-    /// <param name="trade">The closed trade record with P&amp;L populated.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
     public async Task NotifyPositionClosedAsync(
         TradeRecord trade,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(_webhookUrl)) return;
+        if (string.IsNullOrWhiteSpace(_executionWebhookUrl)) return;
 
         try
         {
-            var isWin  = trade.PnL >= 0;
-            var emoji  = isWin ? "✅" : "🛑";
-            var color  = isWin ? 0x2ECC71 : 0xE74C3C;
+            var isWin   = trade.PnL >= 0;
+            var emoji   = isWin ? "✅" : "🛑";
+            var color   = isWin ? 0x2ECC71 : 0xE74C3C;
             var pnlSign = trade.PnL >= 0 ? "+" : "";
 
             var embed = new
@@ -133,19 +131,19 @@ public class DiscordNotificationService
                 color,
                 fields = new[]
                 {
-                    new { name = "Symbol",   value = trade.Symbol, inline = true },
-                    new { name = "Outcome",  value = trade.Result.ToString(), inline = true },
-                    new { name = "Exit",     value = $"${trade.ExitPrice:F2}", inline = true },
-                    new { name = "P&L",      value = $"{pnlSign}${trade.PnL:F2}", inline = true },
-                    new { name = "P&L %",    value = $"{pnlSign}{trade.PnLPercent:F2}%", inline = true },
-                    new { name = "Amount",   value = $"${trade.ExitAmount:F2}", inline = true },
+                    new { name = "Symbol",  value = trade.Symbol,                          inline = true },
+                    new { name = "Outcome", value = trade.Result.ToString(),                inline = true },
+                    new { name = "Exit",    value = $"${trade.ExitPrice:F2}",              inline = true },
+                    new { name = "P&L",     value = $"{pnlSign}${trade.PnL:F2}",           inline = true },
+                    new { name = "P&L %",   value = $"{pnlSign}{trade.PnLPercent:F2}%",    inline = true },
+                    new { name = "Amount",  value = $"${trade.ExitAmount:F2}",             inline = true },
                 },
-                footer    = new { text = "TradeFlow Trade Result" },
+                footer    = new { text = "TradeFlow Execution" },
                 timestamp = DateTimeOffset.UtcNow.ToString("o")
             };
 
             var payload = new { embeds = new[] { embed } };
-            await _httpClient.PostAsJsonAsync(_webhookUrl, payload, cancellationToken);
+            await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -154,8 +152,8 @@ public class DiscordNotificationService
     }
 
     /// <summary>
-    /// Posts a critical system alert to the dedicated critical Discord channel.
-    /// Used for infrastructure problems requiring immediate intervention.
+    /// Posts a critical system alert to the critical Discord channel.
+    /// Used for infrastructure events, Gateway connect/disconnect, unrecoverable errors.
     /// </summary>
     public async Task NotifyCriticalAsync(
         string title,
@@ -171,14 +169,13 @@ public class DiscordNotificationService
             {
                 title,
                 description = message,
-                color       = 0xFF0000, // red
+                color       = 0xFF0000,
                 footer      = new { text = "TradeFlow Critical" },
                 timestamp   = DateTimeOffset.UtcNow.ToString("o")
             };
 
             var payload = new { embeds = new[] { embed } };
-            await _httpClient.PostAsJsonAsync(
-                _criticalWebhookUrl, payload, cancellationToken);
+            await _httpClient.PostAsJsonAsync(_criticalWebhookUrl, payload, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -186,17 +183,14 @@ public class DiscordNotificationService
         }
     }
 
-    private static object BuildEmbed(
-        Alert alert,
-        AlertClassification classification)
+    private static object BuildAlertEmbed(Alert alert, AlertClassification classification)
     {
-        // Color: green for calls, red for puts, blue for stock
         var color = classification.Category switch
         {
-            AlertCategory.CallOptionEntry => 0x2ECC71,  // green
-            AlertCategory.PutOptionEntry  => 0xE74C3C,  // red
-            AlertCategory.StockEntry      => 0x3498DB,  // blue
-            _                             => 0x95A5A6   // gray
+            AlertCategory.CallOptionEntry => 0x2ECC71,
+            AlertCategory.PutOptionEntry  => 0xE74C3C,
+            AlertCategory.StockEntry      => 0x3498DB,
+            _                             => 0x95A5A6
         };
 
         var title = classification.Category switch
@@ -212,9 +206,9 @@ public class DiscordNotificationService
 
         var fields = new List<object>
         {
-            Field("Symbol",  alert.Symbol ?? "—",         true),
-            Field("Trader",  alert.UserName ?? "—",        true),
-            Field("xScore",  alert.XScore?.ToString("F0") ?? "—", true),
+            Field("Symbol", alert.Symbol ?? "—",                true),
+            Field("Trader", alert.UserName ?? "—",               true),
+            Field("xScore", alert.XScore?.ToString("F0") ?? "—", true),
         };
 
         if (alert.PricePaid.HasValue)
@@ -239,7 +233,7 @@ public class DiscordNotificationService
             description,
             color,
             fields,
-            footer  = new { text = "TradeFlow Alert System" },
+            footer    = new { text = "TradeFlow Alert" },
             timestamp = DateTimeOffset.UtcNow.ToString("o")
         };
     }

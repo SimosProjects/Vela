@@ -199,4 +199,56 @@ public class TradeGuardTests
         result.Should().NotBeNull();
         result!.Symbol.Should().Be("TSLA");
     }
+
+    [Fact]
+    public async Task CheckAsync_BlocksSameSymbolDifferentInstrument()
+    {
+        // Open a stock position for TSLA
+        var stockOrder = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(),
+            UserName: "TestTrader",
+            Symbol: "TSLA",
+            TradeType: TradeType.Stock,
+            OptionsContractSymbol: null,
+            Direction: null,
+            Strike: null,
+            Expiration: null,
+            Quantity: 18,
+            EstimatedEntryPrice: 165.00m,
+            BudgetUsed: 2_970m,
+            StopPrice: 140.25m,
+            TargetPrice: 214.50m);
+
+        _guard.RegisterOpen(stockOrder, new BrokerOrderResult(
+            OrderId: "ORDER-STK-001",
+            StopOrderId: null,
+            TargetOrderId: null,
+            FillPrice: 165.00m,
+            FillQuantity: 18,
+            FillAmount: 2_970m,
+            Status: OrderStatus.Filled,
+            FilledAt: DateTimeOffset.UtcNow));
+
+        // Now try to open a TSLA call option — same underlying, different instrument
+        var optionOrder = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(),
+            UserName: "TestTrader",
+            Symbol: "TSLA",
+            TradeType: TradeType.Options,
+            OptionsContractSymbol: "TSLA260620C00450000",
+            Direction: "call",
+            Strike: 450,
+            Expiration: "2026-06-20",
+            Quantity: 2,
+            EstimatedEntryPrice: 4.95m,
+            BudgetUsed: 990m,
+            StopPrice: 2.48m,
+            TargetPrice: 14.85m);
+
+        var result = await _guard.CheckAsync(optionOrder);
+
+        result.Should().NotBeNull();
+        result.Should().Contain("TSLA");
+        result.Should().Contain("one instrument per underlying");
+    }
 }

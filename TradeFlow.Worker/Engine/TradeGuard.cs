@@ -1,4 +1,3 @@
-using TradeFlow.Worker.Data;
 using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Engine;
@@ -6,9 +5,10 @@ namespace TradeFlow.Worker.Engine;
 // Enforces trading safety rules before any order is placed.
 // Rules checked in order:
 //   1. Daily trade count < 10
-//   2. Total open exposure + new trade cost <= account balance
-//   3. No duplicate open position for same trader + contract
-//   4. Averaging rules (one average per position, at 50% budget)
+//   2. Symbol already open (any instrument type) — prevents doubled exposure on same underlying
+//   3. Total open exposure + new trade cost <= account balance
+//   4. No duplicate open position for same trader + contract
+//   5. Averaging rules (one average per position, at 50% budget)
 public class TradeGuard
 {
     private const int MaxDailyTrades = 10;
@@ -21,8 +21,8 @@ public class TradeGuard
     private readonly Lock _lock = new();
 
     // Daily trade counter that resets at midnight ET
-    private int     _dailyTradeCount = 0;
-    private DateOnly _countDate      = DateOnly.MinValue;
+    private int      _dailyTradeCount = 0;
+    private DateOnly _countDate       = DateOnly.MinValue;
 
     public TradeGuard(IBrokerService broker, ILogger<TradeGuard> logger)
     {
@@ -45,25 +45,25 @@ public class TradeGuard
 
                 var record = new TradeRecord
                 {
-                    AlertId        = p.AlertId,
-                    OrderId        = p.OrderId,
-                    StopOrderId    = p.StopOrderId,
-                    TargetOrderId  = p.TargetOrderId,
-                    UserName       = p.UserName,
-                    Symbol         = p.Symbol,
-                    TradeType      = tradeType,
+                    AlertId         = p.AlertId,
+                    OrderId         = p.OrderId,
+                    StopOrderId     = p.StopOrderId,
+                    TargetOrderId   = p.TargetOrderId,
+                    UserName        = p.UserName,
+                    Symbol          = p.Symbol,
+                    TradeType       = tradeType,
                     OptionsContract = p.OptionsContract,
-                    Direction      = p.Direction,
-                    Strike         = p.Strike,
-                    Expiration     = p.Expiration,
-                    Quantity       = p.Quantity,
-                    EntryPrice     = p.EntryPrice,
-                    EntryAmount    = p.EntryAmount,
-                    StopPrice      = p.StopPrice,
-                    TargetPrice    = p.TargetPrice,
-                    OpenedAt       = p.OpenedAt,
-                    IsAverage      = p.IsAverage,
-                    HasAveraged    = p.HasAveraged,
+                    Direction       = p.Direction,
+                    Strike          = p.Strike,
+                    Expiration      = p.Expiration,
+                    Quantity        = p.Quantity,
+                    EntryPrice      = p.EntryPrice,
+                    EntryAmount     = p.EntryAmount,
+                    StopPrice       = p.StopPrice,
+                    TargetPrice     = p.TargetPrice,
+                    OpenedAt        = p.OpenedAt,
+                    IsAverage       = p.IsAverage,
+                    HasAveraged     = p.HasAveraged,
                 };
 
                 var matchKey = BuildMatchKey(p.UserName, p.OptionsContract, p.Symbol);
@@ -79,7 +79,9 @@ public class TradeGuard
         }
     }
 
-    // Returns null if the order is allowed, or a reason string if blocked
+    /// <summary>
+    /// Returns null if the order is allowed, or a rejection reason string if blocked.
+    /// </summary>
     public async Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)
     {
         ResetDailyCountIfNewDay();
@@ -88,10 +90,24 @@ public class TradeGuard
         if (_dailyTradeCount >= MaxDailyTrades)
             return $"Daily trade limit reached ({MaxDailyTrades}/day)";
 
-        // 2. Duplicate position check
-        var matchKey = BuildMatchKey(order.UserName, order.OptionsContractSymbol, order.Symbol);
         lock (_lock)
         {
+            // 2. Symbol-level check, block any new entry if the underlying symbol already
+            // has an open position regardless of instrument type. Prevents holding TSLA stock
+            // and a TSLA option simultaneously, which doubles exposure on one underlying.
+            // Averaging is exempt since it is deliberately adding to an existing position.
+            if (!order.IsAverage)
+            {
+                var symbolAlreadyOpen = _openTrades.Values
+                    .Any(t => string.Equals(t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
+
+                if (symbolAlreadyOpen)
+                    return $"Position already open for {order.Symbol} — only one instrument per underlying allowed";
+            }
+
+            // 3. Contract-level duplicate and averaging rules
+            var matchKey = BuildMatchKey(order.UserName, order.OptionsContractSymbol, order.Symbol);
+
             if (_openTrades.TryGetValue(matchKey, out var existing))
             {
                 if (!order.IsAverage)
@@ -106,7 +122,7 @@ public class TradeGuard
             }
         }
 
-        // 3. Exposure check
+        // 4. Exposure check
         var balance   = await _broker.GetAccountBalanceAsync(ct);
         var openValue = await _broker.GetOpenPositionsValueAsync(ct);
         var available = balance - openValue;
@@ -120,7 +136,10 @@ public class TradeGuard
         return null;
     }
 
-    // Called after a successful PlaceOrderAsync, registers the position in memory
+    /// <summary>
+    /// Called after a successful PlaceOrderAsync to register the position in memory
+    /// and persist it to the database.
+    /// </summary>
     public void RegisterOpen(TradeOrder order, BrokerOrderResult result)
     {
         ResetDailyCountIfNewDay();
@@ -168,7 +187,9 @@ public class TradeGuard
         }
     }
 
-    // Called when a position closes, removes from open trades and populates exit data
+    /// <summary>
+    /// Called when a position closes. Removes it from open trades and populates exit data.
+    /// </summary>
     public TradeRecord? RegisterClose(
         string userName,
         string? contractSymbol,
@@ -205,7 +226,7 @@ public class TradeGuard
         }
     }
 
-    // Returns the open TradeRecord for a given position, or null if not found
+    /// <summary>Returns the open TradeRecord for a given position, or null if not found.</summary>
     public TradeRecord? FindOpenTrade(string userName, string? contractSymbol, string symbol)
     {
         var matchKey = BuildMatchKey(userName, contractSymbol, symbol);
@@ -215,7 +236,7 @@ public class TradeGuard
         }
     }
 
-    // Exposes all open trades for PositionMonitorService
+    /// <summary>Exposes all open trades for PositionMonitorService.</summary>
     public IReadOnlyList<TradeRecord> GetOpenTrades()
     {
         lock (_lock)
@@ -231,7 +252,7 @@ public class TradeGuard
         lock (_lock) { return _dailyTradeCount; }
     }
 
-    // Options: userName + OCC symbol. Stocks: userName + ticker symbol
+    // Options: userName + OCC symbol. Stocks: userName + ticker symbol.
     private static string BuildMatchKey(string userName, string? contractSymbol, string symbol) =>
         contractSymbol is not null
             ? $"{userName}::{contractSymbol}"
