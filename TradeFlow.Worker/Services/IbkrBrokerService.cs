@@ -57,6 +57,7 @@ public class IbkrBrokerService : IBrokerService
         catch (OperationCanceledException)
         {
             _logger.LogWarning("IBKR GetAccountBalance timed out");
+            _connection.Wrapper.UnregisterAccountCallback(reqId);
             return 0m;
         }
         finally
@@ -91,6 +92,7 @@ public class IbkrBrokerService : IBrokerService
         catch (OperationCanceledException)
         {
             _logger.LogWarning("IBKR GetCurrentPositionPrice timed out for {Symbol}.", trade.Symbol);
+            _connection.Wrapper.UnregisterPositionCallback(key);
             return 0m;
         }
         finally
@@ -128,6 +130,7 @@ public class IbkrBrokerService : IBrokerService
         catch (OperationCanceledException)
         {
             _logger.LogWarning("IBKR GetOpenPositionsValue timed out");
+            _connection.Wrapper.UnregisterAccountCallback(reqId);
             return 0m;
         }
         finally
@@ -137,7 +140,7 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
-    /// Places a bracket entry order then, once filled, replaces the fixed stop with
+    /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
     /// an OCA group containing a TRAIL stop and LMT target. This gives trailing stop
     /// protection while ensuring the target and stop cancel each other automatically.
     /// </summary>
@@ -148,19 +151,18 @@ public class IbkrBrokerService : IBrokerService
         if (!EnsureConnected())
             return FailedResult("Not connected to IB Gateway");
 
-        var orderId   = GetNextOrderId();
-        var tcs       = _connection.Wrapper.RegisterOrderCallback(orderId);
-        var contract  = BuildContract(order);
+        var orderId    = GetNextOrderId();
+        var tcs        = _connection.Wrapper.RegisterOrderCallback(orderId);
+        var contract   = BuildContract(order);
         var entryOrder = BuildMarketOrder(orderId, order.Quantity, "BUY");
 
         // Place entry with a temporary fixed STP as bracket child so there is always
-        // stop protection in place while we wait for the fill confirmation.
+        // stop protection in place while we wait for the actual fill confirmation.
         var tempStopId    = orderId + 1;
         var tempStopOrder = BuildStopOrder(
             tempStopId, orderId, order.Quantity,
             Math.Round((double)order.StopPrice, 2));
 
-        // Transmit=false on entry and stop, true on stop triggers atomic bracket submission
         entryOrder.Transmit    = false;
         tempStopOrder.Transmit = true;
 
@@ -169,9 +171,11 @@ public class IbkrBrokerService : IBrokerService
             _connection.Client.placeOrder(orderId, contract, entryOrder);
             _connection.Client.placeOrder(tempStopId, contract, tempStopOrder);
 
+            // Use a longer timeout, illiquid stocks (OTC, low-float) can take minutes to fill at market. 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(30));
+            cts.CancelAfter(TimeSpan.FromSeconds(120));
 
+            // This now only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
             var state = await tcs.Task.WaitAsync(cts.Token);
 
             _logger.LogInformation(
@@ -181,15 +185,15 @@ public class IbkrBrokerService : IBrokerService
             // Cancel the temporary fixed stop and replace with OCA trail + limit target.
             // OCA ensures whichever side triggers first automatically cancels the other.
             _connection.Client.cancelOrder(tempStopId);
-            await Task.Delay(300, ct); // brief pause for Gateway to process the cancel
+            await Task.Delay(300, ct);
 
             var ocaGroup      = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
             var trailStopId   = orderId + 2;
             var targetOrderId = orderId + 3;
 
-            var trailPercent  = order.TradeType == TradeType.Options ? 50.0 : 15.0;
-            var trailOrder    = BuildOcaTrailOrder(trailStopId, order.Quantity, trailPercent, ocaGroup);
-            var targetOrder   = BuildOcaLimitOrder(
+            var trailPercent = order.TradeType == TradeType.Options ? 50.0 : 15.0;
+            var trailOrder   = BuildOcaTrailOrder(trailStopId, order.Quantity, trailPercent, ocaGroup);
+            var targetOrder  = BuildOcaLimitOrder(
                 targetOrderId, order.Quantity,
                 Math.Round((double)order.TargetPrice, 2), ocaGroup);
 
@@ -213,9 +217,14 @@ public class IbkrBrokerService : IBrokerService
         catch (OperationCanceledException)
         {
             _logger.LogWarning(
-                "IBKR PlaceOrder timed out for {Symbol}. Order may still be pending.",
+                "IBKR PlaceOrder timed out for {Symbol} after 120s. Order may still be pending in Gateway.",
                 order.Symbol);
 
+            // Clean up the dangling order callback
+            _connection.Wrapper.UnregisterOrderCallback(orderId);
+
+            // Return Pending. BrokerExecutionService will verify via GetOpenPositionsValueAsync
+            // before recording the trade, so no position will be recorded without confirmation
             return new BrokerOrderResult(
                 OrderId:       orderId.ToString(),
                 StopOrderId:   (orderId + 1).ToString(),
@@ -291,6 +300,8 @@ public class IbkrBrokerService : IBrokerService
             _logger.LogWarning(
                 "IBKR ClosePosition timed out for {Symbol}. Close order may still be pending.",
                 trade.Symbol);
+
+            _connection.Wrapper.UnregisterOrderCallback(closeOrderId);
 
             return new BrokerOrderResult(
                 OrderId:       closeOrderId.ToString(),
@@ -420,18 +431,21 @@ public class IbkrBrokerService : IBrokerService
         };
 
     // Standalone trailing stop in an OCA group — no ParentId so IBKR accepts TRAIL type.
-    // OcaGroup ties it to the limit target so whichever triggers first cancels the other.
+    // Both OCA orders use Transmit=true because OCA orders are independent — they are not
+    // a parent-child bracket chain. Setting Transmit=false on the trail previously caused it
+    // to exist only in Gateway's local queue and never reach IBKR's servers, so it was lost
+    // when Gateway crashed. Each OCA order must transmit independently.
     private static Order BuildOcaTrailOrder(int orderId, int quantity, double trailPercent, string ocaGroup) =>
         new()
         {
-            OrderId          = orderId,
-            Action           = "SELL",
-            OrderType        = "TRAIL",
-            TrailingPercent  = trailPercent,
-            TotalQuantity    = quantity,
-            OcaGroup         = ocaGroup,
-            OcaType          = 1, // cancel all remaining orders with block
-            Transmit         = false,
+            OrderId         = orderId,
+            Action          = "SELL",
+            OrderType       = "TRAIL",
+            TrailingPercent = trailPercent,
+            TotalQuantity   = quantity,
+            OcaGroup        = ocaGroup,
+            OcaType         = 1, // cancel all remaining orders with block
+            Transmit        = true, // must be true — OCA orders are not bracket children
         };
 
     // Limit target in the same OCA group as the trail stop.
