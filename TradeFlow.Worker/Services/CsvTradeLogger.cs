@@ -13,6 +13,8 @@ public class CsvTradeLogger
     private readonly string _stocksPath;
     private readonly ILogger<CsvTradeLogger> _logger;
 
+    private static readonly TimeZoneInfo EasternTime = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
     // Separate locks per file, options and stocks writes never block each other
     private readonly SemaphoreSlim _optionsLock = new(1, 1);
     private readonly SemaphoreSlim _stocksLock  = new(1, 1);
@@ -117,7 +119,7 @@ public class CsvTradeLogger
 
     private string BuildOpenRow(TradeRecord t)
     {
-        var et = t.OpenedAt.ToLocalTime();
+        var et = TimeZoneInfo.ConvertTime(t.OpenedAt, EasternTime);
 
         if (t.TradeType == TradeType.Options)
         {
@@ -165,8 +167,10 @@ public class CsvTradeLogger
 
     private string BuildClosedRow(TradeRecord t)
     {
-        var openEt  = t.OpenedAt.ToLocalTime();
-        var closeEt = t.ClosedAt?.ToLocalTime();
+        var openEt  = TimeZoneInfo.ConvertTime(t.OpenedAt, EasternTime);
+        var closeEt = t.ClosedAt.HasValue
+            ? TimeZoneInfo.ConvertTime(t.ClosedAt.Value, EasternTime)
+            : (DateTimeOffset?)null;    
         var pnlSign = t.PnL >= 0 ? "+" : "";
 
         if (t.TradeType == TradeType.Options)
