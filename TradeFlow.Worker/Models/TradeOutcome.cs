@@ -7,5 +7,6 @@ public enum TradeOutcome
     StoppedOut,   // stop loss hit
     XtradesExit,  // closed by Xtrades stc signal
     Averaged,     // averaged into position
-    Cancelled     // order cancelled
+    Cancelled,    // order cancelled
+    Expired       // options contract expired worthless
 }

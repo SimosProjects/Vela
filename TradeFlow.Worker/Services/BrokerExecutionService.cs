@@ -97,7 +97,9 @@ public class BrokerExecutionService
         if (result.Status == OrderStatus.Rejected || result.Status == OrderStatus.Cancelled)
         {
             _logger.LogWarning(
-                "Broker rejected order for {Symbol}, status: {Status}", alert.Symbol, result.Status);
+                "Broker rejected order for {Symbol} — {Reason}",
+                alert.Symbol,
+                result.RejectionReason ?? result.Status.ToString());
             return;
         }
 

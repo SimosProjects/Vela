@@ -1,4 +1,5 @@
 using IBApi;
+using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Services;
 
@@ -10,14 +11,17 @@ public class IbkrEWrapper : EWrapper
 {
     private readonly ILogger<IbkrEWrapper> _logger;
 
-    // Order status callbacks keyed by orderId
-    private readonly Dictionary<int, TaskCompletionSource<OrderState>> _orderCallbacks = new();
+    // Order callbacks keyed by orderId — carries fill status and average fill price
+    private readonly Dictionary<int, TaskCompletionSource<OrderFill>> _orderCallbacks = new();
 
     // Account summary callbacks keyed by reqId
     private readonly Dictionary<int, TaskCompletionSource<string>> _accountCallbacks = new();
 
     // Position callbacks keyed by symbol match key
     private readonly Dictionary<string, TaskCompletionSource<decimal>> _positionCallbacks = new();
+    
+    // Rejection reasons keyed by orderId, populated when error code 201 is received
+    private readonly Dictionary<int, string> _rejectionReasons = new();
 
     private Action? _onConnectionClosed;
 
@@ -33,7 +37,7 @@ public class IbkrEWrapper : EWrapper
         _logger = logger;
     }
 
-    // Notifies awaiting PlaceOrderAsync calls when an order is confirmed filled.
+    // Notifies awaiting order calls when an order is confirmed filled.
     public void orderStatus(int orderId, string status, double filled, double remaining,
         double avgFillPrice, int permId, int parentId, double lastFillPrice,
         int clientId, string whyHeld, double mktCapPrice)
@@ -50,7 +54,7 @@ public class IbkrEWrapper : EWrapper
                 // This ensures OCA bracket orders are placed against a confirmed position.
                 if (status is "Filled")
                 {
-                    tcs.TrySetResult(new OrderState { Status = status });
+                    tcs.TrySetResult(new OrderFill(status, (decimal)avgFillPrice));
                     _orderCallbacks.Remove(orderId);
                 }
             }
@@ -113,10 +117,11 @@ public class IbkrEWrapper : EWrapper
 
     /// <summary>
     /// Registers a callback that resolves when IBKR confirms the order is filled.
+    /// Returns an <see cref="OrderFill"/> carrying both status and average fill price.
     /// </summary>
-    public TaskCompletionSource<OrderState> RegisterOrderCallback(int orderId)
+    public TaskCompletionSource<OrderFill> RegisterOrderCallback(int orderId)
     {
-        var tcs = new TaskCompletionSource<OrderState>();
+        var tcs = new TaskCompletionSource<OrderFill>();
         lock (_lock) { _orderCallbacks[orderId] = tcs; }
         return tcs;
     }
@@ -167,6 +172,7 @@ public class IbkrEWrapper : EWrapper
         _onConnectionClosed?.Invoke();
     }
 
+    /// <summary>Sets the callback invoked when IB Gateway drops the connection.</summary>
     public void SetConnectionClosedCallback(Action onConnectionClosed) =>
         _onConnectionClosed = onConnectionClosed;
 
@@ -178,11 +184,39 @@ public class IbkrEWrapper : EWrapper
 
     public void error(int id, int errorCode, string errorMsg)
     {
-        // 2000-2999 are informational warnings not errors
-        if (errorCode >= 2000 && errorCode < 3000)
+        // 2000-2999 are informational warnings; 10349 is an order preset notice, not an error
+        if (errorCode >= 2000 && errorCode < 3000 || errorCode == 10349)
+        {
             _logger.LogDebug("IBKR Info [{Code}]: {Message}", errorCode, errorMsg);
+        }
+        else if (errorCode == 201)
+        {
+            // Order rejected, store reason so IbkrBrokerService can surface it
+            lock (_lock) { _rejectionReasons[id] = errorMsg; }
+            _logger.LogWarning("IBKR Order rejected [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
+        }
         else
+        {
             _logger.LogError("IBKR Error [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
+        }
+    }
+
+    /// <summary>
+    /// Returns the rejection reason for the given order ID if one was received, then removes it.
+    /// Returns null if no rejection was recorded for this order.
+    /// </summary>
+    public string? TakeRejectionReason(int orderId)
+    {
+        lock (_lock)
+        {
+            if (_rejectionReasons.TryGetValue(orderId, out var reason))
+            {
+                _rejectionReasons.Remove(orderId);
+                return reason;
+            }
+ 
+            return null;
+        }
     }
 
     // Required interface stubs

@@ -41,9 +41,9 @@ public class MarketSchedulerService : BackgroundService
     // Fixed US market holidays that fall on the same date every year
     private static readonly HashSet<(int Month, int Day)> FixedHolidays =
     [
-        (1,  1),  // New Year's Day
-        (6,  19), // Juneteenth
-        (7,  4),  // Independence Day
+        (1, 1),  // New Year's Day
+        (6, 19), // Juneteenth
+        (7, 4),  // Independence Day
         (12, 25), // Christmas Day
     ];
 
@@ -63,7 +63,7 @@ public class MarketSchedulerService : BackgroundService
         _config = config;
         _httpClient = new HttpClient();
 
-        _healthWebhookUrl  = Environment.GetEnvironmentVariable("DISCORD_HEALTH_WEBHOOK_URL");
+        _healthWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_HEALTH_WEBHOOK_URL");
         _summaryWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_SUMMARY_WEBHOOK_URL");
     }
 
@@ -72,14 +72,14 @@ public class MarketSchedulerService : BackgroundService
         _logger.LogInformation("Market scheduler service started.");
 
         // Track which tasks have already fired today to avoid duplicate triggers
-        var firedToday      = new HashSet<string>();
+        var firedToday = new HashSet<string>();
         var lastCheckedDate = DateOnly.MinValue;
 
         while (!stoppingToken.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
-            var et    = GetEasternTime();
+            var et = GetEasternTime();
             var today = DateOnly.FromDateTime(et.DateTime);
 
             // Reset fired tasks at the start of each new ET day
@@ -170,7 +170,7 @@ public class MarketSchedulerService : BackgroundService
             string fileName, arguments;
             if (File.Exists(analyticsDll))
             {
-                fileName  = "dotnet";
+                fileName = "dotnet";
                 arguments = $"{analyticsDll} --report {reportType} --output \"{reportsDir}\"";
             }
             else
@@ -181,7 +181,7 @@ public class MarketSchedulerService : BackgroundService
                         "TradeFlow.Analytics",
                         "TradeFlow.Analytics.csproj"));
 
-                fileName  = "dotnet";
+                fileName = "dotnet";
                 arguments = $"run --project \"{projectPath}\" -- --report {reportType} --output \"{reportsDir}\"";
             }
 
@@ -189,11 +189,11 @@ public class MarketSchedulerService : BackgroundService
             {
                 StartInfo = new System.Diagnostics.ProcessStartInfo
                 {
-                    FileName               = fileName,
-                    Arguments              = arguments,
+                    FileName = fileName,
+                    Arguments = arguments,
                     RedirectStandardOutput = true,
-                    RedirectStandardError  = true,
-                    UseShellExecute        = false,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
                 }
             };
 
@@ -228,27 +228,27 @@ public class MarketSchedulerService : BackgroundService
 
         _logger.LogInformation("Market scheduler firing health check.");
 
-        var workerStatus   = "✅ Running";
-        var ibkrStatus     = await CheckIbkrAsync(ct);
+        var workerStatus = "✅ Running";
+        var ibkrStatus = await CheckIbkrAsync(ct);
         var postgresStatus = await CheckPostgresAsync(ct);
-        var xtradesStatus  = await CheckXtradesAsync(ct);
-        var signalrStatus  = "✅ Connected";
+        var xtradesStatus = await CheckXtradesAsync(ct);
+        var signalrStatus = "✅ Connected";
 
         var fields = new[]
         {
-            Field("Worker",       workerStatus),
-            Field("IB Gateway",   ibkrStatus),
-            Field("PostgreSQL",   postgresStatus),
+            Field("Worker", workerStatus),
+            Field("IB Gateway", ibkrStatus),
+            Field("PostgreSQL", postgresStatus),
             Field("Xtrades REST", xtradesStatus),
-            Field("SignalR",      signalrStatus),
+            Field("SignalR", signalrStatus),
         };
 
         var embed = new
         {
-            title     = "🔍 SYSTEM HEALTH CHECK",
-            color     = 0x3498DB,
+            title = "🔍 SYSTEM HEALTH CHECK",
+            color = 0x3498DB,
             fields,
-            footer    = new { text = "TradeFlow Health" },
+            footer = new { text = "TradeFlow Health" },
             timestamp = DateTimeOffset.UtcNow.ToString("o")
         };
 
@@ -266,7 +266,7 @@ public class MarketSchedulerService : BackgroundService
         _logger.LogInformation("Market scheduler firing position summary.");
 
         var openTrades = _guard.GetOpenTrades();
-        var balance    = await _broker.GetAccountBalanceAsync(ct);
+        var balance = await _broker.GetAccountBalanceAsync(ct);
         var dailyCount = _guard.GetDailyTradeCount();
 
         var accountSummary =
@@ -292,7 +292,7 @@ public class MarketSchedulerService : BackgroundService
             : "No closed trades today";
 
         var dailyPnl = closedToday.Sum(t => t.PnL ?? 0);
-        var pnlSign  = dailyPnl >= 0 ? "+" : "";
+        var pnlSign = dailyPnl >= 0 ? "+" : "";
 
         var fields = new[]
         {
@@ -304,10 +304,10 @@ public class MarketSchedulerService : BackgroundService
 
         var embed = new
         {
-            title     = "📊 POSITION SUMMARY",
-            color     = 0x9B59B6,
+            title = "📊 POSITION SUMMARY",
+            color = 0x9B59B6,
             fields,
-            footer    = new { text = "TradeFlow Summary" },
+            footer = new { text = "TradeFlow Summary" },
             timestamp = DateTimeOffset.UtcNow.ToString("o")
         };
 
@@ -375,7 +375,7 @@ public class MarketSchedulerService : BackgroundService
 
         tradesDir = Path.GetFullPath(tradesDir);
 
-        var today  = DateOnly.FromDateTime(GetEasternTime().DateTime);
+        var today = DateOnly.FromDateTime(GetEasternTime().DateTime);
         var trades = new List<TradeRecord>();
 
         trades.AddRange(ReadClosedTodayFromFile(
@@ -394,7 +394,7 @@ public class MarketSchedulerService : BackgroundService
             return [];
 
         var trades = new List<TradeRecord>();
-        var lines  = File.ReadAllLines(path);
+        var lines = File.ReadAllLines(path);
 
         foreach (var line in lines.Skip(1))
         {
@@ -403,7 +403,7 @@ public class MarketSchedulerService : BackgroundService
 
             var cols = line.Split(',');
 
-            var statusIndex     = tradeType == TradeType.Options ? 14 : 10;
+            var statusIndex = tradeType == TradeType.Options ? 14 : 10;
             var closedDateIndex = 2;
 
             if (cols.Length <= statusIndex) continue;
@@ -411,12 +411,12 @@ public class MarketSchedulerService : BackgroundService
             if (!DateOnly.TryParse(cols[closedDateIndex], out var closedDate)) continue;
             if (closedDate != today) continue;
 
-            var entryPriceIndex = tradeType == TradeType.Options ? 10 : 6;
-            var exitPriceIndex  = tradeType == TradeType.Options ? 12 : 8;
-            var pnlIndex        = tradeType == TradeType.Options ? 16 : 12;
-            var pnlPctIndex     = tradeType == TradeType.Options ? 17 : 13;
-            var resultIndex     = tradeType == TradeType.Options ? 15 : 11;
-            var qtyIndex        = tradeType == TradeType.Options ? 9  : 5;
+            var entryPriceIndex = tradeType == TradeType.Options ? 11 : 7;
+            var exitPriceIndex  = tradeType == TradeType.Options ? 13 : 9;
+            var pnlIndex = tradeType == TradeType.Options ? 17 : 13;
+            var pnlPctIndex = tradeType == TradeType.Options ? 18 : 14;
+            var resultIndex = tradeType == TradeType.Options ? 16 : 12;
+            var qtyIndex = tradeType == TradeType.Options ? 10 : 6;
 
             decimal.TryParse(cols[entryPriceIndex], System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var entryPrice);
@@ -432,28 +432,28 @@ public class MarketSchedulerService : BackgroundService
 
             trades.Add(new TradeRecord
             {
-                AlertId       = string.Empty,
-                OrderId       = string.Empty,
-                StopOrderId   = null,
+                AlertId = string.Empty,
+                OrderId = string.Empty,
+                StopOrderId = null,
                 TargetOrderId = null,
-                UserName      = string.Empty,
-                Symbol        = cols[4],
-                TradeType     = tradeType,
+                UserName = cols[0],
+                Symbol = cols[5],
+                TradeType = tradeType,
                 OptionsContract = null,
-                Direction     = null,
-                Strike        = null,
-                Expiration    = null,
-                Quantity      = qty,
-                EntryPrice    = entryPrice,
-                EntryAmount   = 0,
-                StopPrice     = 0,
-                TargetPrice   = 0,
-                ExitPrice     = exitPrice,
-                PnL           = pnl,
-                PnLPercent    = pnlPct,
-                Status        = TradeStatus.Closed,
-                Result        = result,
-                OpenedAt      = DateTimeOffset.UtcNow,
+                Direction = null,
+                Strike = null,
+                Expiration = null,
+                Quantity = qty,
+                EntryPrice = entryPrice,
+                EntryAmount = 0,
+                StopPrice = 0,
+                TargetPrice = 0,
+                ExitPrice = exitPrice,
+                PnL = pnl,
+                PnLPercent = pnlPct,
+                Status = TradeStatus.Closed,
+                Result = result,
+                OpenedAt = DateTimeOffset.UtcNow,
             });
         }
 
@@ -464,7 +464,7 @@ public class MarketSchedulerService : BackgroundService
     // Checks if tomorrow (or any day until month end) is still a trading day.
     private static bool IsLastTradingDayOfMonth(DateTimeOffset et)
     {
-        var today     = DateOnly.FromDateTime(et.DateTime);
+        var today = DateOnly.FromDateTime(et.DateTime);
         var lastOfMonth = new DateOnly(today.Year, today.Month,
             DateTime.DaysInMonth(today.Year, today.Month));
 

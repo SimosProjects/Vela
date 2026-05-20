@@ -47,7 +47,7 @@ public class IbkrBrokerService : IBrokerService
 
             if (decimal.TryParse(valueStr, out var balance))
             {
-                _logger.LogInformation("IBKR account balance: ${Balance:F2}", balance);
+                _logger.LogDebug("IBKR account balance: ${Balance:F2}", balance);
                 return balance;
             }
 
@@ -121,7 +121,7 @@ public class IbkrBrokerService : IBrokerService
 
             if (decimal.TryParse(valueStr, out var value))
             {
-                _logger.LogInformation("IBKR open positions value: ${Value:F2}", value);
+                _logger.LogDebug("IBKR open positions value: ${Value:F2}", value);
                 return value;
             }
 
@@ -219,26 +219,43 @@ public class IbkrBrokerService : IBrokerService
             _logger.LogWarning(
                 "IBKR PlaceOrder timed out for {Symbol} after 120s. Order may still be pending in Gateway.",
                 order.Symbol);
-
-            // Clean up the dangling order callback
+ 
             _connection.Wrapper.UnregisterOrderCallback(orderId);
-
-            // Return Pending. BrokerExecutionService will verify via GetOpenPositionsValueAsync
-            // before recording the trade, so no position will be recorded without confirmation
+ 
+            // A timeout after a 201 rejection means the order was rejected, not pending
+            var rejectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
+            if (rejectionReason is not null)
+            {
+                _logger.LogWarning(
+                    "IBKR order rejected for {Symbol}: {Reason}", order.Symbol, rejectionReason);
+ 
+                return new BrokerOrderResult(
+                    OrderId: orderId.ToString(),
+                    StopOrderId: null,
+                    TargetOrderId: null,
+                    FillPrice: 0m,
+                    FillQuantity: 0,
+                    FillAmount: 0m,
+                    Status: OrderStatus.Rejected,
+                    FilledAt: DateTimeOffset.UtcNow,
+                    RejectionReason: rejectionReason);
+            }
+ 
             return new BrokerOrderResult(
-                OrderId:       orderId.ToString(),
-                StopOrderId:   (orderId + 1).ToString(),
+                OrderId: orderId.ToString(),
+                StopOrderId: (orderId + 1).ToString(),
                 TargetOrderId: (orderId + 2).ToString(),
-                FillPrice:     order.EstimatedEntryPrice,
-                FillQuantity:  order.Quantity,
-                FillAmount:    order.BudgetUsed,
-                Status:        OrderStatus.Pending,
-                FilledAt:      DateTimeOffset.UtcNow);
+                FillPrice: order.EstimatedEntryPrice,
+                FillQuantity: order.Quantity,
+                FillAmount: order.BudgetUsed,
+                Status: OrderStatus.Pending,
+                FilledAt: DateTimeOffset.UtcNow);
         }
     }
 
     /// <summary>
     /// Cancels any active stop and target orders then places a market close order.
+    /// Uses the actual average fill price from the IBKR callback for accurate P&amp;L calculation.
     /// </summary>
     public async Task<BrokerOrderResult> ClosePositionAsync(
         TradeRecord trade,
@@ -276,22 +293,21 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
 
-            var state = await tcs.Task.WaitAsync(cts.Token);
+            var fill       = await tcs.Task.WaitAsync(cts.Token);
+            var fillPrice  = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
+            var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
 
             _logger.LogInformation(
-                "IBKR position closed. OrderId: {OrderId} Symbol: {Symbol} Status: {Status}",
-                closeOrderId, trade.Symbol, state.Status);
-
-            var estimatedFill = trade.ExitPrice ?? trade.EntryPrice;
-            var multiplier    = trade.TradeType == TradeType.Options ? 100m : 1m;
+                "IBKR position closed. OrderId: {OrderId} Symbol: {Symbol} Status: {Status} FillPrice: {Price:F2}",
+                closeOrderId, trade.Symbol, fill.Status, fillPrice);
 
             return new BrokerOrderResult(
                 OrderId:       closeOrderId.ToString(),
                 StopOrderId:   null,
                 TargetOrderId: null,
-                FillPrice:     estimatedFill,
+                FillPrice:     fillPrice,
                 FillQuantity:  trade.Quantity,
-                FillAmount:    estimatedFill * trade.Quantity * multiplier,
+                FillAmount:    fillPrice * trade.Quantity * multiplier,
                 Status:        OrderStatus.Filled,
                 FilledAt:      DateTimeOffset.UtcNow);
         }

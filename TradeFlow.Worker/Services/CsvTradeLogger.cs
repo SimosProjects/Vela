@@ -18,13 +18,13 @@ public class CsvTradeLogger
     private readonly SemaphoreSlim _stocksLock  = new(1, 1);
 
     private static readonly string OptionsHeader =
-        "Date Opened,Time Opened,Date Closed,Time Closed," +
+        "UserName,Date Opened,Time Opened,Date Closed,Time Closed," +
         "Symbol,Contract,Direction,Strike,Expiration," +
         "Contracts,Entry Price,Entry Amount," +
         "Exit Price,Exit Amount,Status,Result,P&L,P&L %";
-
+ 
     private static readonly string StocksHeader =
-        "Date Opened,Time Opened,Date Closed,Time Closed," +
+        "UserName,Date Opened,Time Opened,Date Closed,Time Closed," +
         "Symbol,Shares,Entry Price,Entry Amount," +
         "Exit Price,Exit Amount,Status,Result,P&L,P&L %";
 
@@ -117,10 +117,11 @@ public class CsvTradeLogger
     private string BuildOpenRow(TradeRecord t)
     {
         var et = t.OpenedAt.ToLocalTime();
-
+ 
         if (t.TradeType == TradeType.Options)
         {
             return string.Join(",",
+                t.UserName ?? "",
                 et.ToString("yyyy-MM-dd"),
                 et.ToString("HH:mm:ss"),
                 "",           // Date Closed
@@ -143,6 +144,7 @@ public class CsvTradeLogger
         else
         {
             return string.Join(",",
+                t.UserName ?? "",
                 et.ToString("yyyy-MM-dd"),
                 et.ToString("HH:mm:ss"),
                 "",
@@ -165,10 +167,11 @@ public class CsvTradeLogger
         var openEt  = t.OpenedAt.ToLocalTime();
         var closeEt = t.ClosedAt?.ToLocalTime();
         var pnlSign = t.PnL >= 0 ? "+" : "";
-
+ 
         if (t.TradeType == TradeType.Options)
         {
             return string.Join(",",
+                t.UserName ?? "",
                 openEt.ToString("yyyy-MM-dd"),
                 openEt.ToString("HH:mm:ss"),
                 closeEt?.ToString("yyyy-MM-dd") ?? "",
@@ -191,6 +194,7 @@ public class CsvTradeLogger
         else
         {
             return string.Join(",",
+                t.UserName ?? "",
                 openEt.ToString("yyyy-MM-dd"),
                 openEt.ToString("HH:mm:ss"),
                 closeEt?.ToString("yyyy-MM-dd") ?? "",
@@ -239,10 +243,10 @@ public class CsvTradeLogger
             // Since OrderId isn't a CSV column we match by symbol + entry price + open date
             // as a composite key (OrderId is stored in memory in TradeGuard, not in CSV)
             var cols = lines[i].Split(',');
-            if (cols.Length > 4 &&
-                cols[4] == trade.Symbol &&
-                cols[6] == (trade.TradeType == TradeType.Options ? trade.Direction ?? "" : trade.Quantity.ToString()) &&
-                string.IsNullOrEmpty(cols[12])) // Exit Price column is empty = still open
+            if (cols.Length > 5 &&
+                cols[5] == trade.Symbol &&
+                cols[7] == (trade.TradeType == TradeType.Options ? trade.Direction ?? "" : trade.Quantity.ToString()) &&
+                string.IsNullOrEmpty(cols[13])) // Exit Price column is empty = still open
             {
                 lines[i] = BuildClosedRow(trade);
                 updated = true;

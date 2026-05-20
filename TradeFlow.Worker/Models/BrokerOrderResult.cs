@@ -11,5 +11,6 @@ public record BrokerOrderResult(
     int FillQuantity,
     decimal FillAmount,
     OrderStatus Status,
-    DateTimeOffset FilledAt
+    DateTimeOffset FilledAt,
+    string? RejectionReason = null
 );

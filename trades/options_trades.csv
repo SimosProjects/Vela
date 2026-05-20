@@ -1,8 +1,0 @@
-Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike,Expiration,Contracts,Entry Price,Entry Amount,Exit Price,Exit Amount,Status,Result,P&L,P&L %
-2026-05-19,16:03:57,2026-05-19,16:03:57,TSLA,TSLA260620C00450000,call,450,Jun 20 2026,2,4.95,990.00,9.90,1980.00,Closed,XtradesExit,+990.00,+100.00%
-
-,,SUMMARY
-,,Total Trades,1
-,,Open,0,Closed,1
-,,Wins,1,Losses,0,Win Rate,100.0%
-,,Total P&L,+990.00

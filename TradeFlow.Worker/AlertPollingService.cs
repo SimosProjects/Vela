@@ -82,7 +82,7 @@ public class AlertPollingService : BackgroundService
             var alerts = await _client.GetAlertsAsync(stoppingToken);
 
             _metrics.AlertsFetched.Add(alerts.Count);
-            _logger.LogInformation("Fetched {Count} alerts from API.", alerts.Count);
+            _logger.LogDebug("Fetched {Count} alerts from API.", alerts.Count);
 
             // Single batch query then filter in memory, more efficient than one query per alert
             var incomingIds = alerts
@@ -97,7 +97,7 @@ public class AlertPollingService : BackgroundService
                 .ToList();
 
             _metrics.AlertsNew.Add(newAlerts.Count);
-            _logger.LogInformation("New alerts after deduplication: {New} / {Total}", newAlerts.Count, alerts.Count);
+            _logger.LogDebug("New alerts after deduplication: {New} / {Total}", newAlerts.Count, alerts.Count);
 
             if (newAlerts.Count == 0)
                 return;
