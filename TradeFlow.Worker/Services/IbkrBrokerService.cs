@@ -204,15 +204,18 @@ public class IbkrBrokerService : IBrokerService
                 "IBKR OCA group placed — Trail: {TrailPct}% | Target: ${Target:F2} | OCA: {Oca}",
                 trailPercent, order.TargetPrice, ocaGroup);
 
+            var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
+            var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+
             return new BrokerOrderResult(
-                OrderId:       orderId.ToString(),
-                StopOrderId:   trailStopId.ToString(),
+                OrderId: orderId.ToString(),
+                StopOrderId: trailStopId.ToString(),
                 TargetOrderId: targetOrderId.ToString(),
-                FillPrice:     order.EstimatedEntryPrice,
-                FillQuantity:  order.Quantity,
-                FillAmount:    order.BudgetUsed,
-                Status:        OrderStatus.Filled,
-                FilledAt:      DateTimeOffset.UtcNow);
+                FillPrice: fillPrice,
+                FillQuantity: order.Quantity,
+                FillAmount: fillPrice * order.Quantity * multiplier,
+                Status: OrderStatus.Filled,
+                FilledAt: DateTimeOffset.UtcNow);
         }
         catch (OperationCanceledException)
         {
@@ -268,14 +271,14 @@ public class IbkrBrokerService : IBrokerService
         if (trade.StopOrderId is not null && int.TryParse(trade.StopOrderId, out var stopId))
         {
             _connection.Client.cancelOrder(stopId);
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "IBKR cancelled stop order {OrderId} for {Symbol}", stopId, trade.Symbol);
         }
 
         if (trade.TargetOrderId is not null && int.TryParse(trade.TargetOrderId, out var targetId))
         {
             _connection.Client.cancelOrder(targetId);
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "IBKR cancelled target order {OrderId} for {Symbol}", targetId, trade.Symbol);
         }
 

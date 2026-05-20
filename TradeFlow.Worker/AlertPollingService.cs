@@ -118,8 +118,12 @@ public class AlertPollingService : BackgroundService
             _metrics.AlertsApproved.Add(approved.Count);
             _metrics.AlertsRejected.Add(rejected.Count);
 
-            _logger.LogInformation("Pipeline complete. Approved: {Approved}, Rejected: {Rejected}",
-                approved.Count, rejected.Count);
+            // Only log pipeline summary when there is something approved, otherwise too noisy
+            if (approved.Count > 0)
+                _logger.LogInformation("Pipeline complete. Approved: {Approved}, Rejected: {Rejected}",
+                    approved.Count, rejected.Count);
+            else
+                _logger.LogDebug("Pipeline complete. Approved: 0, Rejected: {Rejected}", rejected.Count);
 
             foreach (var (alert, classification, _) in approved)
             {

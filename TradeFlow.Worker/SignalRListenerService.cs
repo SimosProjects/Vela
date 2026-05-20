@@ -178,7 +178,7 @@ public class SignalRListenerService : BackgroundService
         var token = root.GetProperty("accessToken").GetString()
             ?? throw new InvalidOperationException("Negotiate response missing 'accessToken'");
 
-        _logger.LogInformation("SignalR negotiate succeeded. Hub URL: {Url}", url);
+        _logger.LogInformation("SignalR negotiate succeeded.");
 
         return (url, token);
     }
@@ -206,7 +206,7 @@ public class SignalRListenerService : BackgroundService
         JsonElement alertElement,
         CancellationToken stoppingToken)
     {
-        _logger.LogInformation("Processing SignalR alert: {Raw}", alertElement.GetRawText());
+        _logger.LogDebug("Processing SignalR alert: {Raw}", alertElement.GetRawText());
 
         // Payload arrives as a JSON array, take the first element
         var element = alertElement.ValueKind == JsonValueKind.Array
@@ -233,12 +233,28 @@ public class SignalRListenerService : BackgroundService
         var classification = AlertClassifier.Classify(normalized);
         var riskResult = _riskEngine.Evaluate(normalized);
 
-        _logger.LogInformation(
-            "SignalR alert [{Category}] {Symbol} by {Trader} {Result}",
-            classification.Category,
-            normalized.Symbol,
-            normalized.UserName,
-            riskResult.Approved ? "APPROVED" : $"REJECTED: {riskResult.Reason}");
+        // Side rejections (stc/btc) are expected, exits are not entries.
+        // Only log at Information for genuine risk failures worth reviewing.
+        var isSideRejection = !riskResult.Approved &&
+            (riskResult.Reason?.Contains("stc", StringComparison.OrdinalIgnoreCase) == true ||
+             riskResult.Reason?.Contains("btc", StringComparison.OrdinalIgnoreCase) == true ||
+             riskResult.Reason?.Contains("BTO entry", StringComparison.OrdinalIgnoreCase) == true);
+
+        if (isSideRejection)
+        {
+            _logger.LogDebug(
+                "SignalR alert [{Category}] {Symbol} by {Trader} REJECTED: {Reason}",
+                classification.Category, normalized.Symbol, normalized.UserName, riskResult.Reason);
+        }
+        else
+        {
+            _logger.LogInformation(
+                "SignalR alert [{Category}] {Symbol} by {Trader} {Result}",
+                classification.Category,
+                normalized.Symbol,
+                normalized.UserName,
+                riskResult.Approved ? "APPROVED" : $"REJECTED: {riskResult.Reason}");
+        }
 
         if (riskResult.Approved)
         {
