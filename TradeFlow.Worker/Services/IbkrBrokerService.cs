@@ -239,6 +239,7 @@ public class IbkrBrokerService : IBrokerService
 
     /// <summary>
     /// Cancels any active stop and target orders then places a market close order.
+    /// Uses the actual average fill price from the IBKR callback for accurate P&amp;L calculation.
     /// </summary>
     public async Task<BrokerOrderResult> ClosePositionAsync(
         TradeRecord trade,
@@ -276,22 +277,21 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
 
-            var state = await tcs.Task.WaitAsync(cts.Token);
+            var fill       = await tcs.Task.WaitAsync(cts.Token);
+            var fillPrice  = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
+            var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
 
             _logger.LogInformation(
-                "IBKR position closed. OrderId: {OrderId} Symbol: {Symbol} Status: {Status}",
-                closeOrderId, trade.Symbol, state.Status);
-
-            var estimatedFill = trade.ExitPrice ?? trade.EntryPrice;
-            var multiplier    = trade.TradeType == TradeType.Options ? 100m : 1m;
+                "IBKR position closed. OrderId: {OrderId} Symbol: {Symbol} Status: {Status} FillPrice: {Price:F2}",
+                closeOrderId, trade.Symbol, fill.Status, fillPrice);
 
             return new BrokerOrderResult(
                 OrderId:       closeOrderId.ToString(),
                 StopOrderId:   null,
                 TargetOrderId: null,
-                FillPrice:     estimatedFill,
+                FillPrice:     fillPrice,
                 FillQuantity:  trade.Quantity,
-                FillAmount:    estimatedFill * trade.Quantity * multiplier,
+                FillAmount:    fillPrice * trade.Quantity * multiplier,
                 Status:        OrderStatus.Filled,
                 FilledAt:      DateTimeOffset.UtcNow);
         }

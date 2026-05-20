@@ -1,4 +1,5 @@
 using IBApi;
+using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Services;
 
@@ -10,8 +11,8 @@ public class IbkrEWrapper : EWrapper
 {
     private readonly ILogger<IbkrEWrapper> _logger;
 
-    // Order status callbacks keyed by orderId
-    private readonly Dictionary<int, TaskCompletionSource<OrderState>> _orderCallbacks = new();
+    // Order callbacks keyed by orderId — carries fill status and average fill price
+    private readonly Dictionary<int, TaskCompletionSource<OrderFill>> _orderCallbacks = new();
 
     // Account summary callbacks keyed by reqId
     private readonly Dictionary<int, TaskCompletionSource<string>> _accountCallbacks = new();
@@ -33,7 +34,7 @@ public class IbkrEWrapper : EWrapper
         _logger = logger;
     }
 
-    // Notifies awaiting PlaceOrderAsync calls when an order is confirmed filled.
+    // Notifies awaiting order calls when an order is confirmed filled.
     public void orderStatus(int orderId, string status, double filled, double remaining,
         double avgFillPrice, int permId, int parentId, double lastFillPrice,
         int clientId, string whyHeld, double mktCapPrice)
@@ -50,7 +51,7 @@ public class IbkrEWrapper : EWrapper
                 // This ensures OCA bracket orders are placed against a confirmed position.
                 if (status is "Filled")
                 {
-                    tcs.TrySetResult(new OrderState { Status = status });
+                    tcs.TrySetResult(new OrderFill(status, (decimal)avgFillPrice));
                     _orderCallbacks.Remove(orderId);
                 }
             }
@@ -113,10 +114,11 @@ public class IbkrEWrapper : EWrapper
 
     /// <summary>
     /// Registers a callback that resolves when IBKR confirms the order is filled.
+    /// Returns an <see cref="OrderFill"/> carrying both status and average fill price.
     /// </summary>
-    public TaskCompletionSource<OrderState> RegisterOrderCallback(int orderId)
+    public TaskCompletionSource<OrderFill> RegisterOrderCallback(int orderId)
     {
-        var tcs = new TaskCompletionSource<OrderState>();
+        var tcs = new TaskCompletionSource<OrderFill>();
         lock (_lock) { _orderCallbacks[orderId] = tcs; }
         return tcs;
     }
@@ -167,6 +169,7 @@ public class IbkrEWrapper : EWrapper
         _onConnectionClosed?.Invoke();
     }
 
+    /// <summary>Sets the callback invoked when IB Gateway drops the connection.</summary>
     public void SetConnectionClosedCallback(Action onConnectionClosed) =>
         _onConnectionClosed = onConnectionClosed;
 
