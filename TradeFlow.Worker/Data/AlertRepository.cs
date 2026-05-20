@@ -27,7 +27,7 @@ public class AlertRepository : IAlertRepository
             _dbContext.Alerts.AddRange(alertList);
             var saved = await _dbContext.SaveChangesAsync(cancellationToken);
 
-            _logger.LogInformation("Saved {Count} new alerts to the database.", saved);
+            _logger.LogDebug("Saved {Count} new alerts to the database.", saved);
         }
         catch (DbUpdateException ex) when (ex.InnerException is PostgresException pgEx && pgEx.SqlState == "23505")
         {

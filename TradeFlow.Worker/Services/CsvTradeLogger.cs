@@ -18,15 +18,15 @@ public class CsvTradeLogger
     private readonly SemaphoreSlim _stocksLock  = new(1, 1);
 
     private static readonly string OptionsHeader =
-        "UserName,Date Opened,Time Opened,Date Closed,Time Closed," +
+        "Date Opened,Time Opened,Date Closed,Time Closed," +
         "Symbol,Contract,Direction,Strike,Expiration," +
         "Contracts,Entry Price,Entry Amount," +
-        "Exit Price,Exit Amount,Status,Result,P&L,P&L %";
- 
+        "Exit Price,Exit Amount,Status,Result,UserName,P&L,P&L %";
+
     private static readonly string StocksHeader =
-        "UserName,Date Opened,Time Opened,Date Closed,Time Closed," +
+        "Date Opened,Time Opened,Date Closed,Time Closed," +
         "Symbol,Shares,Entry Price,Entry Amount," +
-        "Exit Price,Exit Amount,Status,Result,P&L,P&L %";
+        "Exit Price,Exit Amount,Status,Result,UserName,P&L,P&L %";
 
     public CsvTradeLogger(
         IConfiguration config,
@@ -105,6 +105,7 @@ public class CsvTradeLogger
     }
 
     // -- Helpers --
+
     private void EnsureHeadersExist()
     {
         if (!File.Exists(_optionsPath))
@@ -117,11 +118,10 @@ public class CsvTradeLogger
     private string BuildOpenRow(TradeRecord t)
     {
         var et = t.OpenedAt.ToLocalTime();
- 
+
         if (t.TradeType == TradeType.Options)
         {
             return string.Join(",",
-                t.UserName ?? "",
                 et.ToString("yyyy-MM-dd"),
                 et.ToString("HH:mm:ss"),
                 "",           // Date Closed
@@ -138,13 +138,13 @@ public class CsvTradeLogger
                 "",           // Exit Amount
                 t.Status,
                 t.Result,
+                t.UserName ?? "",
                 "",           // P&L
                 "");          // P&L %
         }
         else
         {
             return string.Join(",",
-                t.UserName ?? "",
                 et.ToString("yyyy-MM-dd"),
                 et.ToString("HH:mm:ss"),
                 "",
@@ -157,6 +157,7 @@ public class CsvTradeLogger
                 "",
                 t.Status,
                 t.Result,
+                t.UserName ?? "",
                 "",
                 "");
         }
@@ -167,11 +168,10 @@ public class CsvTradeLogger
         var openEt  = t.OpenedAt.ToLocalTime();
         var closeEt = t.ClosedAt?.ToLocalTime();
         var pnlSign = t.PnL >= 0 ? "+" : "";
- 
+
         if (t.TradeType == TradeType.Options)
         {
             return string.Join(",",
-                t.UserName ?? "",
                 openEt.ToString("yyyy-MM-dd"),
                 openEt.ToString("HH:mm:ss"),
                 closeEt?.ToString("yyyy-MM-dd") ?? "",
@@ -188,13 +188,13 @@ public class CsvTradeLogger
                 t.ExitAmount?.ToString("F2") ?? "",
                 t.Status,
                 t.Result,
+                t.UserName ?? "",
                 $"{pnlSign}{t.PnL:F2}",
                 $"{pnlSign}{t.PnLPercent:F2}%");
         }
         else
         {
             return string.Join(",",
-                t.UserName ?? "",
                 openEt.ToString("yyyy-MM-dd"),
                 openEt.ToString("HH:mm:ss"),
                 closeEt?.ToString("yyyy-MM-dd") ?? "",
@@ -207,27 +207,33 @@ public class CsvTradeLogger
                 t.ExitAmount?.ToString("F2") ?? "",
                 t.Status,
                 t.Result,
+                t.UserName ?? "",
                 $"{pnlSign}{t.PnL:F2}",
                 $"{pnlSign}{t.PnLPercent:F2}%");
         }
     }
 
-    private async Task AppendRowAsync(string path, string row, CancellationToken ct)
+    private static async Task AppendRowAsync(string path, string row, CancellationToken ct)
     {
         await File.AppendAllTextAsync(path, row + Environment.NewLine, ct);
     }
 
-    // Removes the summary block from the end of the file before writing new rows
+    // Removes the summary block and any trailing blank lines before writing new rows
     private static async Task StripSummaryAsync(string path, CancellationToken ct)
     {
         var lines = (await File.ReadAllLinesAsync(path, ct)).ToList();
         var summaryStart = lines.FindIndex(l => l.StartsWith(",,SUMMARY"));
         if (summaryStart >= 0)
             lines = lines.Take(summaryStart).ToList();
+
+        // Remove trailing blank lines left by WriteAllLinesAsync
+        while (lines.Count > 1 && string.IsNullOrWhiteSpace(lines[^1]))
+            lines.RemoveAt(lines.Count - 1);
+
         await File.WriteAllLinesAsync(path, lines, ct);
     }
 
-    // Reads the file, finds the row matching trade.OrderId, replaces it, rewrites the file
+    // Reads the file, finds the open row matching symbol and direction, replaces it, rewrites the file
     private async Task RewriteTradeRowAsync(string path, TradeRecord trade, CancellationToken ct)
     {
         var lines = await File.ReadAllLinesAsync(path, ct);
@@ -235,18 +241,16 @@ public class CsvTradeLogger
 
         for (var i = 0; i < lines.Length; i++)
         {
-            // Skip header, summary, and empty lines
             if (i == 0 || lines[i].StartsWith(",,") || string.IsNullOrWhiteSpace(lines[i]))
                 continue;
 
-            // Match on OrderId embedded in the row and we find it by searching for the order ID
-            // Since OrderId isn't a CSV column we match by symbol + entry price + open date
-            // as a composite key (OrderId is stored in memory in TradeGuard, not in CSV)
             var cols = lines[i].Split(',');
-            if (cols.Length > 5 &&
-                cols[5] == trade.Symbol &&
-                cols[7] == (trade.TradeType == TradeType.Options ? trade.Direction ?? "" : trade.Quantity.ToString()) &&
-                string.IsNullOrEmpty(cols[13])) // Exit Price column is empty = still open
+
+            // Match by symbol, direction/quantity, and empty exit price (still open)
+            if (cols.Length > 4 &&
+                cols[4] == trade.Symbol &&
+                cols[6] == (trade.TradeType == TradeType.Options ? trade.Direction ?? "" : trade.Quantity.ToString()) &&
+                string.IsNullOrEmpty(cols[12]))
             {
                 lines[i] = BuildClosedRow(trade);
                 updated = true;
@@ -272,17 +276,18 @@ public class CsvTradeLogger
     {
         var lines = (await File.ReadAllLinesAsync(path, ct)).ToList();
 
-        // Remove existing summary block
         var summaryStart = lines.FindIndex(l => l.StartsWith(",,SUMMARY"));
         if (summaryStart >= 0)
             lines = lines.Take(summaryStart).ToList();
 
-        // Parse trade rows and skip header and empty lines
+        // Remove trailing blank lines before appending summary
+        while (lines.Count > 1 && string.IsNullOrWhiteSpace(lines[^1]))
+            lines.RemoveAt(lines.Count - 1);
+
         var header      = tradeType == TradeType.Options ? OptionsHeader : StocksHeader;
         var cols        = header.Split(',');
         var pnlIndex    = Array.IndexOf(cols, "P&L");
         var statusIndex = Array.IndexOf(cols, "Status");
-        var resultIndex = Array.IndexOf(cols, "Result");
 
         var trades = lines
             .Skip(1)
@@ -295,7 +300,7 @@ public class CsvTradeLogger
         var closed = trades.Count(c => c[statusIndex] == "Closed");
         var open   = total - closed;
 
-        var wins   = trades.Count(c =>
+        var wins = trades.Count(c =>
             c[statusIndex] == "Closed" &&
             decimal.TryParse(c[pnlIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var p) &&
             p > 0);
@@ -316,9 +321,8 @@ public class CsvTradeLogger
 
         var pnlSign = totalPnl >= 0 ? "+" : "";
 
-        // Append summary block
         lines.Add("");
-        lines.Add($",,SUMMARY");
+        lines.Add(",,SUMMARY");
         lines.Add($",,Total Trades,{total}");
         lines.Add($",,Open,{open},Closed,{closed}");
         lines.Add($",,Wins,{wins},Losses,{losses},Win Rate,{winRate:F1}%");

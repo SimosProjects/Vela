@@ -19,7 +19,7 @@ public class IbkrEWrapper : EWrapper
 
     // Position callbacks keyed by symbol match key
     private readonly Dictionary<string, TaskCompletionSource<decimal>> _positionCallbacks = new();
-    
+
     // Rejection reasons keyed by orderId, populated when error code 201 is received
     private readonly Dictionary<int, string> _rejectionReasons = new();
 
@@ -37,14 +37,23 @@ public class IbkrEWrapper : EWrapper
         _logger = logger;
     }
 
-    // Notifies awaiting order calls when an order is confirmed filled.
+    // Only logs and resolves on terminal states to avoid flooding the console with partial fills.
     public void orderStatus(int orderId, string status, double filled, double remaining,
         double avgFillPrice, int permId, int parentId, double lastFillPrice,
         int clientId, string whyHeld, double mktCapPrice)
     {
-        _logger.LogInformation(
-            "IBKR OrderStatus — OrderId: {OrderId} Status: {Status} Filled: {Filled} AvgPrice: {Price}",
-            orderId, status, filled, avgFillPrice);
+        if (status is "Filled" or "Cancelled" or "Inactive")
+        {
+            _logger.LogInformation(
+                "IBKR OrderStatus — OrderId: {OrderId} Status: {Status} Filled: {Filled} AvgPrice: {Price}",
+                orderId, status, filled, avgFillPrice);
+        }
+        else
+        {
+            _logger.LogDebug(
+                "IBKR OrderStatus — OrderId: {OrderId} Status: {Status} Filled: {Filled} AvgPrice: {Price}",
+                orderId, status, filled, avgFillPrice);
+        }
 
         lock (_lock)
         {
@@ -184,14 +193,14 @@ public class IbkrEWrapper : EWrapper
 
     public void error(int id, int errorCode, string errorMsg)
     {
-        // 2000-2999 are informational warnings; 10349 is an order preset notice, not an error
-        if (errorCode >= 2000 && errorCode < 3000 || errorCode == 10349)
+        // 2000-2999 are informational warnings; 10349 is order preset notice; 202 is expected OCA cancel
+        if (errorCode >= 2000 && errorCode < 3000 || errorCode is 10349 or 202)
         {
             _logger.LogDebug("IBKR Info [{Code}]: {Message}", errorCode, errorMsg);
         }
         else if (errorCode == 201)
         {
-            // Order rejected, store reason so IbkrBrokerService can surface it
+            // Order rejected — store reason so IbkrBrokerService can surface it
             lock (_lock) { _rejectionReasons[id] = errorMsg; }
             _logger.LogWarning("IBKR Order rejected [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
         }
@@ -214,7 +223,7 @@ public class IbkrEWrapper : EWrapper
                 _rejectionReasons.Remove(orderId);
                 return reason;
             }
- 
+
             return null;
         }
     }
