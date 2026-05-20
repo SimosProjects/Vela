@@ -32,6 +32,8 @@ public class AlertEndpointsContainerTests
         _factory = new WebApplicationFactory<Api.Program>()
             .WithWebHostBuilder(builder =>
             {
+                builder.UseEnvironment("Testing");
+                builder.UseUrls("http://localhost:0");
                 builder.ConfigureServices(services =>
                 {
                     // Remove real PostgreSQL registration

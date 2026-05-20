@@ -51,7 +51,8 @@ else
     app.UseExceptionHandler("/error");
 }
 
-app.UseHttpsRedirection();
+if (!app.Environment.IsEnvironment("Testing"))
+    app.UseHttpsRedirection();
 
 app.UseOutputCache();
 
