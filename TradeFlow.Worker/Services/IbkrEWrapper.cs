@@ -181,8 +181,8 @@ public class IbkrEWrapper : EWrapper
 
     public void error(int id, int errorCode, string errorMsg)
     {
-        // 2000-2999 are informational warnings not errors
-        if (errorCode >= 2000 && errorCode < 3000)
+        // 2000-2999 are informational warnings; 10349 is an order preset notice, not an error
+        if (errorCode >= 2000 && errorCode < 3000 || errorCode == 10349)
             _logger.LogDebug("IBKR Info [{Code}]: {Message}", errorCode, errorMsg);
         else
             _logger.LogError("IBKR Error [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);

@@ -47,7 +47,7 @@ public class IbkrBrokerService : IBrokerService
 
             if (decimal.TryParse(valueStr, out var balance))
             {
-                _logger.LogInformation("IBKR account balance: ${Balance:F2}", balance);
+                _logger.LogDebug("IBKR account balance: ${Balance:F2}", balance);
                 return balance;
             }
 
@@ -121,7 +121,7 @@ public class IbkrBrokerService : IBrokerService
 
             if (decimal.TryParse(valueStr, out var value))
             {
-                _logger.LogInformation("IBKR open positions value: ${Value:F2}", value);
+                _logger.LogDebug("IBKR open positions value: ${Value:F2}", value);
                 return value;
             }
 
