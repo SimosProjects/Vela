@@ -19,6 +19,9 @@ public class IbkrEWrapper : EWrapper
 
     // Position callbacks keyed by symbol match key
     private readonly Dictionary<string, TaskCompletionSource<decimal>> _positionCallbacks = new();
+    
+    // Rejection reasons keyed by orderId, populated when error code 201 is received
+    private readonly Dictionary<int, string> _rejectionReasons = new();
 
     private Action? _onConnectionClosed;
 
@@ -183,9 +186,37 @@ public class IbkrEWrapper : EWrapper
     {
         // 2000-2999 are informational warnings; 10349 is an order preset notice, not an error
         if (errorCode >= 2000 && errorCode < 3000 || errorCode == 10349)
+        {
             _logger.LogDebug("IBKR Info [{Code}]: {Message}", errorCode, errorMsg);
+        }
+        else if (errorCode == 201)
+        {
+            // Order rejected, store reason so IbkrBrokerService can surface it
+            lock (_lock) { _rejectionReasons[id] = errorMsg; }
+            _logger.LogWarning("IBKR Order rejected [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
+        }
         else
+        {
             _logger.LogError("IBKR Error [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
+        }
+    }
+
+    /// <summary>
+    /// Returns the rejection reason for the given order ID if one was received, then removes it.
+    /// Returns null if no rejection was recorded for this order.
+    /// </summary>
+    public string? TakeRejectionReason(int orderId)
+    {
+        lock (_lock)
+        {
+            if (_rejectionReasons.TryGetValue(orderId, out var reason))
+            {
+                _rejectionReasons.Remove(orderId);
+                return reason;
+            }
+ 
+            return null;
+        }
     }
 
     // Required interface stubs

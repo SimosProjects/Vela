@@ -219,21 +219,37 @@ public class IbkrBrokerService : IBrokerService
             _logger.LogWarning(
                 "IBKR PlaceOrder timed out for {Symbol} after 120s. Order may still be pending in Gateway.",
                 order.Symbol);
-
-            // Clean up the dangling order callback
+ 
             _connection.Wrapper.UnregisterOrderCallback(orderId);
-
-            // Return Pending. BrokerExecutionService will verify via GetOpenPositionsValueAsync
-            // before recording the trade, so no position will be recorded without confirmation
+ 
+            // A timeout after a 201 rejection means the order was rejected, not pending
+            var rejectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
+            if (rejectionReason is not null)
+            {
+                _logger.LogWarning(
+                    "IBKR order rejected for {Symbol}: {Reason}", order.Symbol, rejectionReason);
+ 
+                return new BrokerOrderResult(
+                    OrderId: orderId.ToString(),
+                    StopOrderId: null,
+                    TargetOrderId: null,
+                    FillPrice: 0m,
+                    FillQuantity: 0,
+                    FillAmount: 0m,
+                    Status: OrderStatus.Rejected,
+                    FilledAt: DateTimeOffset.UtcNow,
+                    RejectionReason: rejectionReason);
+            }
+ 
             return new BrokerOrderResult(
-                OrderId:       orderId.ToString(),
-                StopOrderId:   (orderId + 1).ToString(),
+                OrderId: orderId.ToString(),
+                StopOrderId: (orderId + 1).ToString(),
                 TargetOrderId: (orderId + 2).ToString(),
-                FillPrice:     order.EstimatedEntryPrice,
-                FillQuantity:  order.Quantity,
-                FillAmount:    order.BudgetUsed,
-                Status:        OrderStatus.Pending,
-                FilledAt:      DateTimeOffset.UtcNow);
+                FillPrice: order.EstimatedEntryPrice,
+                FillQuantity: order.Quantity,
+                FillAmount: order.BudgetUsed,
+                Status: OrderStatus.Pending,
+                FilledAt: DateTimeOffset.UtcNow);
         }
     }
 
