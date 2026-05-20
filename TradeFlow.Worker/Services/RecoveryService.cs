@@ -306,43 +306,43 @@ public class RecoveryService : IHostedService
             if (tradeType == TradeType.Options)
             {
                 // Options CSV column order:
-                // Date Opened, Time Opened, Date Closed, Time Closed,
+                // UserName, Date Opened, Time Opened, Date Closed, Time Closed,
                 // Symbol, Contract, Direction, Strike, Expiration,
                 // Contracts, Entry Price, Entry Amount,
                 // Exit Price, Exit Amount, Status, Result, P&L, P&L %
-
-                if (cols.Length < 18) return null;
-
-                var status = Enum.TryParse<TradeStatus>(cols[14], out var s)
+ 
+                if (cols.Length < 19) return null;
+ 
+                var status = Enum.TryParse<TradeStatus>(cols[15], out var s)
                     ? s : TradeStatus.Open;
-
+ 
                 if (status != TradeStatus.Open) return null;
-
-                decimal.TryParse(cols[10], NumberStyles.Any,
-                    CultureInfo.InvariantCulture, out var optEp);
+ 
                 decimal.TryParse(cols[11], NumberStyles.Any,
+                    CultureInfo.InvariantCulture, out var optEp);
+                decimal.TryParse(cols[12], NumberStyles.Any,
                     CultureInfo.InvariantCulture, out var optEa);
-
+ 
                 return new TradeRecord
                 {
                     AlertId         = string.Empty,
                     OrderId         = string.Empty,
                     StopOrderId     = null,
                     TargetOrderId   = null,
-                    UserName        = string.Empty,
-                    Symbol          = cols[4],
+                    UserName        = cols[0],
+                    Symbol          = cols[5],
                     TradeType       = TradeType.Options,
-                    OptionsContract = cols[5],
-                    Direction       = cols[6],
-                    Strike          = decimal.TryParse(cols[7], out var strike) ? strike : null,
-                    Expiration      = cols[8],
-                    Quantity        = int.TryParse(cols[9], out var qty) ? qty : 0,
+                    OptionsContract = cols[6],
+                    Direction       = cols[7],
+                    Strike          = decimal.TryParse(cols[8], out var strike) ? strike : null,
+                    Expiration      = cols[9],
+                    Quantity        = int.TryParse(cols[10], out var qty) ? qty : 0,
                     EntryPrice      = optEp,
                     EntryAmount     = optEa,
                     StopPrice       = optEp * 0.50m,
                     TargetPrice     = optEp * 3.00m,
                     OpenedAt        = DateTimeOffset.TryParse(
-                                         $"{cols[0]} {cols[1]}",
+                                         $"{cols[1]} {cols[2]}",
                                          out var optOpened) ? optOpened : DateTimeOffset.UtcNow,
                     Status          = TradeStatus.Open,
                 };
@@ -350,42 +350,42 @@ public class RecoveryService : IHostedService
             else
             {
                 // Stocks CSV column order:
-                // Date Opened, Time Opened, Date Closed, Time Closed,
+                // UserName, Date Opened, Time Opened, Date Closed, Time Closed,
                 // Symbol, Shares, Entry Price, Entry Amount,
                 // Exit Price, Exit Amount, Status, Result, P&L, P&L %
-
-                if (cols.Length < 14) return null;
-
-                var status = Enum.TryParse<TradeStatus>(cols[10], out var s)
+ 
+                if (cols.Length < 15) return null;
+ 
+                var status = Enum.TryParse<TradeStatus>(cols[11], out var s)
                     ? s : TradeStatus.Open;
-
+ 
                 if (status != TradeStatus.Open) return null;
-
-                var entryPrice = decimal.TryParse(cols[6], NumberStyles.Any,
+ 
+                var entryPrice = decimal.TryParse(cols[7], NumberStyles.Any,
                     CultureInfo.InvariantCulture, out var stkEp) ? stkEp : 0m;
-                decimal.TryParse(cols[7], NumberStyles.Any,
+                decimal.TryParse(cols[8], NumberStyles.Any,
                     CultureInfo.InvariantCulture, out var stkEa);
-
+ 
                 return new TradeRecord
                 {
                     AlertId         = string.Empty,
                     OrderId         = string.Empty,
                     StopOrderId     = null,
                     TargetOrderId   = null,
-                    UserName        = string.Empty,
-                    Symbol          = cols[4],
+                    UserName        = cols[0],
+                    Symbol          = cols[5],
                     TradeType       = TradeType.Stock,
                     OptionsContract = null,
                     Direction       = null,
                     Strike          = null,
                     Expiration      = null,
-                    Quantity        = int.TryParse(cols[5], out var stkQty) ? stkQty : 0,
+                    Quantity        = int.TryParse(cols[6], out var stkQty) ? stkQty : 0,
                     EntryPrice      = entryPrice,
                     EntryAmount     = stkEa,
                     StopPrice       = entryPrice * 0.85m,
                     TargetPrice     = entryPrice * 1.30m,
                     OpenedAt        = DateTimeOffset.TryParse(
-                                         $"{cols[0]} {cols[1]}",
+                                         $"{cols[1]} {cols[2]}",
                                          out var stkOpened) ? stkOpened : DateTimeOffset.UtcNow,
                     Status          = TradeStatus.Open,
                 };
