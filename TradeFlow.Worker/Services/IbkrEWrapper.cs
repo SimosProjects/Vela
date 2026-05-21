@@ -23,6 +23,9 @@ public class IbkrEWrapper : EWrapper
     // Rejection reasons keyed by orderId, populated when error code 201 is received
     private readonly Dictionary<int, string> _rejectionReasons = new();
 
+    // Exec details callbacks keyed by orderId — fires when a stop or target order fills broker-side
+    private readonly Dictionary<int, Action<decimal>> _execDetailsCallbacks = new();
+
     private Action? _onConnectionClosed;
 
     private readonly Lock _lock = new();
@@ -70,6 +73,25 @@ public class IbkrEWrapper : EWrapper
         }
     }
 
+    // Fires registered exec details callbacks when a stop or target order fills broker-side.
+    // This is the primary mechanism for detecting broker-side closes without polling.
+    public void execDetails(int reqId, Contract contract, Execution execution)
+    {
+        _logger.LogInformation(
+            "IBKR ExecDetails — OrderId: {OrderId} Symbol: {Symbol} Side: {Side} AvgPrice: {Price} Qty: {Qty}",
+            execution.OrderId, contract.Symbol, execution.Side,
+            execution.AvgPrice, execution.CumQty);
+
+        lock (_lock)
+        {
+            if (_execDetailsCallbacks.TryGetValue(execution.OrderId, out var handler))
+            {
+                handler((decimal)execution.AvgPrice);
+                _execDetailsCallbacks.Remove(execution.OrderId);
+            }
+        }
+    }
+
     // Handles both NetLiquidation and GrossPositionValue tags for account balance and exposure checks
     public void accountSummary(int reqId, string account, string tag, string value, string currency)
     {
@@ -103,6 +125,23 @@ public class IbkrEWrapper : EWrapper
                 _positionCallbacks.Remove(key);
             }
         }
+    }
+
+    /// <summary>
+    /// Registers a callback that fires when IBKR reports an execution for the given order ID.
+    /// Used to detect broker-side stop and target fills without polling.
+    /// </summary>
+    public void RegisterExecDetailsCallback(int orderId, Action<decimal> handler)
+    {
+        lock (_lock) { _execDetailsCallbacks[orderId] = handler; }
+    }
+
+    /// <summary>
+    /// Removes an exec details callback — called when a position is closed by other means.
+    /// </summary>
+    public void UnregisterExecDetailsCallback(int orderId)
+    {
+        lock (_lock) { _execDetailsCallbacks.Remove(orderId); }
     }
 
     /// <summary>
@@ -248,7 +287,6 @@ public class IbkrEWrapper : EWrapper
     public void openOrderEnd() { }
     public void contractDetails(int reqId, ContractDetails contractDetails) { }
     public void contractDetailsEnd(int reqId) { }
-    public void execDetails(int reqId, Contract contract, Execution execution) { }
     public void execDetailsEnd(int reqId) { }
     public void commissionReport(CommissionReport commissionReport) { }
     public void fundamentalData(int reqId, string data) { }
