@@ -1,9 +1,12 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Exit Price,Exit Amount,Status,Result,UserName,P&L,P&L %
 2026-05-20,10:27:26,,,MP,50,54.46,2723.00,,,Open,Open,SLAM,,
 2026-05-20,10:28:26,,,TGT,25,117.53,2938.25,,,Open,Open,SLAM,,
+2026-05-20,14:39:22,,,BROS,54,55.13,2977.02,,,Open,Open,Theo,,
+2026-05-20,15:07:42,,,FDP,90,33.03,2972.70,,,Open,Open,Theo,,
+2026-05-20,15:11:23,,,SBSW,255,11.79,3006.45,,,Open,Open,Theo,,
 
 ,,SUMMARY
-,,Total Trades,2
-,,Open,2,Closed,0
+,,Total Trades,5
+,,Open,5,Closed,0
 ,,Wins,0,Losses,0,Win Rate,0.0%
 ,,Total P&L,+0.00

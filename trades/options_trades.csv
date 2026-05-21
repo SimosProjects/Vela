@@ -1,10 +1,15 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike,Expiration,Contracts,Entry Price,Entry Amount,Exit Price,Exit Amount,Status,Result,UserName,P&L,P&L %
 2026-05-20,09:45:39,2026-05-20,09:53:52,USO,USO270115P00080000,put,80,Jan 15 2027,6,1.63,978.00,1.54,924.00,Closed,XtradesExit,Theo,-54.00,-5.52%
 2026-05-20,09:59:27,2026-05-20,10:00:35,USO,USO270115P00090000,put,90,Jan 15 2027,3,3.05,915.00,2.65,795.00,Closed,XtradesExit,Theo,-120.00,-13.11%
-2026-05-20,10:03:24,,,USO,USO270115P00095000,put,95,Jan 15 2027,2,3.75,750.00,,,Open,Open,Theo,,
+2026-05-20,10:03:24,2026-05-20,11:12:24,USO,USO270115P00095000,put,95,Jan 15 2027,2,3.75,750.00,3.10,620.00,Closed,XtradesExit,Theo,-130.00,-17.33%
+2026-05-20,11:35:48,,,USO,USO270115P00085000,put,85,Jan 15 2027,4,2.50,1000.00,,,Open,Open,Theo,,
+2026-05-20,11:45:42,,,SHOP,SHOP260918C00140000,call,140,Sep 18 2026,2,5.15,1030.00,,,Open,Open,KrazyA - [$TSLA 👶 🐐],,
+2026-05-20,15:19:11,,,NFLX,NFLX270319C00120000,call,120,Mar 19 2027,2,4.10,820.00,,,Open,Open,Theo,,
+2026-05-20,15:52:49,,,APTV,APTV261120C00070000,call,70,Nov 20 2026,4,2.25,900.00,,,Open,Open,Theo,,
+,,,,,,,,,,,,,,,,,,
 
 ,,SUMMARY
-,,Total Trades,3
-,,Open,1,Closed,2
-,,Wins,0,Losses,2,Win Rate,0.0%
-,,Total P&L,-174.00
+,,Total Trades,7
+,,Open,4,Closed,3
+,,Wins,0,Losses,3,Win Rate,0.0%
+,,Total P&L,-304.00

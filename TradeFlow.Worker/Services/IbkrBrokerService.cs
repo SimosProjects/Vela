@@ -159,9 +159,11 @@ public class IbkrBrokerService : IBrokerService
         // Place entry with a temporary fixed STP as bracket child so there is always
         // stop protection in place while we wait for the actual fill confirmation.
         var tempStopId    = orderId + 1;
+        var minTick       = order.TradeType == TradeType.Options ? 0.05 : 0.01;
+        var roundedStop   = Math.Round(Math.Round((double)order.StopPrice / minTick) * minTick, 2);
         var tempStopOrder = BuildStopOrder(
             tempStopId, orderId, order.Quantity,
-            Math.Round((double)order.StopPrice, 2));
+            roundedStop);
 
         entryOrder.Transmit    = false;
         tempStopOrder.Transmit = true;
@@ -443,7 +445,7 @@ public class IbkrBrokerService : IBrokerService
             OrderId       = orderId,
             ParentId      = parentId,
             Action        = "SELL",
-            OrderType     = "STP",
+            OrderType     = "GTC",
             AuxPrice      = stopPrice,
             TotalQuantity = quantity,
             Transmit      = false,
@@ -463,8 +465,9 @@ public class IbkrBrokerService : IBrokerService
             TrailingPercent = trailPercent,
             TotalQuantity   = quantity,
             OcaGroup        = ocaGroup,
-            OcaType         = 1, // cancel all remaining orders with block
-            Transmit        = true, // must be true — OCA orders are not bracket children
+            OcaType         = 1,
+            Tif             = "GTC",
+            Transmit        = true,
         };
 
     // Limit target in the same OCA group as the trail stop.
@@ -478,6 +481,7 @@ public class IbkrBrokerService : IBrokerService
             TotalQuantity = quantity,
             OcaGroup      = ocaGroup,
             OcaType       = 1,
+            Tif           = "GTC",
             Transmit      = true,
         };
 
