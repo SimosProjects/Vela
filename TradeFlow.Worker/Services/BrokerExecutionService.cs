@@ -115,19 +115,40 @@ public class BrokerExecutionService
 
             await Task.Delay(TimeSpan.FromSeconds(3), ct);
 
-            var positionsValue = await _broker.GetOpenPositionsValueAsync(ct);
-            if (positionsValue <= 0)
+            var verifyRecord = new TradeRecord
+            {
+                AlertId         = string.Empty,
+                OrderId         = string.Empty,
+                StopOrderId     = null,
+                TargetOrderId   = null,
+                UserName        = order.UserName,
+                Symbol          = order.Symbol,
+                TradeType       = order.TradeType,
+                OptionsContract = order.OptionsContractSymbol,
+                Direction       = order.Direction,
+                Strike          = order.Strike,
+                Expiration      = order.Expiration,
+                Quantity        = order.Quantity,
+                EntryPrice      = order.EstimatedEntryPrice,
+                EntryAmount     = order.BudgetUsed,
+                StopPrice       = order.StopPrice,
+                TargetPrice     = order.TargetPrice,
+                OpenedAt        = DateTimeOffset.UtcNow,
+            };
+
+            var positionPrice = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
+            if (positionPrice <= 0)
             {
                 _logger.LogWarning(
-                    "Gateway shows no open positions after timeout for {Symbol} — order not recorded. " +
+                    "Gateway shows no position for {Symbol} after timeout — order not recorded. " +
                     "The order was likely rejected or unfilled.",
                     alert.Symbol);
                 return;
             }
 
             _logger.LogInformation(
-                "Gateway confirmed open positions ${Value:F2} after timeout for {Symbol} — recording trade.",
-                positionsValue, alert.Symbol);
+                "Gateway confirmed position for {Symbol} at ${Price:F2} after timeout — recording trade.",
+                alert.Symbol, positionPrice);
         }
 
         // Register position in TradeGuard memory and persist to database
