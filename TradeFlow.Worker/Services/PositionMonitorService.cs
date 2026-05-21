@@ -4,10 +4,10 @@ using TradeFlow.Worker.Models;
 namespace TradeFlow.Worker.Services;
 
 /// <summary>
-/// Background service that polls open positions every 60 seconds and checks
-/// whether the current price has hit the stop loss or profit target.
-/// Runs independently of the alert pipeline so positions are monitored
-/// even when no new alerts are arriving.
+/// Background service that monitors open positions for broker-side closes.
+/// Subscribes to the broker fill handler to detect when IBKR executes a
+/// trailing stop or target order without a corresponding Xtrades exit alert.
+/// Also polls open positions periodically as a fallback when market data is available.
 /// </summary>
 public class PositionMonitorService : BackgroundService
 {
@@ -15,6 +15,7 @@ public class PositionMonitorService : BackgroundService
     private readonly IBrokerService _broker;
     private readonly CsvTradeLogger _csv;
     private readonly DiscordNotificationService _discord;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<PositionMonitorService> _logger;
 
     private const int PollIntervalSeconds = 60;
@@ -24,18 +25,25 @@ public class PositionMonitorService : BackgroundService
         IBrokerService broker,
         CsvTradeLogger csv,
         DiscordNotificationService discord,
+        IServiceScopeFactory scopeFactory,
         ILogger<PositionMonitorService> logger)
     {
         _guard = guard;
         _broker = broker;
         _csv = csv;
         _discord = discord;
+        _scopeFactory = scopeFactory;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Position monitor service started.");
+
+        // Subscribe to broker-side fills so trailing stops and targets are detected immediately
+        _broker.RegisterBrokerFillHandler(
+            (entryOrderId, fillPrice, outcome) =>
+                _ = HandleBrokerFillAsync(entryOrderId, fillPrice, outcome, stoppingToken));
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -58,7 +66,36 @@ public class PositionMonitorService : BackgroundService
         _logger.LogInformation("Position monitor service stopped.");
     }
 
-    // Iterates all open positions and checks whether stop or target has been hit
+    // -- Helpers --
+
+    // Fired by IbkrBrokerService when a broker-side stop or target order fills.
+    // Finds the matching open trade by entry order ID and closes it.
+    private async Task HandleBrokerFillAsync(
+        string entryOrderId,
+        decimal fillPrice,
+        TradeOutcome outcome,
+        CancellationToken ct)
+    {
+        var trade = _guard.GetOpenTrades()
+            .FirstOrDefault(t => t.OrderId == entryOrderId);
+
+        if (trade is null)
+        {
+            _logger.LogWarning(
+                "Broker fill received for OrderId {OrderId} but no matching open position found.",
+                entryOrderId);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Broker-side {Outcome} detected for {Symbol} @ ${Price:F2} — closing position.",
+            outcome, trade.Symbol, fillPrice);
+
+        await CloseAndRecordAsync(trade, fillPrice, outcome, ct);
+    }
+
+    // Iterates all open positions and checks whether stop or target has been hit via polling.
+    // This is a fallback for when market data is available — the primary detection is via execDetails.
     private async Task CheckOpenPositionsAsync(CancellationToken ct)
     {
         var openTrades = _guard.GetOpenTrades();
@@ -77,9 +114,7 @@ public class PositionMonitorService : BackgroundService
 
     private async Task CheckPositionAsync(TradeRecord trade, CancellationToken ct)
     {
-        // Get current price from IBKR — for now we rely on the broker's position data
-        // In a future iteration this could use reqMktData for real-time quotes
-        var currentPrice = await GetCurrentPriceAsync(trade, ct);
+        var currentPrice = await _broker.GetCurrentPositionPriceAsync(trade, ct);
         if (currentPrice <= 0)
             return;
 
@@ -91,10 +126,9 @@ public class PositionMonitorService : BackgroundService
             "Position monitor: {Symbol} hit {Outcome} at ${Price:F2}",
             trade.Symbol, outcome, currentPrice);
 
-        await ClosePositionAsync(trade, outcome, currentPrice, ct);
+        await CloseAndRecordAsync(trade, currentPrice, outcome, ct);
     }
 
-    // Compares current price against stop and target thresholds
     private static TradeOutcome EvaluatePosition(TradeRecord trade, decimal currentPrice)
     {
         if (currentPrice <= trade.StopPrice)
@@ -106,56 +140,43 @@ public class PositionMonitorService : BackgroundService
         return TradeOutcome.Open;
     }
 
-    private async Task ClosePositionAsync(
+    private async Task CloseAndRecordAsync(
         TradeRecord trade,
+        decimal fillPrice,
         TradeOutcome outcome,
-        decimal currentPrice,
         CancellationToken ct)
     {
-        BrokerOrderResult closeResult;
-        try
+        // For broker-side closes the position is already closed — we just need to record it.
+        // For polling-detected closes we need to place a close order first.
+        var closedTrade = _guard.RegisterClose(
+            trade.UserName,
+            trade.OptionsContract,
+            trade.Symbol,
+            fillPrice,
+            outcome);
+
+        if (closedTrade is null)
         {
-            closeResult = await _broker.ClosePositionAsync(trade, outcome, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "Position monitor failed to close {Symbol}, will retry next cycle.", trade.Symbol);
+            _logger.LogWarning(
+                "Position monitor: RegisterClose returned null for {Symbol} — already closed?",
+                trade.Symbol);
             return;
         }
 
-        var closedTrade = _guard.RegisterClose(
-            trade.AlertId,
-            trade.OptionsContract,
-            trade.Symbol,
-            closeResult.FillPrice,
-            outcome);
-
-        if (closedTrade is null) return;
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+            await repo.DeleteAsync(trade.OrderId, ct);
+        }
 
         await _csv.CloseTradeAsync(closedTrade, ct);
 
         _logger.LogInformation(
-            "Position monitor closed {Symbol} | Outcome: {Outcome} | " +
-            "P&L: {PnL:+$#,##0.00;-$#,##0.00} ({PnLPct:+0.00;-0.00}%)",
-            closedTrade.Symbol, outcome,
-            closedTrade.PnL ?? 0, closedTrade.PnLPercent ?? 0);
+            "POSITION CLOSED — {Symbol} × {Qty} @ ${Price:F2} | " +
+            "P&L: {PnL:+$#,##0.00;-$#,##0.00} ({PnLPct:+0.00;-0.00}%) | Outcome: {Outcome}",
+            closedTrade.Symbol, closedTrade.Quantity, fillPrice,
+            closedTrade.PnL ?? 0, closedTrade.PnLPercent ?? 0, outcome);
 
         await _discord.NotifyPositionClosedAsync(closedTrade, ct);
-    }
-
-    // Fetches the current market price for a position.
-    // Uses IBKR account positions for now — a future iteration can use live market data.
-    private async Task<decimal> GetCurrentPriceAsync(TradeRecord trade, CancellationToken ct)
-    {
-        try
-        {
-            return await _broker.GetCurrentPositionPriceAsync(trade, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Could not get current price for {Symbol}.", trade.Symbol);
-            return 0m;
-        }
     }
 }

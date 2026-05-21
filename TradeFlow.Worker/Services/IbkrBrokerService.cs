@@ -17,6 +17,13 @@ public class IbkrBrokerService : IBrokerService
     private int _nextReqId = 1;
     private int _nextOrderId = 1;
 
+    // Maps stop/target orderId to the parent entry orderId so broker-side fills can be routed
+    private readonly Dictionary<int, (string EntryOrderId, TradeOutcome Outcome)> _stopOrderMap = new();
+    private readonly Lock _stopMapLock = new();
+
+    // Subscribed by PositionMonitorService to handle broker-side stop and target fills
+    private Action<string, decimal, TradeOutcome>? _brokerFillHandler;
+
     public IbkrBrokerService(
         IbkrConnectionService connection,
         IOptions<IbkrOptions> options,
@@ -25,6 +32,15 @@ public class IbkrBrokerService : IBrokerService
         _connection = connection;
         _options    = options.Value;
         _logger     = logger;
+    }
+
+    /// <summary>
+    /// Subscribes a handler that fires when a broker-side stop or target order fills.
+    /// The handler receives the entry order ID, fill price, and trade outcome.
+    /// </summary>
+    public void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler)
+    {
+        _brokerFillHandler = handler;
     }
 
     /// <summary>
@@ -173,11 +189,11 @@ public class IbkrBrokerService : IBrokerService
             _connection.Client.placeOrder(orderId, contract, entryOrder);
             _connection.Client.placeOrder(tempStopId, contract, tempStopOrder);
 
-            // Use a longer timeout, illiquid stocks (OTC, low-float) can take minutes to fill at market. 
+            // Use a longer timeout — illiquid stocks (OTC, low-float) can take minutes to fill at market.
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(120));
 
-            // This now only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
+            // Only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
             var state = await tcs.Task.WaitAsync(cts.Token);
 
             _logger.LogInformation(
@@ -206,6 +222,9 @@ public class IbkrBrokerService : IBrokerService
                 "IBKR OCA group placed — Trail: {TrailPct}% | Target: ${Target:F2} | OCA: {Oca}",
                 trailPercent, order.TargetPrice, ocaGroup);
 
+            // Register exec callbacks so broker-side fills are detected without polling
+            RegisterStopOrderCallbacks(orderId, trailStopId, targetOrderId);
+
             var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
             var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
 
@@ -224,16 +243,16 @@ public class IbkrBrokerService : IBrokerService
             _logger.LogWarning(
                 "IBKR PlaceOrder timed out for {Symbol} after 120s. Order may still be pending in Gateway.",
                 order.Symbol);
- 
+
             _connection.Wrapper.UnregisterOrderCallback(orderId);
- 
+
             // A timeout after a 201 rejection means the order was rejected, not pending
             var rejectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
             if (rejectionReason is not null)
             {
                 _logger.LogWarning(
                     "IBKR order rejected for {Symbol}: {Reason}", order.Symbol, rejectionReason);
- 
+
                 return new BrokerOrderResult(
                     OrderId: orderId.ToString(),
                     StopOrderId: null,
@@ -245,7 +264,7 @@ public class IbkrBrokerService : IBrokerService
                     FilledAt: DateTimeOffset.UtcNow,
                     RejectionReason: rejectionReason);
             }
- 
+
             return new BrokerOrderResult(
                 OrderId: orderId.ToString(),
                 StopOrderId: (orderId + 1).ToString(),
@@ -269,6 +288,19 @@ public class IbkrBrokerService : IBrokerService
     {
         if (!EnsureConnected())
             return FailedResult("Not connected to IB Gateway");
+
+        // Unregister exec callbacks since we are closing manually — avoids double-close
+        if (int.TryParse(trade.StopOrderId, out var stopIdToUnregister))
+        {
+            _connection.Wrapper.UnregisterExecDetailsCallback(stopIdToUnregister);
+            RemoveStopOrderMapping(stopIdToUnregister);
+        }
+
+        if (int.TryParse(trade.TargetOrderId, out var targetIdToUnregister))
+        {
+            _connection.Wrapper.UnregisterExecDetailsCallback(targetIdToUnregister);
+            RemoveStopOrderMapping(targetIdToUnregister);
+        }
 
         if (trade.StopOrderId is not null && int.TryParse(trade.StopOrderId, out var stopId))
         {
@@ -307,14 +339,14 @@ public class IbkrBrokerService : IBrokerService
                 closeOrderId, trade.Symbol, fill.Status, fillPrice);
 
             return new BrokerOrderResult(
-                OrderId:       closeOrderId.ToString(),
-                StopOrderId:   null,
+                OrderId: closeOrderId.ToString(),
+                StopOrderId: null,
                 TargetOrderId: null,
-                FillPrice:     fillPrice,
-                FillQuantity:  trade.Quantity,
-                FillAmount:    fillPrice * trade.Quantity * multiplier,
-                Status:        OrderStatus.Filled,
-                FilledAt:      DateTimeOffset.UtcNow);
+                FillPrice: fillPrice,
+                FillQuantity: trade.Quantity,
+                FillAmount: fillPrice * trade.Quantity * multiplier,
+                Status: OrderStatus.Filled,
+                FilledAt: DateTimeOffset.UtcNow);
         }
         catch (OperationCanceledException)
         {
@@ -325,18 +357,82 @@ public class IbkrBrokerService : IBrokerService
             _connection.Wrapper.UnregisterOrderCallback(closeOrderId);
 
             return new BrokerOrderResult(
-                OrderId:       closeOrderId.ToString(),
-                StopOrderId:   null,
+                OrderId: closeOrderId.ToString(),
+                StopOrderId: null,
                 TargetOrderId: null,
-                FillPrice:     trade.EntryPrice,
-                FillQuantity:  trade.Quantity,
-                FillAmount:    trade.EntryAmount,
-                Status:        OrderStatus.Pending,
-                FilledAt:      DateTimeOffset.UtcNow);
+                FillPrice: trade.EntryPrice,
+                FillQuantity: trade.Quantity,
+                FillAmount: trade.EntryAmount,
+                Status: OrderStatus.Pending,
+                FilledAt: DateTimeOffset.UtcNow);
         }
     }
 
-    // Connects to IB Gateway if not already connected
+    /// <summary>
+    /// Syncs the internal order ID counter from Gateway's next valid order ID.
+    /// Called on startup to prevent order ID collisions across Worker restarts.
+    /// </summary>
+    public void SyncOrderId()
+    {
+        var gatewayId = _connection.Wrapper.NextValidOrderId;
+        var target = Math.Max(gatewayId - 10, 1);
+        Interlocked.Exchange(ref _nextOrderId, target);
+        _logger.LogInformation(
+            "IBKR order ID synced — Gateway: {GatewayId}, next order will use: {Next}",
+            gatewayId, target + 10);
+    }
+
+    // -- Helpers --
+
+    // Registers exec detail callbacks for both trail and target OCA orders.
+    // When either fires, routes the fill to PositionMonitorService via the broker fill handler.
+    private void RegisterStopOrderCallbacks(int entryOrderId, int trailStopId, int targetOrderId)
+    {
+        var entryIdStr = entryOrderId.ToString();
+
+        lock (_stopMapLock)
+        {
+            _stopOrderMap[trailStopId]   = (entryIdStr, TradeOutcome.StoppedOut);
+            _stopOrderMap[targetOrderId] = (entryIdStr, TradeOutcome.TargetHit);
+        }
+
+        _connection.Wrapper.RegisterExecDetailsCallback(trailStopId, fillPrice =>
+            OnStopOrderFilled(trailStopId, fillPrice));
+
+        _connection.Wrapper.RegisterExecDetailsCallback(targetOrderId, fillPrice =>
+            OnStopOrderFilled(targetOrderId, fillPrice));
+    }
+
+    // Called by IbkrEWrapper when a stop or target order fills broker-side.
+    // Looks up the parent trade and fires the broker fill handler on a background thread
+    // to avoid blocking the EWrapper callback thread.
+    private void OnStopOrderFilled(int stopOrderId, decimal fillPrice)
+    {
+        (string EntryOrderId, TradeOutcome Outcome) mapping;
+
+        lock (_stopMapLock)
+        {
+            if (!_stopOrderMap.TryGetValue(stopOrderId, out mapping))
+                return;
+
+            _stopOrderMap.Remove(stopOrderId);
+        }
+
+        _logger.LogInformation(
+            "IBKR broker-side fill detected — StopOrderId: {StopId} EntryOrderId: {EntryId} " +
+            "Outcome: {Outcome} FillPrice: ${Price:F2}",
+            stopOrderId, mapping.EntryOrderId, mapping.Outcome, fillPrice);
+
+        // Fire on a background thread to avoid blocking the EWrapper callback
+        _ = Task.Run(() => _brokerFillHandler?.Invoke(
+            mapping.EntryOrderId, fillPrice, mapping.Outcome));
+    }
+
+    private void RemoveStopOrderMapping(int orderId)
+    {
+        lock (_stopMapLock) { _stopOrderMap.Remove(orderId); }
+    }
+
     private bool EnsureConnected()
     {
         if (_connection.IsConnected) return true;
@@ -354,20 +450,6 @@ public class IbkrBrokerService : IBrokerService
 
     // Leaves gaps of 10 between parent IDs to accommodate stop, target, and OCA child order IDs
     private int GetNextOrderId() => Interlocked.Add(ref _nextOrderId, 10);
-
-    /// <summary>
-    /// Syncs the internal order ID counter from Gateway's next valid order ID.
-    /// Called on startup to prevent order ID collisions across Worker restarts.
-    /// </summary>
-    public void SyncOrderId()
-    {
-        var gatewayId = _connection.Wrapper.NextValidOrderId;
-        var target = Math.Max(gatewayId - 10, 1);
-        Interlocked.Exchange(ref _nextOrderId, target);
-        _logger.LogInformation(
-            "IBKR order ID synced — Gateway: {GatewayId}, next order will use: {Next}",
-            gatewayId, target + 10);
-    }
 
     private static Contract BuildContract(TradeOrder order)
     {
@@ -445,7 +527,7 @@ public class IbkrBrokerService : IBrokerService
             OrderId       = orderId,
             ParentId      = parentId,
             Action        = "SELL",
-            OrderType     = "GTC",
+            OrderType     = "STP",
             AuxPrice      = stopPrice,
             TotalQuantity = quantity,
             Transmit      = false,

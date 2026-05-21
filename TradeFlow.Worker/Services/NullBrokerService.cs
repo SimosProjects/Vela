@@ -19,9 +19,6 @@ public class NullBrokerService : IBrokerService
     /// <summary>
     /// Simulates placing a bracket order and returns a fake fill at the alert price.
     /// </summary>
-    /// <param name="order">The trade order to simulate.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A simulated <see cref="BrokerOrderResult"/> with <see cref="OrderStatus.Simulated"/>.</returns>
     public Task<BrokerOrderResult> PlaceOrderAsync(
         TradeOrder order,
         CancellationToken cancellationToken = default)
@@ -70,10 +67,6 @@ public class NullBrokerService : IBrokerService
     /// <summary>
     /// Simulates closing a position and returns a fake fill at 10% above entry.
     /// </summary>
-    /// <param name="trade">The trade record to simulate closing.</param>
-    /// <param name="outcome">The reason for closing.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A simulated <see cref="BrokerOrderResult"/> with <see cref="OrderStatus.Simulated"/>.</returns>
     public Task<BrokerOrderResult> ClosePositionAsync(
         TradeRecord trade,
         TradeOutcome outcome,
@@ -85,8 +78,7 @@ public class NullBrokerService : IBrokerService
             trade.Quantity,
             outcome);
 
-        // Simulate a 10% gain for testing the CSV and Discord flow
-        var simulatedExitPrice = trade.EntryPrice * 1.10m;
+        var simulatedExitPrice  = trade.EntryPrice * 1.10m;
         var simulatedExitAmount = trade.EntryAmount * 1.10m;
 
         var result = new BrokerOrderResult(
@@ -120,5 +112,13 @@ public class NullBrokerService : IBrokerService
     {
         _logger.LogDebug("[NullBroker] GetOpenPositionsValue → $0 simulated");
         return Task.FromResult(0m);
+    }
+
+    /// <summary>
+    /// No-op — NullBrokerService never fires broker-side fills.
+    /// </summary>
+    public void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler)
+    {
+        // No broker-side fills in simulation
     }
 }

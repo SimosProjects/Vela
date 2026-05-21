@@ -23,6 +23,8 @@ public class BrokerExecutionServiceTests
             .ReturnsAsync(100_000m);
         _brokerMock.Setup(b => b.GetOpenPositionsValueAsync(default))
             .ReturnsAsync(0m);
+        _brokerMock.Setup(b => b.RegisterBrokerFillHandler(
+            It.IsAny<Action<string, decimal, TradeOutcome>>()));
         _brokerMock.Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
                 OrderId: "ORDER-001",
