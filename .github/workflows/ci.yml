@@ -64,6 +64,7 @@ jobs:
           --no-build
           --filter "FullyQualifiedName!~Integration"
           --logger "trx;LogFileName=unit-results.trx"
+          --results-directory ./test-results
 
       - name: Integration Tests
         run: dotnet test TradeFlow.Tests/TradeFlow.Tests.csproj
@@ -71,6 +72,7 @@ jobs:
           --no-build
           --filter "FullyQualifiedName~Integration"
           --logger "trx;LogFileName=integration-results.trx"
+          --results-directory ./test-results
         env:
           XTRADES_TOKEN: dummy-token-for-ci
           SKIP_IBKR_TESTS: true
@@ -80,7 +82,7 @@ jobs:
         if: always()
         with:
           name: Test Results
-          path: '**/*.trx'
+          path: './test-results/*.trx'
           reporter: dotnet-trx
 
   docker:

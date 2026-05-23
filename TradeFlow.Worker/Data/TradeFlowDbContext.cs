@@ -102,6 +102,8 @@ public class TradeFlowDbContext : DbContext
             entity.Property(m => m.ClosedAt).HasColumnName("closed_at");
             entity.Property(m => m.PnL).HasColumnName("pnl");
             entity.Property(m => m.PnLPct).HasColumnName("pnl_pct");
+            entity.Property(m => m.ExitLatencyMs).HasColumnName("exit_latency_ms");
+            entity.Property(m => m.ExitSlippagePct).HasColumnName("exit_slippage_pct");
         });
 
         modelBuilder.Entity<OpenPosition>(entity =>

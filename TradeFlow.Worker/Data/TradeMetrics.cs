@@ -75,4 +75,14 @@ public class TradeMetric
 
     // Percentage gain or loss relative to entry amount
     public decimal? PnLPct { get; set; }
+
+    // -- Exit execution analytics (null until closed via Xtrades alert) --
+
+    // Time from exit alert received to close order filled in milliseconds
+    public int? ExitLatencyMs { get; set; }
+
+    // Percentage difference between alerted exit price and actual fill price
+    // Positive = filled higher than alerted (better for seller)
+    // Negative = filled lower than alerted (worse for seller)
+    public decimal? ExitSlippagePct { get; set; }
 }
