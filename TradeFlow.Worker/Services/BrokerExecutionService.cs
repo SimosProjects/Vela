@@ -1,4 +1,3 @@
-using TradeFlow.Worker.Data;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Models;
 
@@ -103,10 +102,6 @@ public class BrokerExecutionService
             return;
         }
 
-        // If the fill confirmation timed out, verify the position actually exists in Gateway
-        // before recording it. A pending status does not guarantee the order was filled —
-        // it may have been rejected or expired with no fill. Querying GrossPositionValue
-        // confirms capital was actually deployed before we open the TradeGuard position.
         if (result.Status == OrderStatus.Pending)
         {
             _logger.LogWarning(
@@ -151,36 +146,34 @@ public class BrokerExecutionService
                 alert.Symbol, positionPrice);
         }
 
-        // Register position in TradeGuard memory and persist to database
         _guard.RegisterOpen(order, result);
         var trade = _guard.FindOpenTrade(
             order.UserName, order.OptionsContractSymbol, order.Symbol)!;
 
-        // Persist open position to DB so TradeGuard can reload it after a restart
         using (var scope = _scopeFactory.CreateScope())
         {
             var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
             await repo.SaveAsync(new OpenPosition
             {
-                OrderId        = trade.OrderId,
-                StopOrderId    = trade.StopOrderId,
-                TargetOrderId  = trade.TargetOrderId,
-                AlertId        = trade.AlertId,
-                UserName       = trade.UserName,
-                Symbol         = trade.Symbol,
-                TradeType      = trade.TradeType.ToString(),
+                OrderId         = trade.OrderId,
+                StopOrderId     = trade.StopOrderId,
+                TargetOrderId   = trade.TargetOrderId,
+                AlertId         = trade.AlertId,
+                UserName        = trade.UserName,
+                Symbol          = trade.Symbol,
+                TradeType       = trade.TradeType.ToString(),
                 OptionsContract = trade.OptionsContract,
-                Direction      = trade.Direction,
-                Strike         = trade.Strike,
-                Expiration     = trade.Expiration,
-                Quantity       = trade.Quantity,
-                EntryPrice     = trade.EntryPrice,
-                EntryAmount    = trade.EntryAmount,
-                StopPrice      = trade.StopPrice,
-                TargetPrice    = trade.TargetPrice,
-                OpenedAt       = trade.OpenedAt,
-                IsAverage      = trade.IsAverage,
-                HasAveraged    = trade.HasAveraged,
+                Direction       = trade.Direction,
+                Strike          = trade.Strike,
+                Expiration      = trade.Expiration,
+                Quantity        = trade.Quantity,
+                EntryPrice      = trade.EntryPrice,
+                EntryAmount     = trade.EntryAmount,
+                StopPrice       = trade.StopPrice,
+                TargetPrice     = trade.TargetPrice,
+                OpenedAt        = trade.OpenedAt,
+                IsAverage       = trade.IsAverage,
+                HasAveraged     = trade.HasAveraged,
             }, ct);
         }
 
@@ -242,6 +235,9 @@ public class BrokerExecutionService
         Alert alert,
         CancellationToken ct = default)
     {
+        // Capture the moment the exit alert arrived, used for exit latency calculation
+        var alertReceivedAt = DateTimeOffset.UtcNow;
+
         var trade = _guard.FindOpenTrade(
             alert.UserName ?? "",
             alert.OptionsContractSymbol,
@@ -276,7 +272,6 @@ public class BrokerExecutionService
 
         if (closedTrade is null) return;
 
-        // Remove persisted open position now that it is closed
         using (var scope = _scopeFactory.CreateScope())
         {
             var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
@@ -295,17 +290,26 @@ public class BrokerExecutionService
 
         if (closedTrade.PnL.HasValue && closedTrade.PnLPercent.HasValue)
         {
+            var exitLatencyMs = (int)(closeResult.FilledAt - alertReceivedAt).TotalMilliseconds;
+
+            var alertedExitPrice = alert.PriceAtExit ?? alert.ActualPriceAtTimeOfExit ?? 0m;
+            var exitSlippagePct  = alertedExitPrice > 0
+                ? (closeResult.FillPrice - alertedExitPrice) / alertedExitPrice * 100
+                : (decimal?)null;
+
             using var metricScope = _scopeFactory.CreateScope();
             var metrics = metricScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
             await metrics.CloseAsync(
-                orderId:    trade.OrderId,
-                exitPrice:  closeResult.FillPrice,
-                exitAmount: closeResult.FillAmount,
-                pnl:        closedTrade.PnL.Value,
-                pnlPct:     closedTrade.PnLPercent.Value,
-                outcome:    closedTrade.Result.ToString(),
-                closedAt:   closedTrade.ClosedAt ?? DateTimeOffset.UtcNow,
-                ct:         ct);
+                orderId:         trade.OrderId,
+                exitPrice:       closeResult.FillPrice,
+                exitAmount:      closeResult.FillAmount,
+                pnl:             closedTrade.PnL.Value,
+                pnlPct:          closedTrade.PnLPercent.Value,
+                outcome:         closedTrade.Result.ToString(),
+                closedAt:        closedTrade.ClosedAt ?? DateTimeOffset.UtcNow,
+                exitLatencyMs:   exitLatencyMs,
+                exitSlippagePct: exitSlippagePct,
+                ct:              ct);
         }
     }
 

@@ -25,6 +25,8 @@ public interface ITradeMetricsRepository
         decimal pnlPct,
         string outcome,
         DateTimeOffset closedAt,
+        int? exitLatencyMs,
+        decimal? exitSlippagePct,
         CancellationToken ct = default);
 
     /// <summary>
@@ -61,15 +63,12 @@ public class TradeMetricsRepository : ITradeMetricsRepository
         catch (DbUpdateException ex)
             when (ex.InnerException is Npgsql.PostgresException pg && pg.SqlState == "23505")
         {
-            // Duplicate key — order ID already exists from a previous session.
-            // Safe to skip; the existing row in trade_metrics is still valid.
             _logger.LogWarning(
                 "Trade metric skipped — duplicate OrderId {OrderId} for {Symbol} (order ID reused across restart)",
                 metric.Id, metric.Symbol);
         }
         catch (Exception ex)
         {
-            // Never let analytics failures affect trading execution
             _logger.LogError(ex,
                 "Failed to write open trade metric for {Symbol} OrderId: {OrderId}",
                 metric.Symbol, metric.Id);
@@ -89,6 +88,8 @@ public class TradeMetricsRepository : ITradeMetricsRepository
         decimal pnlPct,
         string outcome,
         DateTimeOffset closedAt,
+        int? exitLatencyMs,
+        decimal? exitSlippagePct,
         CancellationToken ct = default)
     {
         try
@@ -96,12 +97,14 @@ public class TradeMetricsRepository : ITradeMetricsRepository
             var updated = await _db.TradeMetrics
                 .Where(m => m.Id == orderId)
                 .ExecuteUpdateAsync(s => s
-                    .SetProperty(m => m.ExitPrice,  exitPrice)
-                    .SetProperty(m => m.ExitAmount, exitAmount)
-                    .SetProperty(m => m.PnL,        pnl)
-                    .SetProperty(m => m.PnLPct,     pnlPct)
-                    .SetProperty(m => m.Outcome,    outcome)
-                    .SetProperty(m => m.ClosedAt,   closedAt),
+                    .SetProperty(m => m.ExitPrice,       exitPrice)
+                    .SetProperty(m => m.ExitAmount,      exitAmount)
+                    .SetProperty(m => m.PnL,             pnl)
+                    .SetProperty(m => m.PnLPct,          pnlPct)
+                    .SetProperty(m => m.Outcome,         outcome)
+                    .SetProperty(m => m.ClosedAt,        closedAt)
+                    .SetProperty(m => m.ExitLatencyMs,   exitLatencyMs)
+                    .SetProperty(m => m.ExitSlippagePct, exitSlippagePct),
                 ct);
 
             if (updated == 0)
@@ -126,7 +129,6 @@ public class TradeMetricsRepository : ITradeMetricsRepository
         {
             var easternTime = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-            // Convert dateEt to UTC range covering the full ET day
             var startUtc = TimeZoneInfo.ConvertTimeToUtc(
                 dateEt.ToDateTime(TimeOnly.MinValue), easternTime);
             var endUtc = TimeZoneInfo.ConvertTimeToUtc(
