@@ -11,6 +11,12 @@ env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
   DOTNET_NOLOGO: true
 
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+  packages: write
+
 jobs:
   build-and-test:
     name: Build and Test
