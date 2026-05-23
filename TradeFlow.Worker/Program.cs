@@ -62,6 +62,12 @@ builder.Services.AddHttpClient<IAlertApiClient, TradeFlow.Worker.Services.AlertA
     options.Retry.MaxRetryAttempts = 3;
 });
 
+// Named HTTP client for SignalRListenerService negotiate calls
+builder.Services.AddHttpClient("SignalR", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
 builder.Services.AddSingleton<IAlertNormalizer, AlertNormalizer>();
 builder.Services.AddSingleton<AlertMetrics>();
 
@@ -118,27 +124,40 @@ builder.Services.AddHostedService<SignalRListenerService>();
 
 var host = builder.Build();
 
-// Startup sequence: connect to Gateway, sync order IDs, then reload TradeGuard state from DB
+// Startup sequence: connect to Gateway, wait for session ready, sync order IDs,
+// then reload TradeGuard state from DB
 if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
 {
     var connection = host.Services.GetRequiredService<IbkrConnectionService>();
     connection.Connect();
 
-    // Wait for nextValidId callback to fire before syncing — it is async from Gateway
-    await Task.Delay(5000);
+    // Wait for nextValidId callback from Gateway, confirms session is fully initialized.
+    // Timeout of 15s as fallback in case Gateway is slow to respond.
+    await connection.WaitForNextValidIdAsync(TimeSpan.FromSeconds(15));
 
     var broker = host.Services.GetRequiredService<IbkrBrokerService>();
     broker.SyncOrderId();
 }
 
-// Reload open positions from DB into TradeGuard so exit alerts work after restart
+// Reload open positions and daily trade count from DB into TradeGuard on restart
 using (var scope = host.Services.CreateScope())
 {
-    var repo  = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
-    var guard = host.Services.GetRequiredService<TradeGuard>();
+    var repo    = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+    var metrics = scope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+    var guard   = host.Services.GetRequiredService<TradeGuard>();
+
     var positions = await repo.GetAllAsync();
     if (positions.Count > 0)
         guard.LoadFromDatabase(positions);
+
+    // Seed daily trade count from trade_metrics so restarts within the same
+    // trading day don't reset the counter and allow more than the daily limit
+    var todayEt    = TimeZoneInfo.ConvertTime(
+        DateTimeOffset.UtcNow,
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).Date;
+    var todayCount = await metrics.GetTodayTradeCountAsync(DateOnly.FromDateTime(todayEt));
+    if (todayCount > 0)
+        guard.SeedDailyCount(todayCount);
 }
 
 host.Run();

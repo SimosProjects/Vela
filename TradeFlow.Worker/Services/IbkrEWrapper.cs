@@ -30,6 +30,11 @@ public class IbkrEWrapper : EWrapper
 
     private readonly Lock _lock = new();
 
+    // Resolves when Gateway sends the first nextValidId callback after connect.
+    // Used by IbkrConnectionService.WaitForNextValidIdAsync to replace the fragile Task.Delay.
+    private readonly TaskCompletionSource<int> _nextValidIdReady =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
     // Tracks the next valid order ID as reported by Gateway on connect and after each order.
     // Used by IbkrBrokerService to avoid ID collisions across Worker restarts.
     private int _nextValidOrderId = 1;
@@ -200,6 +205,12 @@ public class IbkrEWrapper : EWrapper
         lock (_lock) { _accountCallbacks.Remove(reqId); }
     }
 
+    /// <summary>
+    /// Returns a task that completes when Gateway sends the first nextValidId callback.
+    /// Used by IbkrConnectionService to replace the fragile Task.Delay startup hack.
+    /// </summary>
+    public Task<int> WaitForNextValidIdAsync() => _nextValidIdReady.Task;
+
     public void connectAck() =>
         _logger.LogInformation("IBKR connection acknowledged.");
 
@@ -208,6 +219,7 @@ public class IbkrEWrapper : EWrapper
     public void nextValidId(int orderId)
     {
         _nextValidOrderId = orderId;
+        _nextValidIdReady.TrySetResult(orderId);
         _logger.LogInformation("IBKR Next Valid OrderId: {OrderId}", orderId);
     }
 

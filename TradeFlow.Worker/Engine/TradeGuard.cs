@@ -80,6 +80,27 @@ public class TradeGuard
     }
 
     /// <summary>
+    /// Seeds the daily trade counter from a persisted count on startup.
+    /// Prevents the counter resetting to zero after a Worker restart within the same trading day.
+    /// </summary>
+    public void SeedDailyCount(int count)
+    {
+        var todayEt = TimeZoneInfo.ConvertTime(
+            DateTimeOffset.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).Date;
+
+        var today = DateOnly.FromDateTime(todayEt);
+
+        lock (_lock)
+        {
+            _dailyTradeCount = count;
+            _countDate       = today;
+            _logger.LogInformation(
+                "TradeGuard: seeded daily trade count {Count} for {Date}", count, today);
+        }
+    }
+
+    /// <summary>
     /// Returns null if the order is allowed, or a rejection reason string if blocked.
     /// </summary>
     public async Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)

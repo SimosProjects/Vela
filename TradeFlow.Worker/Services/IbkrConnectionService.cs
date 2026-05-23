@@ -64,7 +64,7 @@ public class IbkrConnectionService : IDisposable
             reader.Start();
 
             // Background thread that processes messages as they arrive.
-            // The try/catch inside the loop is critical.  Without it, a single bad packet
+            // The try/catch inside the loop is critical. Without it, a single bad packet
             // from an illiquid OTC stock (EndOfStreamException) kills this thread silently,
             // leaving Gateway in a zombie state that eventually crashes the process entirely.
             var readerThread = new Thread(() =>
@@ -95,7 +95,7 @@ public class IbkrConnectionService : IDisposable
             };
             readerThread.Start();
 
-            // Give the connection a moment to establish
+            // Give the connection a moment to establish before checking state
             Thread.Sleep(1000);
 
             _connected = _client.IsConnected();
@@ -125,6 +125,25 @@ public class IbkrConnectionService : IDisposable
         {
             _logger.LogError(ex, "Exception connecting to IB Gateway");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// Waits for Gateway to send the nextValidId callback, confirming the session is fully
+    /// initialized and ready for order placement. Falls back after the given timeout.
+    /// </summary>
+    public async Task WaitForNextValidIdAsync(TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        try
+        {
+            await _wrapper.WaitForNextValidIdAsync().WaitAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "Timed out waiting for nextValidId from Gateway after {Timeout}s — proceeding anyway.",
+                timeout.TotalSeconds);
         }
     }
 
