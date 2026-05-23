@@ -4,9 +4,19 @@ Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry 
 2026-05-20,14:39:22,,,BROS,54,55.13,2977.02,,,Open,Open,Theo,,
 2026-05-20,15:07:42,,,FDP,90,33.03,2972.70,,,Open,Open,Theo,,
 2026-05-20,15:11:23,,,SBSW,255,11.79,3006.45,,,Open,Open,Theo,,
+2026-05-21,10:12:26,2026-05-23,01:56:14,ELF,57,51.40,2929.80,52.95,3018.15,Closed,XtradesExit,Theo,+88.35,+3.02%
+2026-05-21,10:15:36,2026-05-23,00:19:00,INTU,9,306.28,2756.52,311.72,2805.48,Closed,XtradesExit,Theo,+48.96,+1.78%
+2026-05-21,10:33:10,,,WMT,24,122.15,2931.60,,,Open,Open,SLAM,,
+2026-05-22,10:36:27,,,CBRS,11,257.70,2834.70,,,Open,Open,SLAM,,
+2026-05-22,13:08:49,,,GOVX,735,3.92,2881.20,,,Open,Open,yoyomun,,
+2026-05-22,14:53:03,,,LULU,23,126.75,2915.25,,,Open,Open,alexander_xt,,
+2026-05-22,15:54:45,,,SW,78,37.99,2963.22,,,Open,Open,Theo,,
+2026-05-22,15:55:51,,,MKC,62,47.88,2968.56,,,Open,Open,Theo,,
+2026-05-22,15:56:27,,,UPBD,168,17.83,2995.44,,,Open,Open,Theo,,
+2026-05-22,15:59:06,,,MA,6,499.25,2995.50,,,Open,Open,Theo,,
 
 ,,SUMMARY
-,,Total Trades,5
-,,Open,5,Closed,0
+,,Total Trades,15
+,,Open,15,Closed,0
 ,,Wins,0,Losses,0,Win Rate,0.0%
 ,,Total P&L,+0.00

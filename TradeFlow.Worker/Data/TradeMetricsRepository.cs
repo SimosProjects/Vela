@@ -26,6 +26,12 @@ public interface ITradeMetricsRepository
         string outcome,
         DateTimeOffset closedAt,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns the number of trades opened today in ET based on order_filled_at.
+    /// Used on startup to seed TradeGuard's daily counter after a restart.
+    /// </summary>
+    Task<int> GetTodayTradeCountAsync(DateOnly dateEt, CancellationToken ct = default);
 }
 
 /// <inheritdoc/>
@@ -110,6 +116,30 @@ public class TradeMetricsRepository : ITradeMetricsRepository
         {
             _logger.LogError(ex,
                 "Failed to update close trade metric for OrderId: {OrderId}", orderId);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<int> GetTodayTradeCountAsync(DateOnly dateEt, CancellationToken ct = default)
+    {
+        try
+        {
+            var easternTime = TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
+            // Convert dateEt to UTC range covering the full ET day
+            var startUtc = TimeZoneInfo.ConvertTimeToUtc(
+                dateEt.ToDateTime(TimeOnly.MinValue), easternTime);
+            var endUtc = TimeZoneInfo.ConvertTimeToUtc(
+                dateEt.ToDateTime(TimeOnly.MaxValue), easternTime);
+
+            return await _db.TradeMetrics
+                .Where(m => m.OrderFilledAt >= startUtc && m.OrderFilledAt <= endUtc)
+                .CountAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to query today's trade count from trade_metrics");
+            return 0;
         }
     }
 }

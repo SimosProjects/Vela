@@ -254,7 +254,7 @@ public class CsvTradeLogger
             if (cols.Length > 4 &&
                 cols[4] == trade.Symbol &&
                 cols[6] == (trade.TradeType == TradeType.Options ? trade.Direction ?? "" : trade.Quantity.ToString()) &&
-                string.IsNullOrEmpty(cols[12]))
+                string.IsNullOrEmpty(trade.TradeType == TradeType.Options ? cols[12] : cols[8]))
             {
                 lines[i] = BuildClosedRow(trade);
                 updated = true;

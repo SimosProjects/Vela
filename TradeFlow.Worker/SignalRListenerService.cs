@@ -13,25 +13,25 @@ namespace TradeFlow.Worker;
 public class SignalRListenerService : BackgroundService
 {
     private const string NegotiateUrl = "https://app.xtrades.net/api/v2/signalr/negotiate";
-
-    // Confirmed from browser DevTools inspection
     private const string AlertEventName = "newAlert";
     private const string HubName = "notification";
+    private const int ChannelCapacity = 500;
 
     private readonly IAlertNormalizer _normalizer;
     private readonly RiskEngineService _riskEngine;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SignalRListenerService> _logger;
-    private readonly HttpClient _httpClient;
+    private readonly IHttpClientFactory _httpClientFactory;
     private readonly string _token;
     private readonly DiscordNotificationService _discord;
     private readonly BrokerExecutionService _execution;
 
-    // Bounded channel decouples the fast SignalR callback from the slower database pipeline
+    // DropOldest prevents the SignalR callback from blocking on alert bursts.
+    // A warning is logged when the channel is at capacity so bursts are visible in logs.
     private readonly Channel<JsonElement> _alertChannel =
-        Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(500)
+        Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(ChannelCapacity)
         {
-            FullMode = BoundedChannelFullMode.Wait
+            FullMode = BoundedChannelFullMode.DropOldest
         });
 
     public SignalRListenerService(
@@ -40,7 +40,8 @@ public class SignalRListenerService : BackgroundService
         IServiceScopeFactory scopeFactory,
         ILogger<SignalRListenerService> logger,
         DiscordNotificationService discord,
-        BrokerExecutionService execution)
+        BrokerExecutionService execution,
+        IHttpClientFactory httpClientFactory)
     {
         _normalizer = normalizer;
         _riskEngine = riskEngine;
@@ -48,14 +49,11 @@ public class SignalRListenerService : BackgroundService
         _logger = logger;
         _discord = discord;
         _execution = execution;
+        _httpClientFactory = httpClientFactory;
 
         _token = Environment.GetEnvironmentVariable("XTRADES_TOKEN")
             ?? throw new InvalidOperationException(
                 "XTRADES_TOKEN environment variable is not set.");
-
-        _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.Authorization =
-            new AuthenticationHeaderValue("Bearer", _token);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -97,6 +95,12 @@ public class SignalRListenerService : BackgroundService
                     _logger.LogDebug("SignalR newAlert received");
                     try
                     {
+                        // Warn if channel is near capacity, indicates processing is falling behind
+                        if (_alertChannel.Reader.Count >= ChannelCapacity - 1)
+                            _logger.LogWarning(
+                                "SignalR alert channel at capacity ({Count}/{Max}) — oldest alert will be dropped.",
+                                _alertChannel.Reader.Count, ChannelCapacity);
+
                         await _alertChannel.Writer.WriteAsync(alert, stoppingToken);
                     }
                     catch (OperationCanceledException) { }
@@ -160,7 +164,11 @@ public class SignalRListenerService : BackgroundService
     private async Task<(string HubUrl, string Token)> NegotiateAsync(
         CancellationToken cancellationToken)
     {
-        var response = await _httpClient.PostAsync(NegotiateUrl, null, cancellationToken);
+        var client = _httpClientFactory.CreateClient("SignalR");
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", _token);
+
+        var response = await client.PostAsync(NegotiateUrl, null, cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {
