@@ -11,32 +11,23 @@ public class IbkrEWrapper : EWrapper
 {
     private readonly ILogger<IbkrEWrapper> _logger;
 
-    // Order callbacks keyed by orderId — carries fill status and average fill price
     private readonly Dictionary<int, TaskCompletionSource<OrderFill>> _orderCallbacks = new();
-
-    // Account summary callbacks keyed by reqId
     private readonly Dictionary<int, TaskCompletionSource<string>> _accountCallbacks = new();
-
-    // Position callbacks keyed by symbol match key
     private readonly Dictionary<string, TaskCompletionSource<decimal>> _positionCallbacks = new();
-
-    // Rejection reasons keyed by orderId, populated when error code 201 is received
     private readonly Dictionary<int, string> _rejectionReasons = new();
-
-    // Exec details callbacks keyed by orderId — fires when a stop or target order fills broker-side
     private readonly Dictionary<int, Action<decimal>> _execDetailsCallbacks = new();
 
-    private Action? _onConnectionClosed;
+    // Market data streaming callbacks keyed by reqId — resolves with midpoint or LAST price
+    private readonly Dictionary<int, TaskCompletionSource<decimal>> _marketDataCallbacks = new();
+    private readonly Dictionary<int, decimal> _marketDataBids = new();
+    private readonly Dictionary<int, decimal> _marketDataAsks = new();
 
+    private Action? _onConnectionClosed;
     private readonly Lock _lock = new();
 
-    // Resolves when Gateway sends the first nextValidId callback after connect.
-    // Used by IbkrConnectionService.WaitForNextValidIdAsync to replace the fragile Task.Delay.
     private readonly TaskCompletionSource<int> _nextValidIdReady =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    // Tracks the next valid order ID as reported by Gateway on connect and after each order.
-    // Used by IbkrBrokerService to avoid ID collisions across Worker restarts.
     private int _nextValidOrderId = 1;
     public int NextValidOrderId => _nextValidOrderId;
 
@@ -45,7 +36,6 @@ public class IbkrEWrapper : EWrapper
         _logger = logger;
     }
 
-    // Only logs and resolves on terminal states to avoid flooding the console with partial fills.
     public void orderStatus(int orderId, string status, double filled, double remaining,
         double avgFillPrice, int permId, int parentId, double lastFillPrice,
         int clientId, string whyHeld, double mktCapPrice)
@@ -67,8 +57,6 @@ public class IbkrEWrapper : EWrapper
         {
             if (_orderCallbacks.TryGetValue(orderId, out var tcs))
             {
-                // Only resolve on an actual fill, not PreSubmitted or Submitted.
-                // This ensures OCA bracket orders are placed against a confirmed position.
                 if (status is "Filled")
                 {
                     tcs.TrySetResult(new OrderFill(status, (decimal)avgFillPrice));
@@ -78,8 +66,6 @@ public class IbkrEWrapper : EWrapper
         }
     }
 
-    // Fires registered exec details callbacks when a stop or target order fills broker-side.
-    // This is the primary mechanism for detecting broker-side closes without polling.
     public void execDetails(int reqId, Contract contract, Execution execution)
     {
         _logger.LogInformation(
@@ -97,7 +83,6 @@ public class IbkrEWrapper : EWrapper
         }
     }
 
-    // Handles both NetLiquidation and GrossPositionValue tags for account balance and exposure checks
     public void accountSummary(int reqId, string account, string tag, string value, string currency)
     {
         _logger.LogDebug("IBKR AccountSummary {Tag}: {Value} {Currency}", tag, value, currency);
@@ -112,7 +97,6 @@ public class IbkrEWrapper : EWrapper
         }
     }
 
-    // Resolves position price callbacks used by PositionMonitorService
     public void position(string account, Contract contract, double pos, double avgCost)
     {
         var key = contract.SecType == "OPT"
@@ -132,9 +116,87 @@ public class IbkrEWrapper : EWrapper
         }
     }
 
+    // Resolves market data callbacks using the best available price.
+    // LAST (4) resolves immediately as the most accurate price.
+    // BID (1) and ASK (2) are collected and resolved as midpoint once both arrive,
+    // covering premarket and after-hours when no recent trade exists.
+    public void tickPrice(int tickerId, int field, double price, TickAttrib attribs)
+    {
+        if (price <= 0)
+            return;
+
+        lock (_lock)
+        {
+            if (!_marketDataCallbacks.TryGetValue(tickerId, out var tcs))
+                return;
+
+            if (tcs.Task.IsCompleted)
+                return;
+
+            var px = (decimal)price;
+
+            switch (field)
+            {
+                case 4: // LAST — most accurate, resolve immediately
+                    tcs.TrySetResult(px);
+                    _marketDataCallbacks.Remove(tickerId);
+                    _marketDataBids.Remove(tickerId);
+                    _marketDataAsks.Remove(tickerId);
+                    break;
+
+                case 1: // BID
+                    _marketDataBids[tickerId] = px;
+                    TryResolveMidpoint(tickerId, tcs);
+                    break;
+
+                case 2: // ASK
+                    _marketDataAsks[tickerId] = px;
+                    TryResolveMidpoint(tickerId, tcs);
+                    break;
+            }
+        }
+    }
+
+    // Resolves with bid/ask midpoint once both sides are available.
+    // Called under _lock — do not acquire _lock inside this method.
+    private void TryResolveMidpoint(int tickerId, TaskCompletionSource<decimal> tcs)
+    {
+        if (!_marketDataBids.TryGetValue(tickerId, out var bid)) return;
+        if (!_marketDataAsks.TryGetValue(tickerId, out var ask)) return;
+
+        var mid = (bid + ask) / 2m;
+        tcs.TrySetResult(mid);
+        _marketDataCallbacks.Remove(tickerId);
+        _marketDataBids.Remove(tickerId);
+        _marketDataAsks.Remove(tickerId);
+    }
+
+    /// <summary>
+    /// Registers a callback that resolves when IBKR returns market data for the given request ID.
+    /// Used by IbkrBrokerService.GetCurrentMarketPriceAsync for pre-trade slippage checks.
+    /// </summary>
+    public TaskCompletionSource<decimal> RegisterMarketDataCallback(int reqId)
+    {
+        var tcs = new TaskCompletionSource<decimal>();
+        lock (_lock) { _marketDataCallbacks[reqId] = tcs; }
+        return tcs;
+    }
+
+    /// <summary>
+    /// Removes a market data callback and its associated bid/ask state on timeout.
+    /// </summary>
+    public void UnregisterMarketDataCallback(int reqId)
+    {
+        lock (_lock)
+        {
+            _marketDataCallbacks.Remove(reqId);
+            _marketDataBids.Remove(reqId);
+            _marketDataAsks.Remove(reqId);
+        }
+    }
+
     /// <summary>
     /// Registers a callback that fires when IBKR reports an execution for the given order ID.
-    /// Used to detect broker-side stop and target fills without polling.
     /// </summary>
     public void RegisterExecDetailsCallback(int orderId, Action<decimal> handler)
     {
@@ -161,7 +223,6 @@ public class IbkrEWrapper : EWrapper
 
     /// <summary>
     /// Removes a position callback that timed out before the Gateway responded.
-    /// Prevents orphaned TCS entries accumulating across PositionMonitorService poll cycles.
     /// </summary>
     public void UnregisterPositionCallback(string key)
     {
@@ -170,7 +231,6 @@ public class IbkrEWrapper : EWrapper
 
     /// <summary>
     /// Registers a callback that resolves when IBKR confirms the order is filled.
-    /// Returns an <see cref="OrderFill"/> carrying both status and average fill price.
     /// </summary>
     public TaskCompletionSource<OrderFill> RegisterOrderCallback(int orderId)
     {
@@ -188,7 +248,7 @@ public class IbkrEWrapper : EWrapper
     }
 
     /// <summary>
-    /// Registers a callback that resolves when IBKR returns the account summary value for the given request ID.
+    /// Registers a callback that resolves when IBKR returns the account summary value.
     /// </summary>
     public TaskCompletionSource<string> RegisterAccountCallback(int reqId)
     {
@@ -207,15 +267,12 @@ public class IbkrEWrapper : EWrapper
 
     /// <summary>
     /// Returns a task that completes when Gateway sends the first nextValidId callback.
-    /// Used by IbkrConnectionService to replace the fragile Task.Delay startup hack.
     /// </summary>
     public Task<int> WaitForNextValidIdAsync() => _nextValidIdReady.Task;
 
     public void connectAck() =>
         _logger.LogInformation("IBKR connection acknowledged.");
 
-    // Stores the next valid order ID from Gateway so IbkrBrokerService can seed
-    // its counter on startup, preventing order ID collisions across Worker restarts.
     public void nextValidId(int orderId)
     {
         _nextValidOrderId = orderId;
@@ -244,14 +301,12 @@ public class IbkrEWrapper : EWrapper
 
     public void error(int id, int errorCode, string errorMsg)
     {
-        // 2000-2999 are informational warnings; 10349 is order preset notice; 202 is expected OCA cancel
         if (errorCode >= 2000 && errorCode < 3000 || errorCode is 10349 or 202)
         {
             _logger.LogDebug("IBKR Info [{Code}]: {Message}", errorCode, errorMsg);
         }
         else if (errorCode == 201)
         {
-            // Order rejected — store reason so IbkrBrokerService can surface it
             lock (_lock) { _rejectionReasons[id] = errorMsg; }
             _logger.LogWarning("IBKR Order rejected [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
         }
@@ -263,7 +318,6 @@ public class IbkrEWrapper : EWrapper
 
     /// <summary>
     /// Returns the rejection reason for the given order ID if one was received, then removes it.
-    /// Returns null if no rejection was recorded for this order.
     /// </summary>
     public string? TakeRejectionReason(int orderId)
     {
@@ -280,7 +334,6 @@ public class IbkrEWrapper : EWrapper
     }
 
     // Required interface stubs
-    public void tickPrice(int tickerId, int field, double price, TickAttrib attribs) { }
     public void tickSize(int tickerId, int field, int size) { }
     public void tickString(int tickerId, int field, string value) { }
     public void tickGeneric(int tickerId, int field, double value) { }

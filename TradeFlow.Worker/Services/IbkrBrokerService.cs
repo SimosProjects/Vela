@@ -118,6 +118,74 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// Returns the current market price for any symbol using streaming market data.
+    /// Resolves on LAST price immediately, or on bid/ask midpoint when no recent trade exists
+    /// (premarket, after-hours). Used for pre-trade slippage checks before placing orders.
+    /// Returns 0 if the quote cannot be retrieved within the timeout.
+    /// </summary>
+    public async Task<decimal> GetCurrentMarketPriceAsync(
+        string symbol,
+        TradeType tradeType,
+        string? direction = null,
+        decimal? strike = null,
+        string? expiration = null,
+        CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return 0m;
+
+        var reqId = NextReqId();
+        var tcs   = _connection.Wrapper.RegisterMarketDataCallback(reqId);
+
+        var contract = tradeType == TradeType.Options
+            ? new Contract
+            {
+                Symbol      = symbol,
+                SecType     = "OPT",
+                Exchange    = "SMART",
+                Currency    = "USD",
+                Right       = direction?.ToUpper() == "CALL" ? "C" : "P",
+                Strike      = (double)(strike ?? 0),
+                LastTradeDateOrContractMonth =
+                    expiration is not null
+                        ? DateTimeOffset.Parse(expiration).ToString("yyyyMMdd")
+                        : string.Empty,
+                Multiplier  = "100",
+            }
+            : new Contract
+            {
+                Symbol      = symbol,
+                SecType     = "STK",
+                Exchange    = "SMART",
+                Currency    = "USD",
+            };
+
+        // snapshot=false (streaming) so BID/ASK ticks fire even when no recent LAST trade exists.
+        // cancelMktData in the finally block stops the stream once the price resolves or times out.
+        _connection.Client.reqMktData(reqId, contract, "", false, false, null);
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(_options.TimeoutMs);
+            var price = await tcs.Task.WaitAsync(cts.Token);
+            _logger.LogDebug(
+                "IBKR market price for {Symbol}: ${Price:F2}", symbol, price);
+            return price;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "IBKR GetCurrentMarketPrice timed out for {Symbol}.", symbol);
+            _connection.Wrapper.UnregisterMarketDataCallback(reqId);
+            return 0m;
+        }
+        finally
+        {
+            _connection.Client.cancelMktData(reqId);
+        }
+    }
+
+    /// <summary>
     /// Returns the total market value of all open positions.
     /// Used by <see cref="TradeGuard"/> to calculate current exposure before new orders.
     /// </summary>

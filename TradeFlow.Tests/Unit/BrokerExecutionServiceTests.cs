@@ -74,6 +74,7 @@ public class BrokerExecutionServiceTests
             new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
             _scopeFactory,
             NullLogger<BrokerExecutionService>.Instance,
+            Options.Create(new RiskEngineOptions()),
             isMarketOpen: () => false);
 
         _executionMarketOpen = new BrokerExecutionService(
@@ -84,6 +85,7 @@ public class BrokerExecutionServiceTests
             new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
             _scopeFactory,
             NullLogger<BrokerExecutionService>.Instance,
+            Options.Create(new RiskEngineOptions()),
             isMarketOpen: () => true);
     }
 

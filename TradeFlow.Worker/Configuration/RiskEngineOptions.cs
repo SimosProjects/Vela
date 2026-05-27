@@ -41,4 +41,7 @@ public class RiskEngineOptions
 
     [Range(1, 100, ErrorMessage = "StockLottoTrailPct must be between 1 and 100.")]
     public double StockLottoTrailPct { get; init; } = 20.0;
+
+    [Range(0, 100, ErrorMessage = "MaxEntrySlippagePct must be between 0 and 100.")]
+    public decimal MaxEntrySlippagePct { get; init; } = 5.0m;
 }

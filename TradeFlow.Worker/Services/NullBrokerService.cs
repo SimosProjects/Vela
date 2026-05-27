@@ -65,6 +65,23 @@ public class NullBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// Returns the alerted price as the current market price — 0% slippage in simulation.
+    /// </summary>
+    public Task<decimal> GetCurrentMarketPriceAsync(
+        string symbol,
+        TradeType tradeType,
+        string? direction = null,
+        decimal? strike = null,
+        string? expiration = null,
+        CancellationToken ct = default)
+    {
+        _logger.LogDebug(
+            "[NullBroker] GetCurrentMarketPrice {Symbol} → alerted price (0% slippage simulated)",
+            symbol);
+        return Task.FromResult(0m);
+    }
+
+    /// <summary>
     /// Simulates closing a position and returns a fake fill at 10% above entry.
     /// </summary>
     public Task<BrokerOrderResult> ClosePositionAsync(
