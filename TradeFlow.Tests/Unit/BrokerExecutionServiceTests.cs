@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Models;
 using TradeFlow.Worker.Services;
@@ -13,7 +15,7 @@ public class BrokerExecutionServiceTests
     private readonly Mock<ITradeMetricsRepository> _metricsMock = new();
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly TradeGuard _guard;
-    private readonly PositionSizer _sizer = new();
+    private readonly PositionSizer _sizer;
     private readonly BrokerExecutionService _execution;
     private readonly BrokerExecutionService _executionMarketOpen;
 
@@ -23,8 +25,6 @@ public class BrokerExecutionServiceTests
             .ReturnsAsync(100_000m);
         _brokerMock.Setup(b => b.GetOpenPositionsValueAsync(default))
             .ReturnsAsync(0m);
-        _brokerMock.Setup(b => b.RegisterBrokerFillHandler(
-            It.IsAny<Action<string, decimal, TradeOutcome>>()));
         _brokerMock.Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
                 OrderId: "ORDER-001",
@@ -46,8 +46,18 @@ public class BrokerExecutionServiceTests
                 FillAmount: 1_980m,
                 Status: OrderStatus.Filled,
                 FilledAt: DateTimeOffset.UtcNow));
+        _brokerMock.Setup(b => b.RegisterBrokerFillHandler(
+            It.IsAny<Action<string, decimal, TradeOutcome>>()));
+        _metricsMock.Setup(m => m.GetTodayTradeCountAsync(
+            It.IsAny<DateOnly>(), default)).ReturnsAsync(0);
+        _metricsMock.Setup(m => m.CloseAsync(
+            It.IsAny<string>(), It.IsAny<decimal>(), It.IsAny<decimal>(),
+            It.IsAny<decimal>(), It.IsAny<decimal>(), It.IsAny<string>(),
+            It.IsAny<DateTimeOffset>(), It.IsAny<int?>(), It.IsAny<decimal?>(),
+            default)).Returns(Task.CompletedTask);
 
         _guard = new TradeGuard(_brokerMock.Object, NullLogger<TradeGuard>.Instance);
+        _sizer = new PositionSizer(Options.Create(new RiskEngineOptions()));
 
         var services = new ServiceCollection();
         services.AddScoped<ITradeMetricsRepository>(_ => _metricsMock.Object);
@@ -56,7 +66,6 @@ public class BrokerExecutionServiceTests
 
         var config = new ConfigurationBuilder().Build();
 
-        // Default instance — market always closed (for tests that expect no order)
         _execution = new BrokerExecutionService(
             _brokerMock.Object,
             _sizer,
@@ -67,7 +76,6 @@ public class BrokerExecutionServiceTests
             NullLogger<BrokerExecutionService>.Instance,
             isMarketOpen: () => false);
 
-        // Market-open instance — for tests that exercise the trading path
         _executionMarketOpen = new BrokerExecutionService(
             _brokerMock.Object,
             _sizer,
@@ -129,7 +137,6 @@ public class BrokerExecutionServiceTests
     [Fact]
     public async Task HandleEntryAsync_SkipsWhenMarketClosed()
     {
-        // _execution is configured with isMarketOpen: () => false
         var alert = BuildAlert();
         var classification = CallClassification();
 
@@ -178,7 +185,8 @@ public class BrokerExecutionServiceTests
             EstimatedEntryPrice: 4.95m,
             BudgetUsed: 990m,
             StopPrice: 2.48m,
-            TargetPrice: 14.85m);
+            TargetPrice: 14.85m,
+            TrailPercent: 50.0);
 
         var result = new BrokerOrderResult(
             OrderId: "ORDER-001",
@@ -217,7 +225,8 @@ public class BrokerExecutionServiceTests
             EstimatedEntryPrice: 4.95m,
             BudgetUsed: 990m,
             StopPrice: 2.48m,
-            TargetPrice: 14.85m);
+            TargetPrice: 14.85m,
+            TrailPercent: 50.0);
 
         _guard.RegisterOpen(order, new BrokerOrderResult(
             OrderId: "ORDER-001",

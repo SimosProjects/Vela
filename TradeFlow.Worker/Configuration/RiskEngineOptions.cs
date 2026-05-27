@@ -14,9 +14,31 @@ public class RiskEngineOptions
 
     public bool AllowLotto { get; init; } = false;
 
+    public bool AllowHigh { get; init; } = true;
+
     // Minimum stock price in dollars. Stock entry alerts below this threshold are rejected.
     // Defaults to $3.00 to exclude penny stocks and OTC equities with high gap-down risk.
     // Set to 0 to disable the filter entirely.
     [Range(0, 10000, ErrorMessage = "MinStockPriceDollars must be between 0 and 10000.")]
     public decimal MinStockPriceDollars { get; init; } = 3.00m;
+
+    // Trailing stop percentages by risk tier — sent to IBKR when placing OCA orders.
+    // Options trail more aggressively than stocks due to higher price volatility.
+    [Range(1, 100, ErrorMessage = "OptionsStandardTrailPct must be between 1 and 100.")]
+    public double OptionsStandardTrailPct { get; init; } = 40.0;
+
+    [Range(1, 100, ErrorMessage = "OptionsHighTrailPct must be between 1 and 100.")]
+    public double OptionsHighTrailPct { get; init; } = 50.0;
+
+    [Range(1, 100, ErrorMessage = "OptionsLottoTrailPct must be between 1 and 100.")]
+    public double OptionsLottoTrailPct { get; init; } = 50.0;
+
+    [Range(1, 100, ErrorMessage = "StockStandardTrailPct must be between 1 and 100.")]
+    public double StockStandardTrailPct { get; init; } = 10.0;
+
+    [Range(1, 100, ErrorMessage = "StockHighTrailPct must be between 1 and 100.")]
+    public double StockHighTrailPct { get; init; } = 15.0;
+
+    [Range(1, 100, ErrorMessage = "StockLottoTrailPct must be between 1 and 100.")]
+    public double StockLottoTrailPct { get; init; } = 20.0;
 }

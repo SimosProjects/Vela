@@ -209,7 +209,7 @@ public class IbkrBrokerService : IBrokerService
             var trailStopId   = orderId + 2;
             var targetOrderId = orderId + 3;
 
-            var trailPercent = order.TradeType == TradeType.Options ? 50.0 : 15.0;
+            var trailPercent = order.TrailPercent;
             var trailOrder   = BuildOcaTrailOrder(trailStopId, order.Quantity, trailPercent, ocaGroup);
             var targetOrder  = BuildOcaLimitOrder(
                 targetOrderId, order.Quantity,
