@@ -18,6 +18,7 @@ public class BrokerExecutionService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<BrokerExecutionService> _logger;
     private readonly Func<bool> _isMarketOpen;
+    private readonly RiskEngineOptions _riskOptions;
 
     public BrokerExecutionService(
         IBrokerService broker,
@@ -27,15 +28,17 @@ public class BrokerExecutionService
         DiscordNotificationService discord,
         IServiceScopeFactory scopeFactory,
         ILogger<BrokerExecutionService> logger,
+        IOptions<RiskEngineOptions> riskOptions,
         Func<bool>? isMarketOpen = null)
     {
-        _broker       = broker;
-        _sizer        = sizer;
-        _guard        = guard;
-        _csv          = csv;
-        _discord      = discord;
+        _broker      = broker;
+        _sizer       = sizer;
+        _guard       = guard;
+        _csv         = csv;
+        _discord     = discord;
         _scopeFactory = scopeFactory;
-        _logger       = logger;
+        _logger      = logger;
+        _riskOptions = riskOptions.Value;
         // Injectable for testing; defaults to real ET market hours check
         _isMarketOpen = isMarketOpen ?? IsMarketOpenDefault;
     }
@@ -75,6 +78,39 @@ public class BrokerExecutionService
                 "TradeGuard blocked order for {Symbol}: {Reason}",
                 alert.Symbol, blocked);
             return;
+        }
+
+        // Pre-trade slippage check — compares current market price against alerted price.
+        // Skipped if MaxEntrySlippagePct is 0 (disabled) or market data returns 0.
+        if (_riskOptions.MaxEntrySlippagePct > 0)
+        {
+            var currentPrice = await _broker.GetCurrentMarketPriceAsync(
+                order.Symbol,
+                order.TradeType,
+                order.Direction,
+                order.Strike,
+                order.Expiration,
+                ct);
+
+            if (currentPrice > 0 && order.EstimatedEntryPrice > 0)
+            {
+                var slippage = Math.Abs(currentPrice - order.EstimatedEntryPrice)
+                    / order.EstimatedEntryPrice * 100;
+
+                if (slippage > _riskOptions.MaxEntrySlippagePct)
+                {
+                    _logger.LogWarning(
+                        "Slippage check failed for {Symbol} — alerted ${Alerted:F2} " +
+                        "current ${Current:F2} slippage {Slippage:F1}% exceeds max {Max:F1}%",
+                        alert.Symbol, order.EstimatedEntryPrice,
+                        currentPrice, slippage, _riskOptions.MaxEntrySlippagePct);
+                    return;
+                }
+
+                _logger.LogDebug(
+                    "Slippage check passed for {Symbol} — {Slippage:F1}% within {Max:F1}% limit",
+                    alert.Symbol, slippage, _riskOptions.MaxEntrySlippagePct);
+            }
         }
 
         var accountBalance     = await _broker.GetAccountBalanceAsync(ct);

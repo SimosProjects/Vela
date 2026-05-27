@@ -25,6 +25,19 @@ public interface IBrokerService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Returns the current market price for any symbol using a snapshot quote.
+    /// Used by BrokerExecutionService for pre-trade slippage checks before placing orders.
+    /// Returns 0 if the quote cannot be retrieved within the timeout.
+    /// </summary>
+    Task<decimal> GetCurrentMarketPriceAsync(
+        string symbol,
+        TradeType tradeType,
+        string? direction = null,
+        decimal? strike = null,
+        string? expiration = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Cancels pending stop and target orders then places a market close order.
     /// </summary>
     Task<BrokerOrderResult> ClosePositionAsync(
@@ -49,7 +62,6 @@ public interface IBrokerService
     /// <summary>
     /// Subscribes a handler that fires when a broker-side stop or target order fills.
     /// The handler receives the entry order ID, fill price, and trade outcome.
-    /// Used by PositionMonitorService to detect broker-side closes without polling.
     /// </summary>
     void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler);
 }

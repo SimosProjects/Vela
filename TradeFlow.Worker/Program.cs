@@ -1,6 +1,7 @@
 using TradeFlow.Worker;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Metrics;
+using TradeFlow.Worker.Models;
 
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
