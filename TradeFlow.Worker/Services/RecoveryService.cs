@@ -220,7 +220,8 @@ public class RecoveryService : IHostedService
             EstimatedEntryPrice:   trade.EntryPrice,
             BudgetUsed:            trade.EntryAmount,
             StopPrice:             trade.StopPrice,
-            TargetPrice:           trade.TargetPrice);
+            TargetPrice:           trade.TargetPrice,
+            TrailPercent:          trade.TradeType == TradeType.Options ? 50.0 : 15.0);
 
         var result = new BrokerOrderResult(
             OrderId:       trade.OrderId,

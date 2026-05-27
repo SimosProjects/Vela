@@ -1,28 +1,40 @@
-using TradeFlow.AlertPoC.Models;
 using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Engine;
 
-// Converts an approved Alert into a TradeOrder with sizing, stop, and target prices.
+// Converts an approved Alert into a TradeOrder with sizing, stop, target, and trail prices.
 // Fixed sizing rules for paper trading phase:
 //   Options: $1,000 initial, $500 average
 //   Stocks:  $3,000 initial, $1,500 average
+//
+// Risk tier is auto-classified for options based on expiry:
+//   Expires today          → lotto (regardless of Xtrades label)
+//   Expires this week      → high  (regardless of Xtrades label)
+//   Expires beyond week    → use Xtrades risk label as-is
+//
+// Trailing stop percentages are risk-tiered and configurable via RiskEngineOptions.
 public class PositionSizer
 {
+    private readonly RiskEngineOptions _options;
+
     // Options sizing
-    private const decimal OptionsInitialBudget  = 1_000m;
-    private const decimal OptionsAverageBudget  =   500m;
-    private const decimal OptionsStopMultiplier =  0.50m; // -50%
-    private const decimal OptionsTgtMultiplier  =  3.00m; // +200%
+    private const decimal OptionsInitialBudget = 1_000m;
+    private const decimal OptionsAverageBudget =   500m;
+    private const decimal OptionsStopMultiplier =  0.50m; // -50% initial bracket stop
+    private const decimal OptionsTgtMultiplier  =  3.00m; // +200% target
 
     // Stock sizing
-    private const decimal StockInitialBudget    = 3_000m;
-    private const decimal StockAverageBudget    = 1_500m;
-    private const decimal StockStopMultiplier   =  0.85m; // -15%
-    private const decimal StockTgtMultiplier    =  1.30m; // +30%
+    private const decimal StockInitialBudget  = 3_000m;
+    private const decimal StockAverageBudget  = 1_500m;
+    private const decimal StockStopMultiplier =  0.85m; // -15% initial bracket stop
+    private const decimal StockTgtMultiplier  =  1.30m; // +30% target
 
-    // Minimum quantity, never place a zero-contract/share order
     private const int MinQuantity = 1;
+
+    public PositionSizer(IOptions<RiskEngineOptions> options)
+    {
+        _options = options.Value;
+    }
 
     public TradeOrder? Size(Alert alert, AlertClassification classification, bool isAverage = false)
     {
@@ -43,11 +55,14 @@ public class PositionSizer
 
         var isOptions = tradeType == TradeType.Options;
 
+        var effectiveRisk = isOptions
+            ? ClassifyOptionsRisk(alert)
+            : (alert.Risk?.ToLowerInvariant() ?? "standard");
+
         var budget = isOptions
             ? (isAverage ? OptionsAverageBudget : OptionsInitialBudget)
             : (isAverage ? StockAverageBudget   : StockInitialBudget);
 
-        // Options contracts represent 100 shares (divide by price × 100)
         var quantity = isOptions
             ? (int)(budget / (price.Value * 100))
             : (int)(budget / price.Value);
@@ -55,7 +70,6 @@ public class PositionSizer
         if (quantity < MinQuantity)
             return null;
 
-        // The actual stop moves with the market once the trailing stop is active on IBKR.
         var stopPrice = isOptions
             ? price.Value * OptionsStopMultiplier
             : price.Value * StockStopMultiplier;
@@ -64,7 +78,8 @@ public class PositionSizer
             ? price.Value * OptionsTgtMultiplier
             : price.Value * StockTgtMultiplier;
 
-        // Actual budget used may vary slightly
+        var trailPercent = ResolveTrailPercent(isOptions, effectiveRisk);
+
         var budgetUsed = isOptions
             ? quantity * price.Value * 100
             : quantity * price.Value;
@@ -83,6 +98,49 @@ public class PositionSizer
             BudgetUsed:            budgetUsed,
             StopPrice:             stopPrice,
             TargetPrice:           targetPrice,
+            TrailPercent:          trailPercent,
             IsAverage:             isAverage);
     }
+
+    // -- Helpers --
+
+    // Auto-classifies options risk based on expiry relative to today ET.
+    // Overrides the Xtrades risk label for near-term expiries.
+    private static string ClassifyOptionsRisk(Alert alert)
+    {
+        if (alert.Expiration is null)
+            return alert.Risk?.ToLowerInvariant() ?? "standard";
+
+        if (!DateTimeOffset.TryParse(alert.Expiration, out var expiry))
+            return alert.Risk?.ToLowerInvariant() ?? "standard";
+
+        var et      = TimeZoneInfo.ConvertTime(
+            DateTimeOffset.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("America/New_York"));
+        var todayEt = DateOnly.FromDateTime(et.DateTime);
+        var expiryDate = DateOnly.FromDateTime(expiry.DateTime);
+
+        // Expires today → lotto regardless of Xtrades label
+        if (expiryDate == todayEt)
+            return "lotto";
+
+        // Expires this week (tomorrow through Friday) → high regardless of Xtrades label
+        var endOfWeekEt = todayEt.AddDays((int)DayOfWeek.Friday - (int)todayEt.DayOfWeek);
+        if (expiryDate <= endOfWeekEt)
+            return "high";
+
+        // Beyond this week → use Xtrades label as-is
+        return alert.Risk?.ToLowerInvariant() ?? "standard";
+    }
+
+    private double ResolveTrailPercent(bool isOptions, string effectiveRisk) =>
+        (isOptions, effectiveRisk) switch
+        {
+            (true,  "lotto")    => _options.OptionsLottoTrailPct,
+            (true,  "high")     => _options.OptionsHighTrailPct,
+            (true,  _)          => _options.OptionsStandardTrailPct,
+            (false, "lotto")    => _options.StockLottoTrailPct,
+            (false, "high")     => _options.StockHighTrailPct,
+            (false, _)          => _options.StockStandardTrailPct,
+        };
 }

@@ -1,13 +1,17 @@
+using Microsoft.Extensions.Options;
+using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Engine;
 
 namespace TradeFlow.Tests.Unit;
 
 public class PositionSizerTests
 {
-    private readonly PositionSizer _sizer = new();
+    private readonly PositionSizer _sizer = new(
+        Options.Create(new RiskEngineOptions()));
 
     private static Alert BuildAlert(string side, string type, string direction,
-        decimal? pricePaid, string? contractSymbol = null, decimal? strike = null) =>
+        decimal? pricePaid, string? contractSymbol = null, decimal? strike = null,
+        string expiration = "2026-06-20T00:00:00") =>
         new(
             Id: Guid.NewGuid().ToString(),
             UserId: null,
@@ -16,7 +20,7 @@ public class PositionSizerTests
             Type: type,
             Direction: direction,
             Strike: strike,
-            Expiration: "2026-06-20T00:00:00",
+            Expiration: expiration,
             OptionsContractSymbol: contractSymbol,
             ContractDescription: null,
             Side: side,
@@ -59,7 +63,7 @@ public class PositionSizerTests
 
         order.Should().NotBeNull();
         order!.Quantity.Should().Be(2);
-        order.BudgetUsed.Should().Be(990m); // 2 × 4.95 × 100
+        order.BudgetUsed.Should().Be(990m); // 2 x 4.95 x 100
     }
 
     [Fact]
@@ -71,6 +75,16 @@ public class PositionSizerTests
         order.Should().NotBeNull();
         order!.StopPrice.Should().Be(4.95m * 0.50m);   // -50%
         order.TargetPrice.Should().Be(4.95m * 3.00m);  // +200%
+    }
+
+    [Fact]
+    public void Size_OptionsEntry_StandardRisk_UsesStandardTrailPct()
+    {
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        var order = _sizer.Size(alert, CallClassification());
+
+        order.Should().NotBeNull();
+        order!.TrailPercent.Should().Be(40.0); // standard options trail
     }
 
     [Fact]
@@ -111,7 +125,7 @@ public class PositionSizerTests
         var alert = BuildAlert("bto", "options", "call", 150.00m, "TSLA260620C00450000", 450);
         var order = _sizer.Size(alert, CallClassification());
 
-        // $1,000 / ($150 × 100) = 0.066 → rounds to 0 → null
+        // $1,000 / ($150 x 100) = 0.066 → rounds to 0 → null
         order.Should().BeNull();
     }
 
@@ -125,5 +139,23 @@ public class PositionSizerTests
         order!.IsAverage.Should().BeTrue();
         // $500 budget, quantity = floor(500 / (4.95 * 100)) = 1
         order.Quantity.Should().Be(1);
+    }
+
+    [Fact]
+    public void Size_OptionsExpiresToday_ClassifiedAsLotto()
+    {
+        // Use today's ET date as expiration to trigger lotto classification
+        var todayEt = TimeZoneInfo.ConvertTime(
+            DateTimeOffset.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).Date;
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m,
+            "TSLA260620C00450000", 450,
+            expiration: todayEt.ToString("yyyy-MM-ddTHH:mm:ss"));
+
+        var order = _sizer.Size(alert, CallClassification());
+
+        order.Should().NotBeNull();
+        order!.TrailPercent.Should().Be(50.0); // lotto trail
     }
 }

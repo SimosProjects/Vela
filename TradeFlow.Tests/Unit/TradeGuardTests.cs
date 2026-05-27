@@ -39,6 +39,7 @@ public class TradeGuardTests
             BudgetUsed: budgetUsed,
             StopPrice: 2.48m,
             TargetPrice: 14.85m,
+            TrailPercent: 50.0,
             IsAverage: isAverage);
 
     private static BrokerOrderResult BuildResult(string orderId = "ORDER-001") =>
@@ -67,7 +68,6 @@ public class TradeGuardTests
         var order = BuildOrder();
         _guard.RegisterOpen(order, BuildResult());
 
-        // Try to open the same position again
         var result = await _guard.CheckAsync(order);
 
         result.Should().NotBeNull();
@@ -77,7 +77,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksWhenExposureExceedsBalance()
     {
-        // Set up broker to return very low available balance
         _brokerMock.Setup(b => b.GetAccountBalanceAsync(default))
             .ReturnsAsync(100m);
         _brokerMock.Setup(b => b.GetOpenPositionsValueAsync(default))
@@ -108,11 +107,9 @@ public class TradeGuardTests
         var order = BuildOrder();
         _guard.RegisterOpen(order, BuildResult());
 
-        // First average
         var avgOrder = BuildOrder(isAverage: true);
         _guard.RegisterOpen(avgOrder, BuildResult("ORDER-002"));
 
-        // Second average should be blocked
         var result = await _guard.CheckAsync(avgOrder);
 
         result.Should().NotBeNull();
@@ -122,7 +119,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksWhenDailyLimitReached()
     {
-        // Register 10 distinct trades to hit the daily limit of 10
         for (int i = 0; i < 10; i++)
         {
             var o = BuildOrder(
@@ -131,7 +127,6 @@ public class TradeGuardTests
             _guard.RegisterOpen(o, BuildResult($"ORDER-{i:D3}"));
         }
 
-        // The 11th trade should be blocked
         var order = BuildOrder(symbol: "NEW", contractSymbol: "NEW260620C00100000");
         var result = await _guard.CheckAsync(order);
 
@@ -203,7 +198,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksSameSymbolDifferentInstrument()
     {
-        // Open a stock position for TSLA
         var stockOrder = new TradeOrder(
             AlertId: Guid.NewGuid().ToString(),
             UserName: "TestTrader",
@@ -217,7 +211,8 @@ public class TradeGuardTests
             EstimatedEntryPrice: 165.00m,
             BudgetUsed: 2_970m,
             StopPrice: 140.25m,
-            TargetPrice: 214.50m);
+            TargetPrice: 214.50m,
+            TrailPercent: 15.0);
 
         _guard.RegisterOpen(stockOrder, new BrokerOrderResult(
             OrderId: "ORDER-STK-001",
@@ -229,7 +224,6 @@ public class TradeGuardTests
             Status: OrderStatus.Filled,
             FilledAt: DateTimeOffset.UtcNow));
 
-        // Now try to open a TSLA call option — same underlying, different instrument
         var optionOrder = new TradeOrder(
             AlertId: Guid.NewGuid().ToString(),
             UserName: "TestTrader",
@@ -243,7 +237,8 @@ public class TradeGuardTests
             EstimatedEntryPrice: 4.95m,
             BudgetUsed: 990m,
             StopPrice: 2.48m,
-            TargetPrice: 14.85m);
+            TargetPrice: 14.85m,
+            TrailPercent: 50.0);
 
         var result = await _guard.CheckAsync(optionOrder);
 

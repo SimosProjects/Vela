@@ -1,7 +1,7 @@
 namespace TradeFlow.Worker.Models;
 
 /// <summary>
-/// Built by PositionSizer from an approved Alert
+/// Built by PositionSizer from an approved Alert.
 /// </summary>
 public record TradeOrder(
     string    AlertId,
@@ -16,7 +16,7 @@ public record TradeOrder(
     decimal? Strike,
     string? Expiration,
 
-    // Contracts (options) or shares (stocks). Rounded down from budget ÷ price.
+    // Contracts (options) or shares (stocks). Rounded down from budget / price.
     int Quantity,
 
     // From alert pricePaid. Actual fill may differ.
@@ -28,8 +28,11 @@ public record TradeOrder(
     // StopPrice is the initial trail reference price, not a fixed level.
     decimal StopPrice,
 
-    // Options: entry × 3.00 (+200%). Stocks: entry × 1.30 (+30%).
+    // Options: entry x 3.00 (+200%). Stocks: entry x 1.30 (+30%).
     decimal TargetPrice,
+
+    // Trailing stop percentage sent to IBKR. Risk-tiered by PositionSizer.
+    double TrailPercent,
 
     bool IsAverage = false
 );

@@ -74,13 +74,11 @@ public class PositionMonitorServiceTests : IDisposable
         using var cts = new CancellationTokenSource();
         var monitorTask = _monitor.StartAsync(cts.Token);
 
-        // Allow StartAsync to register the handler
         await Task.Delay(50);
 
         capturedHandler.Should().NotBeNull();
         capturedHandler!("ORDER-100", 7.50m, TradeOutcome.StoppedOut);
 
-        // Allow async handler to complete
         await Task.Delay(100);
 
         _guard.GetOpenTrades().Should().BeEmpty();
@@ -99,7 +97,6 @@ public class PositionMonitorServiceTests : IDisposable
         await _monitor.StartAsync(cts.Token);
         await Task.Delay(50);
 
-        // Fire with an unknown order ID, should not throw
         var act = () =>
         {
             capturedHandler!("UNKNOWN-ORDER", 5.00m, TradeOutcome.StoppedOut);
@@ -176,7 +173,8 @@ public class PositionMonitorServiceTests : IDisposable
             EstimatedEntryPrice: 4.95m,
             BudgetUsed: 990m,
             StopPrice: 2.48m,
-            TargetPrice: 14.85m);
+            TargetPrice: 14.85m,
+            TrailPercent: 50.0);
 
         var result = new BrokerOrderResult(
             OrderId: orderId,
