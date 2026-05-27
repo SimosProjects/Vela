@@ -1,5 +1,4 @@
 using TradeFlow.Worker;
-using TradeFlow.Worker.Data;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Metrics;
 
@@ -71,7 +70,7 @@ builder.Services.AddHttpClient("SignalR", client =>
 builder.Services.AddSingleton<IAlertNormalizer, AlertNormalizer>();
 builder.Services.AddSingleton<AlertMetrics>();
 
-// Risk engine, rules are composed from options at startup
+// Risk engine rules composed from options at startup.
 builder.Services.AddSingleton<RiskEngineService>(sp =>
 {
     var riskOptions = sp.GetRequiredService<IOptions<RiskEngineOptions>>().Value;
@@ -79,8 +78,7 @@ builder.Services.AddSingleton<RiskEngineService>(sp =>
     var rules = new List<IRiskRule>
     {
         new EntryOnlyRule(),
-        new MinXScoreRule(riskOptions.MinXScore),
-        new ApprovedTraderRule(riskOptions.ApprovedTraders)
+        new ApprovedOrHighScoreRule(riskOptions.ApprovedTraders, riskOptions.MinXScore),
     };
 
     if (!riskOptions.AllowLotto)
