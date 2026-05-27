@@ -14,9 +14,13 @@ Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry 
 2026-05-22,15:55:51,,,MKC,62,47.88,2968.56,,,Open,Open,Theo,,
 2026-05-22,15:56:27,,,UPBD,168,17.83,2995.44,,,Open,Open,Theo,,
 2026-05-22,15:59:06,,,MA,6,499.25,2995.50,,,Open,Open,Theo,,
+2026-05-26,10:36:07,,,MOS,131,22.91,3001.21,,,Open,Open,Theo,,
+2026-05-26,10:42:31,,,BRAI,187,16.06,3003.22,,,Open,Open,yoyomun,,
+2026-05-26,12:34:23,,,INTU,9,310.31,2792.79,,,Open,Open,Theo,,
+2026-05-26,14:16:01,,,NOC,5,557.03,2785.15,,,Open,Open,Theo,,
 
 ,,SUMMARY
-,,Total Trades,15
-,,Open,15,Closed,0
-,,Wins,0,Losses,0,Win Rate,0.0%
-,,Total P&L,+0.00
+,,Total Trades,19
+,,Open,17,Closed,2
+,,Wins,2,Losses,0,Win Rate,100.0%
+,,Total P&L,+137.31

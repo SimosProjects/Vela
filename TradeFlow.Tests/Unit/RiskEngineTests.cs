@@ -284,4 +284,72 @@ public class RiskEngineTests
         var result = rule.Evaluate(alert);
         Assert.Equal(expectedPassed, result.Passed);
     }
+
+    // -- ApprovedOrHighScoreRule --
+
+    [Fact]
+    public void ApprovedOrHighScoreRule_ApprovedTraderWithZeroScore_Passes()
+    {
+        // Approved traders bypass the XScore check entirely
+        var rule   = new ApprovedOrHighScoreRule(["yoyomun"], minimumScore: 60.0);
+        var alert  = BuildAlert(userName: "yoyomun", xScore: 0.0);
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void ApprovedOrHighScoreRule_ApprovedTraderCaseInsensitive_Passes()
+    {
+        var rule   = new ApprovedOrHighScoreRule(["yoyomun"], minimumScore: 60.0);
+        var alert  = BuildAlert(userName: "YOYOMUN", xScore: 0.0);
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void ApprovedOrHighScoreRule_UnknownTraderAboveThreshold_Passes()
+    {
+        // Unknown traders must meet the minimum XScore
+        var rule   = new ApprovedOrHighScoreRule(["yoyomun"], minimumScore: 60.0);
+        var alert  = BuildAlert(userName: "unknown_trader", xScore: 75.0);
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void ApprovedOrHighScoreRule_UnknownTraderBelowThreshold_Fails()
+    {
+        var rule   = new ApprovedOrHighScoreRule(["yoyomun"], minimumScore: 60.0);
+        var alert  = BuildAlert(userName: "unknown_trader", xScore: 55.0);
+        var result = rule.Evaluate(alert);
+        Assert.False(result.Passed);
+    }
+
+    [Fact]
+    public void ApprovedOrHighScoreRule_UnknownTraderZeroScore_Fails()
+    {
+        var rule   = new ApprovedOrHighScoreRule(["yoyomun"], minimumScore: 60.0);
+        var alert  = BuildAlert(userName: "unknown_trader", xScore: 0.0);
+        var result = rule.Evaluate(alert);
+        Assert.False(result.Passed);
+    }
+
+    [Fact]
+    public void ApprovedOrHighScoreRule_NullTraderName_Fails()
+    {
+        var rule  = new ApprovedOrHighScoreRule(["yoyomun"], minimumScore: 60.0);
+        var alert = BuildAlert() with { UserName = null };
+        var result = rule.Evaluate(alert);
+        Assert.False(result.Passed);
+    }
+
+    [Fact]
+    public void ApprovedOrHighScoreRule_ApprovedTraderWithNullScore_Passes()
+    {
+        // Approved traders bypass XScore even if it's null
+        var rule  = new ApprovedOrHighScoreRule(["yoyomun"], minimumScore: 60.0);
+        var alert = BuildAlert(userName: "yoyomun") with { XScore = null };
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
 }
