@@ -78,16 +78,60 @@ public class TradeGuardTests
     }
 
     [Fact]
-    public async Task CheckAsync_BlocksWhenExposureExceedsBalance()
+    public async Task CheckAsync_BlocksWhenBudgetExceedsAvailableCapital()
     {
-        // Seed the cache directly since CheckAsync no longer calls IBKR live
         _guard.SetCacheForTesting(balance: 100m, openValue: 95m);
 
         var order = BuildOrder(budgetUsed: 1_000m);
         var result = await _guard.CheckAsync(order);
 
         result.Should().NotBeNull();
-        result.Should().Contain("Insufficient");
+        // Either the cap or the balance check fires depending on which limit is hit first
+        result.Should().MatchRegex("Daily exposure cap|Insufficient");
+    }
+
+    [Fact]
+    public async Task CheckAsync_BlocksWhenDailyExposureCapReached()
+    {
+        // Balance $100,000, cap 30% = $30,000 max deployment
+        // Register $29,500 worth of trades opened today — only $500 deployable, order needs $1,000
+        _guard.SetCacheForTesting(balance: 100_000m, openValue: 29_500m);
+
+        for (var i = 0; i < 29; i++)
+        {
+            var o = BuildOrder(
+                symbol: $"TICK{i}",
+                contractSymbol: $"TICK{i}260620C00100000",
+                budgetUsed: 1_000m);
+            _guard.RegisterOpen(o, new BrokerOrderResult(
+                OrderId: $"ORDER-{i:D3}",
+                StopOrderId: null,
+                TargetOrderId: null,
+                FillPrice: 4.95m,
+                FillQuantity: 2,
+                FillAmount: 1_000m,
+                Status: OrderStatus.Filled,
+                FilledAt: DateTimeOffset.UtcNow));
+        }
+
+        var order = BuildOrder(symbol: "NEW", contractSymbol: "NEW260620C00100000", budgetUsed: 1_000m);
+        var result = await _guard.CheckAsync(order);
+
+        result.Should().NotBeNull();
+        result.Should().Contain("Daily exposure cap");
+    }
+
+    [Fact]
+    public async Task CheckAsync_AllowsWhenUnderExposureCap()
+    {
+        // Balance $100,000, cap 30% = $30,000 max deployment
+        // Open $10,000 — $20,000 still deployable, order needs $1,000
+        _guard.SetCacheForTesting(balance: 100_000m, openValue: 10_000m);
+
+        var order = BuildOrder(budgetUsed: 1_000m);
+        var result = await _guard.CheckAsync(order);
+
+        result.Should().BeNull();
     }
 
     [Fact]
@@ -118,25 +162,6 @@ public class TradeGuardTests
     }
 
     [Fact]
-    public async Task CheckAsync_BlocksWhenDailyLimitReached()
-    {
-        // Register up to the MaxDailyTrades limit (25)
-        for (int i = 0; i < 25; i++)
-        {
-            var o = BuildOrder(
-                symbol: $"TICK{i}",
-                contractSymbol: $"TICK{i}260620C00100000");
-            _guard.RegisterOpen(o, BuildResult($"ORDER-{i:D3}"));
-        }
-
-        var order = BuildOrder(symbol: "NEW", contractSymbol: "NEW260620C00100000");
-        var result = await _guard.CheckAsync(order);
-
-        result.Should().NotBeNull();
-        result.Should().Contain("Daily trade limit");
-    }
-
-    [Fact]
     public void RegisterClose_PopulatesExitData()
     {
         var order = BuildOrder();
@@ -150,15 +175,6 @@ public class TradeGuardTests
         closed.PnL.Should().BePositive();
         closed.Result.Should().Be(TradeOutcome.XtradesExit);
         closed.Status.Should().Be(TradeStatus.Closed);
-    }
-
-    [Fact]
-    public void GetDailyTradeCount_IncrementsOnRegisterOpen()
-    {
-        var order = BuildOrder();
-        _guard.RegisterOpen(order, BuildResult());
-
-        _guard.GetDailyTradeCount().Should().Be(1);
     }
 
     [Fact]

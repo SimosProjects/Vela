@@ -346,6 +346,7 @@ public class BrokerExecutionService
         }
 
         await _csv.CloseTradeAsync(closedTrade, ct);
+        _guard.LogExposureUpdate();
 
         _logger.LogInformation(
             "POSITION CLOSED — {Symbol} × {Qty} @ ${Price:F2} | " +
@@ -417,6 +418,7 @@ public class BrokerExecutionService
         }
 
         await _csv.CloseTradeAsync(closedTrade, ct);
+        _guard.LogExposureUpdate();
 
         _logger.LogInformation(
             "FORCE CLOSED — {Symbol} × {Qty} @ ${Price:F2} | " +
