@@ -20,8 +20,9 @@ Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike
 2026-05-27,14:02:34,2026-05-27,14:08:37,TSLA,TSLA260527C00442500,call,443,May 27 2026,10,1.00,1000.00,2004,2.04%,1.00,1000.00,1773,-0.99%,Closed,XtradesExit,Sean@BearishBull,0.00,0.00%,
 2026-05-27,14:42:40,2026-05-27,15:33:36,QQQ,QQQ260527P00729000,put,729,May 27 2026,14,0.71,994.00,1853,4.41%,0.00,0.00,,,Closed,Expired,TradeAware21,-994.00,-100.00%,
 ,,,,,,,,,,,,,,,,,,,,,,,
-,,SUMMARY,,,,,,,,,,,,,,,,,,,,,
-,,Total Trades,20,,,,,,,,,,,,,,,,,,,,
-,,Open,7,Closed,13,,,,,,,,,,,,,,,,,,
-,,Wins,7,Losses,5,Win Rate,53.8%,,,,,,,,,,,,,,,,
-,,Total P&L,-782.00,,,,,,,,,,,,,,,,,,,,
+
+,,SUMMARY
+,,Total Trades,20
+,,Open,7,Closed,13
+,,Wins,7,Losses,5,Win Rate,53.8%
+,,Total P&L,-782.00

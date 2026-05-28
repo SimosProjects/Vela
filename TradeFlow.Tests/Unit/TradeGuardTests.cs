@@ -117,7 +117,8 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksWhenDailyLimitReached()
     {
-        for (int i = 0; i < 10; i++)
+        // Register up to the MaxDailyTrades limit (25)
+        for (int i = 0; i < 25; i++)
         {
             var o = BuildOrder(
                 symbol: $"TICK{i}",
