@@ -40,6 +40,14 @@ public record TradeRecord
     public decimal? PnL { get; set; }
     public decimal? PnLPercent { get; set; }
 
+    // Entry execution quality — populated by BrokerExecutionService after fill
+    public int? LatencyMs { get; set; }
+    public decimal? SlippagePct { get; set; }
+
+    // Exit execution quality — populated by BrokerExecutionService on close
+    public int? ExitLatencyMs { get; set; }
+    public decimal? ExitSlippagePct { get; set; }
+
     // Status
     public TradeStatus Status { get; set; } = TradeStatus.Open;
     public TradeOutcome Result { get; set; } = TradeOutcome.Open;

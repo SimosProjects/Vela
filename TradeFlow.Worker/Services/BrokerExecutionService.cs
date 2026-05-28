@@ -31,14 +31,14 @@ public class BrokerExecutionService
         IOptions<RiskEngineOptions> riskOptions,
         Func<bool>? isMarketOpen = null)
     {
-        _broker      = broker;
-        _sizer       = sizer;
-        _guard       = guard;
-        _csv         = csv;
-        _discord     = discord;
+        _broker       = broker;
+        _sizer        = sizer;
+        _guard        = guard;
+        _csv          = csv;
+        _discord      = discord;
         _scopeFactory = scopeFactory;
-        _logger      = logger;
-        _riskOptions = riskOptions.Value;
+        _logger       = logger;
+        _riskOptions  = riskOptions.Value;
         // Injectable for testing; defaults to real ET market hours check
         _isMarketOpen = isMarketOpen ?? IsMarketOpenDefault;
     }
@@ -55,6 +55,7 @@ public class BrokerExecutionService
         CancellationToken ct = default)
     {
         var alertReceivedAt = DateTimeOffset.UtcNow;
+        var alertedPrice    = alert.PricePaid ?? 0m;
 
         if (!_isMarketOpen())
         {
@@ -92,7 +93,21 @@ public class BrokerExecutionService
                 order.Expiration,
                 ct);
 
-            if (currentPrice > 0 && order.EstimatedEntryPrice > 0)
+            if (currentPrice <= 0)
+            {
+                if (_riskOptions.SkipTradeOnSlippageTimeout)
+                {
+                    _logger.LogWarning(
+                        "Slippage check timed out for {Symbol} — skipping trade (SkipTradeOnSlippageTimeout=true)",
+                        alert.Symbol);
+                    return;
+                }
+
+                _logger.LogWarning(
+                    "Slippage check timed out for {Symbol} — proceeding without price check",
+                    alert.Symbol);
+            }
+            else if (order.EstimatedEntryPrice > 0)
             {
                 var slippage = Math.Abs(currentPrice - order.EstimatedEntryPrice)
                     / order.EstimatedEntryPrice * 100;
@@ -113,9 +128,7 @@ public class BrokerExecutionService
             }
         }
 
-        var accountBalance     = await _broker.GetAccountBalanceAsync(ct);
-        var openPositionsValue = await _broker.GetOpenPositionsValueAsync(ct);
-        var orderSubmittedAt   = DateTimeOffset.UtcNow;
+        var orderSubmittedAt = DateTimeOffset.UtcNow;
 
         BrokerOrderResult result;
         try
@@ -186,6 +199,12 @@ public class BrokerExecutionService
         var trade = _guard.FindOpenTrade(
             order.UserName, order.OptionsContractSymbol, order.Symbol)!;
 
+        // Populate entry execution quality metrics for CSV logging
+        trade.LatencyMs   = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds;
+        trade.SlippagePct = alertedPrice > 0
+            ? (result.FillPrice - alertedPrice) / alertedPrice * 100
+            : null;
+
         using (var scope = _scopeFactory.CreateScope())
         {
             var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
@@ -224,8 +243,11 @@ public class BrokerExecutionService
 
         await _discord.NotifyOrderPlacedAsync(trade, ct);
 
-        var alertedPrice = alert.PricePaid ?? 0m;
-        var slippagePct  = alertedPrice > 0
+        // Fetch balance and exposure after the fill — used for analytics only, not blocking execution
+        var accountBalance     = await _broker.GetAccountBalanceAsync(ct);
+        var openPositionsValue = await _broker.GetOpenPositionsValueAsync(ct);
+
+        var slippagePct = alertedPrice > 0
             ? (result.FillPrice - alertedPrice) / alertedPrice * 100
             : 0m;
 
@@ -271,7 +293,6 @@ public class BrokerExecutionService
         Alert alert,
         CancellationToken ct = default)
     {
-        // Capture the moment the exit alert arrived, used for exit latency calculation
         var alertReceivedAt = DateTimeOffset.UtcNow;
 
         var trade = _guard.FindOpenTrade(
@@ -299,6 +320,12 @@ public class BrokerExecutionService
             return;
         }
 
+        var alertedExitPrice = alert.PriceAtExit ?? alert.ActualPriceAtTimeOfExit ?? 0m;
+        var exitLatencyMs    = (int)(closeResult.FilledAt - alertReceivedAt).TotalMilliseconds;
+        var exitSlippagePct  = alertedExitPrice > 0
+            ? (closeResult.FillPrice - alertedExitPrice) / alertedExitPrice * 100
+            : (decimal?)null;
+
         var closedTrade = _guard.RegisterClose(
             alert.UserName ?? "",
             alert.OptionsContractSymbol,
@@ -307,6 +334,10 @@ public class BrokerExecutionService
             TradeOutcome.XtradesExit);
 
         if (closedTrade is null) return;
+
+        // Populate exit execution quality metrics for CSV logging
+        closedTrade.ExitLatencyMs   = exitLatencyMs;
+        closedTrade.ExitSlippagePct = exitSlippagePct;
 
         using (var scope = _scopeFactory.CreateScope())
         {
@@ -326,13 +357,6 @@ public class BrokerExecutionService
 
         if (closedTrade.PnL.HasValue && closedTrade.PnLPercent.HasValue)
         {
-            var exitLatencyMs = (int)(closeResult.FilledAt - alertReceivedAt).TotalMilliseconds;
-
-            var alertedExitPrice = alert.PriceAtExit ?? alert.ActualPriceAtTimeOfExit ?? 0m;
-            var exitSlippagePct  = alertedExitPrice > 0
-                ? (closeResult.FillPrice - alertedExitPrice) / alertedExitPrice * 100
-                : (decimal?)null;
-
             using var metricScope = _scopeFactory.CreateScope();
             var metrics = metricScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
             await metrics.CloseAsync(

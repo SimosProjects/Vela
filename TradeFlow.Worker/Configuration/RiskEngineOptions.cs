@@ -16,6 +16,13 @@ public class RiskEngineOptions
 
     public bool AllowHigh { get; init; } = true;
 
+    public bool SkipTradeOnSlippageTimeout { get; init; } = true;
+
+    // Symbols blocked from trading regardless of other rules.
+    // Used to exclude cash-settled index options (SPX, NDX, RUT, VIX, DJX)
+    // which have elevated margin requirements incompatible with the account size.
+    public List<string> BlockedSymbols { get; init; } = [];
+
     // Minimum stock price in dollars. Stock entry alerts below this threshold are rejected.
     // Defaults to $3.00 to exclude penny stocks and OTC equities with high gap-down risk.
     // Set to 0 to disable the filter entirely.
