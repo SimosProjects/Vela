@@ -9,9 +9,14 @@ namespace TradeFlow.Worker.Engine;
 //   3. Total open exposure + new trade cost <= account balance
 //   4. No duplicate open position for same trader + contract
 //   5. Averaging rules (one average per position, at 50% budget)
+//
+// Account balance and open positions value are cached and refreshed every 30 seconds
+// in the background to avoid blocking the trade execution path with IBKR round trips.
 public class TradeGuard
 {
-    private const int MaxDailyTrades = 10;
+    private const int MaxDailyTrades        = 25;
+    private const int CacheRefreshSeconds   = 30;
+    private const int InitialRefreshDelayMs = 500;
 
     private readonly IBrokerService _broker;
     private readonly ILogger<TradeGuard> _logger;
@@ -20,14 +25,31 @@ public class TradeGuard
     private readonly Dictionary<string, TradeRecord> _openTrades = new();
     private readonly Lock _lock = new();
 
+    // Cached IBKR account values — refreshed every 30s in the background
+    private decimal _cachedBalance   = 0m;
+    private decimal _cachedOpenValue = 0m;
+    private readonly Lock _cacheLock = new();
+
     // Daily trade counter that resets at midnight ET
     private int      _dailyTradeCount = 0;
     private DateOnly _countDate       = DateOnly.MinValue;
+
+    private CancellationTokenSource? _refreshCts;
 
     public TradeGuard(IBrokerService broker, ILogger<TradeGuard> logger)
     {
         _broker = broker;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Starts the background cache refresh loop.
+    /// Called once from Program.cs after the IBKR connection is established.
+    /// </summary>
+    public void StartCacheRefresh(CancellationToken ct)
+    {
+        _refreshCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _ = Task.Run(() => RefreshCacheLoopAsync(_refreshCts.Token), _refreshCts.Token);
     }
 
     /// <summary>
@@ -102,18 +124,19 @@ public class TradeGuard
 
     /// <summary>
     /// Returns null if the order is allowed, or a rejection reason string if blocked.
+    /// Uses cached balance and open positions value — no IBKR round trips on the hot path.
     /// </summary>
-    public async Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)
+    public Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)
     {
         ResetDailyCountIfNewDay();
 
         // 1. Daily limit
         if (_dailyTradeCount >= MaxDailyTrades)
-            return $"Daily trade limit reached ({MaxDailyTrades}/day)";
+            return Task.FromResult<string?>($"Daily trade limit reached ({MaxDailyTrades}/day)");
 
         lock (_lock)
         {
-            // 2. Symbol-level check, block any new entry if the underlying symbol already
+            // 2. Symbol-level check — block any new entry if the underlying symbol already
             // has an open position regardless of instrument type. Prevents holding TSLA stock
             // and a TSLA option simultaneously, which doubles exposure on one underlying.
             // Averaging is exempt since it is deliberately adding to an existing position.
@@ -123,7 +146,8 @@ public class TradeGuard
                     .Any(t => string.Equals(t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
 
                 if (symbolAlreadyOpen)
-                    return $"Position already open for {order.Symbol} — only one instrument per underlying allowed";
+                    return Task.FromResult<string?>(
+                        $"Position already open for {order.Symbol} — only one instrument per underlying allowed");
             }
 
             // 3. Contract-level duplicate and averaging rules
@@ -132,29 +156,35 @@ public class TradeGuard
             if (_openTrades.TryGetValue(matchKey, out var existing))
             {
                 if (!order.IsAverage)
-                    return $"Position already open for {order.Symbol} — use averaging";
+                    return Task.FromResult<string?>($"Position already open for {order.Symbol} — use averaging");
 
                 if (existing.HasAveraged)
-                    return $"Already averaged into {order.Symbol} — only one average allowed";
+                    return Task.FromResult<string?>($"Already averaged into {order.Symbol} — only one average allowed");
             }
             else if (order.IsAverage)
             {
-                return $"No open position found for {order.Symbol} — cannot average";
+                return Task.FromResult<string?>($"No open position found for {order.Symbol} — cannot average");
             }
         }
 
-        // 4. Exposure check
-        var balance   = await _broker.GetAccountBalanceAsync(ct);
-        var openValue = await _broker.GetOpenPositionsValueAsync(ct);
-        var available = balance - openValue;
-
-        if (order.BudgetUsed > available)
+        // 4. Exposure check using cached values — no IBKR round trip
+        decimal balance, openValue;
+        lock (_cacheLock)
         {
-            return $"Insufficient available balance — need ${order.BudgetUsed:F2}, " +
-                   $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})";
+            balance   = _cachedBalance;
+            openValue = _cachedOpenValue;
         }
 
-        return null;
+        var available = balance - openValue;
+
+        if (balance > 0 && order.BudgetUsed > available)
+        {
+            return Task.FromResult<string?>(
+                $"Insufficient available balance — need ${order.BudgetUsed:F2}, " +
+                $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})");
+        }
+
+        return Task.FromResult<string?>(null);
     }
 
     /// <summary>
@@ -273,7 +303,58 @@ public class TradeGuard
         lock (_lock) { return _dailyTradeCount; }
     }
 
-    // Options: userName + OCC symbol. Stocks: userName + ticker symbol.
+    /// <summary>
+    /// Seeds the account cache directly. Used in unit tests to simulate IBKR balance responses
+    /// without starting the background refresh loop.
+    /// </summary>
+    public void SetCacheForTesting(decimal balance, decimal openValue)
+    {
+        lock (_cacheLock)
+        {
+            _cachedBalance   = balance;
+            _cachedOpenValue = openValue;
+        }
+    }
+
+    // -- Helpers --
+
+    // Refreshes cached balance and open positions value every 30 seconds.
+    // Runs on a background thread so IBKR round trips never block trade execution.
+    private async Task RefreshCacheLoopAsync(CancellationToken ct)
+    {
+        // Short initial delay to let Gateway settle before first fetch
+        await Task.Delay(InitialRefreshDelayMs, ct);
+
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var balance   = await _broker.GetAccountBalanceAsync(ct);
+                var openValue = await _broker.GetOpenPositionsValueAsync(ct);
+
+                lock (_cacheLock)
+                {
+                    _cachedBalance   = balance;
+                    _cachedOpenValue = openValue;
+                }
+
+                _logger.LogDebug(
+                    "TradeGuard cache refreshed — balance ${Balance:F2} open ${Open:F2}",
+                    balance, openValue);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "TradeGuard cache refresh failed — using stale values");
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(CacheRefreshSeconds), ct);
+        }
+    }
+
     private static string BuildMatchKey(string userName, string? contractSymbol, string symbol) =>
         contractSymbol is not null
             ? $"{userName}::{contractSymbol}"

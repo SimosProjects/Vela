@@ -72,6 +72,7 @@ builder.Services.AddSingleton<IAlertNormalizer, AlertNormalizer>();
 builder.Services.AddSingleton<AlertMetrics>();
 
 // Risk engine rules composed from options at startup.
+// BlockedSymbolsRule is inserted first so blocked symbols short-circuit before any other evaluation.
 builder.Services.AddSingleton<RiskEngineService>(sp =>
 {
     var riskOptions = sp.GetRequiredService<IOptions<RiskEngineOptions>>().Value;
@@ -93,6 +94,10 @@ builder.Services.AddSingleton<RiskEngineService>(sp =>
     // but before the more expensive trader and score lookups.
     if (riskOptions.MinStockPriceDollars > 0)
         rules.Insert(1, new MinStockPriceRule(riskOptions.MinStockPriceDollars));
+
+    // Blocked symbols inserted at position 0 so they short-circuit before all other rules
+    if (riskOptions.BlockedSymbols.Count > 0)
+        rules.Insert(0, new BlockedSymbolsRule(riskOptions.BlockedSymbols));
 
     return new RiskEngineService(rules);
 });
@@ -139,6 +144,9 @@ if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
 
     var broker = host.Services.GetRequiredService<IbkrBrokerService>();
     broker.SyncOrderId();
+
+    var guard = host.Services.GetRequiredService<TradeGuard>();
+    guard.StartCacheRefresh(CancellationToken.None);
 }
 
 // Reload open positions and daily trade count from DB into TradeGuard on restart

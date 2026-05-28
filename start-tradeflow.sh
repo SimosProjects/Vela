@@ -15,7 +15,7 @@ ET_DOW=$(TZ="America/New_York" date +%u)  # 1=Monday, 7=Sunday
 ET_TIME=$((ET_HOUR * 60 + ET_MIN))
 
 MARKET_OPEN=$((9 * 60 + 25))   # 9:25am ET
-MARKET_CLOSE=$((16 * 60 + 5))  # 4:05pm ET
+MARKET_CLOSE=$((16 * 60 + 30))  # 4:05pm ET
 
 # Format time as 12-hour with am/pm
 if [ "$ET_HOUR" -eq 0 ]; then
@@ -64,7 +64,7 @@ sleep 5
 # Schedule auto-stop at market close
 if [ "$1" != "--force" ]; then
     SECONDS_UNTIL_CLOSE=$(( (MARKET_CLOSE - ET_TIME) * 60 ))
-    echo "Will auto-stop in ${SECONDS_UNTIL_CLOSE} seconds (4:05pm ET)"
+    echo "Will auto-stop in ${SECONDS_UNTIL_CLOSE} seconds (4:30pm ET)"
     (sleep $SECONDS_UNTIL_CLOSE && pkill -f "TradeFlow.Worker" && echo "Market closed — TradeFlow stopped.") &
 fi
 

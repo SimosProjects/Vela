@@ -7,7 +7,8 @@ namespace TradeFlow.Worker.Services;
 /// Background service that monitors open positions for broker-side closes.
 /// Subscribes to the broker fill handler to detect when IBKR executes a
 /// trailing stop or target order without a corresponding Xtrades exit alert.
-/// Also polls open positions periodically as a fallback when market data is available.
+/// Position polling is intentionally omitted — OCA orders on IBKR handle
+/// stop and target execution broker-side and notify via execDetails callbacks.
 /// </summary>
 public class PositionMonitorService : BackgroundService
 {
@@ -18,8 +19,6 @@ public class PositionMonitorService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<PositionMonitorService> _logger;
 
-    private const int PollIntervalSeconds = 60;
-
     public PositionMonitorService(
         TradeGuard guard,
         IBrokerService broker,
@@ -28,42 +27,25 @@ public class PositionMonitorService : BackgroundService
         IServiceScopeFactory scopeFactory,
         ILogger<PositionMonitorService> logger)
     {
-        _guard = guard;
-        _broker = broker;
-        _csv = csv;
-        _discord = discord;
+        _guard        = guard;
+        _broker       = broker;
+        _csv          = csv;
+        _discord      = discord;
         _scopeFactory = scopeFactory;
-        _logger = logger;
+        _logger       = logger;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Position monitor service started.");
 
-        // Subscribe to broker-side fills so trailing stops and targets are detected immediately
+        // Subscribe to broker-side fills so trailing stops and targets are detected immediately.
+        // IBKR fires execDetails when an OCA stop or target order fills — no polling needed.
         _broker.RegisterBrokerFillHandler(
             (entryOrderId, fillPrice, outcome) =>
                 _ = HandleBrokerFillAsync(entryOrderId, fillPrice, outcome, stoppingToken));
 
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            await Task.Delay(TimeSpan.FromSeconds(PollIntervalSeconds), stoppingToken);
-
-            try
-            {
-                await CheckOpenPositionsAsync(stoppingToken);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Position monitor cycle failed, will retry next interval.");
-            }
-        }
-
-        _logger.LogInformation("Position monitor service stopped.");
+        return Task.CompletedTask;
     }
 
     // -- Helpers --
@@ -94,60 +76,12 @@ public class PositionMonitorService : BackgroundService
         await CloseAndRecordAsync(trade, fillPrice, outcome, ct);
     }
 
-    // Iterates all open positions and checks whether stop or target has been hit via polling.
-    // This is a fallback for when market data is available — the primary detection is via execDetails.
-    private async Task CheckOpenPositionsAsync(CancellationToken ct)
-    {
-        var openTrades = _guard.GetOpenTrades();
-
-        if (openTrades.Count == 0)
-            return;
-
-        _logger.LogDebug(
-            "Position monitor checking {Count} open position(s).", openTrades.Count);
-
-        foreach (var trade in openTrades)
-        {
-            await CheckPositionAsync(trade, ct);
-        }
-    }
-
-    private async Task CheckPositionAsync(TradeRecord trade, CancellationToken ct)
-    {
-        var currentPrice = await _broker.GetCurrentPositionPriceAsync(trade, ct);
-        if (currentPrice <= 0)
-            return;
-
-        var outcome = EvaluatePosition(trade, currentPrice);
-        if (outcome == TradeOutcome.Open)
-            return;
-
-        _logger.LogInformation(
-            "Position monitor: {Symbol} hit {Outcome} at ${Price:F2}",
-            trade.Symbol, outcome, currentPrice);
-
-        await CloseAndRecordAsync(trade, currentPrice, outcome, ct);
-    }
-
-    private static TradeOutcome EvaluatePosition(TradeRecord trade, decimal currentPrice)
-    {
-        if (currentPrice <= trade.StopPrice)
-            return TradeOutcome.StoppedOut;
-
-        if (currentPrice >= trade.TargetPrice)
-            return TradeOutcome.TargetHit;
-
-        return TradeOutcome.Open;
-    }
-
     private async Task CloseAndRecordAsync(
         TradeRecord trade,
         decimal fillPrice,
         TradeOutcome outcome,
         CancellationToken ct)
     {
-        // For broker-side closes the position is already closed — we just need to record it.
-        // For polling-detected closes we need to place a close order first.
         var closedTrade = _guard.RegisterClose(
             trade.UserName,
             trade.OptionsContract,

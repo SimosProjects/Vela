@@ -1,1 +1,12 @@
-Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Exit Price,Exit Amount,Status,Result,UserName,P&L,P&L %
+Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,P&L,P&L %,
+2026-05-27,10:15:39,,,BBAI,696,4.29,2985.84,1987,-0.46%,,,,,Open,Open,Mike B,,,
+2026-05-27,11:58:36,,,PAAS,55,54.01,2970.55,2131,0.02%,,,,,Open,Open,Theo,,,
+2026-05-27,13:59:41,,,ASTC,174,17.23,2998.02,2022,0.47%,,,,,Open,Open,yoyomun,,,
+2026-05-27,13:59:49,,,PLAY,227,13.22,3001.94,5420,0.26%,,,,,Open,Open,johnjm90,,,
+2026-05-27,14:00:57,,,CHWY,141,21.21,2990.61,3504,0.00%,,,,,Open,Open,johnjm90,,,
+,,,,,,,,,,,,,,,,,,,
+,,SUMMARY,,,,,,,,,,,,,,,,,
+,,Total Trades,5,,,,,,,,,,,,,,,,
+,,Open,5,Closed,0,,,,,,,,,,,,,,
+,,Wins,0,Losses,0,Win Rate,0.0%,,,,,,,,,,,,
+,,Total P&L,0.00,,,,,,,,,,,,,,,,

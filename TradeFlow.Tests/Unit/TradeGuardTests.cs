@@ -77,10 +77,8 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksWhenExposureExceedsBalance()
     {
-        _brokerMock.Setup(b => b.GetAccountBalanceAsync(default))
-            .ReturnsAsync(100m);
-        _brokerMock.Setup(b => b.GetOpenPositionsValueAsync(default))
-            .ReturnsAsync(95m);
+        // Seed the cache directly since CheckAsync no longer calls IBKR live
+        _guard.SetCacheForTesting(balance: 100m, openValue: 95m);
 
         var order = BuildOrder(budgetUsed: 1_000m);
         var result = await _guard.CheckAsync(order);
