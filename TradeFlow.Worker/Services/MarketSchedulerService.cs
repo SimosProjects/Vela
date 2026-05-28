@@ -312,12 +312,18 @@ public class MarketSchedulerService : BackgroundService
 
         var openTrades = _guard.GetOpenTrades();
         var balance    = await _broker.GetAccountBalanceAsync(ct);
-        var dailyCount = _guard.GetDailyTradeCount();
+        var openValue  = await _broker.GetOpenPositionsValueAsync(ct);
+
+        var effectiveBalance   = balance * (1m + (decimal)_riskOptions.MarginPct);
+        var maxDailyDeployment = effectiveBalance * (decimal)(_riskOptions.MaxDailyExposurePct / 100.0);
+        var exposurePct        = effectiveBalance > 0
+            ? openValue / effectiveBalance * 100
+            : 0m;
 
         var accountSummary =
             $"Balance: **${balance:N2}**\n" +
-            $"Open Positions: **{openTrades.Count}**\n" +
-            $"Daily Trades: **{dailyCount} / {_riskOptions.MaxDailyTrades}**";
+            $"Open Positions: **{openTrades.Count}** (${openValue:N2})\n" +
+            $"Exposure: **{exposurePct:F1}% / {_riskOptions.MaxDailyExposurePct}%** (cap ${maxDailyDeployment:N2})";
 
         var openSection = openTrades.Count > 0
             ? string.Join("\n", openTrades.Select(t =>
@@ -330,9 +336,9 @@ public class MarketSchedulerService : BackgroundService
         var closedSection = closedToday.Count > 0
             ? string.Join("\n", closedToday.Select(t =>
             {
-                var pnlSign = t.PnL >= 0 ? "+" : "";
+                var sign = t.PnL >= 0 ? "+" : "";
                 return $"{t.Symbol} x{t.Quantity} | Entry: ${t.EntryPrice:F2} Exit: ${t.ExitPrice:F2} " +
-                       $"({pnlSign}{t.PnLPercent:F1}%) {t.Result}";
+                       $"({sign}{t.PnLPercent:F1}%) {t.Result}";
             }))
             : "No closed trades today";
 

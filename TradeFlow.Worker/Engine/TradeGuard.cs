@@ -1,10 +1,12 @@
+using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Engine;
 
 // Enforces trading safety rules before any order is placed.
 // Rules checked in order:
-//   1. Daily trade count < 10
+//   1. Daily exposure cap — today's open positions must not exceed MaxDailyExposurePct
+//      of available balance (account balance minus carry-over positions from prior days)
 //   2. Symbol already open (any instrument type) — prevents doubled exposure on same underlying
 //   3. Total open exposure + new trade cost <= account balance
 //   4. No duplicate open position for same trader + contract
@@ -14,12 +16,16 @@ namespace TradeFlow.Worker.Engine;
 // in the background to avoid blocking the trade execution path with IBKR round trips.
 public class TradeGuard
 {
-    private readonly int _maxDailyTrades;
-    private const int CacheRefreshSeconds = 30;
+    private const int CacheRefreshSeconds   = 30;
     private const int InitialRefreshDelayMs = 500;
+
+    private static readonly TimeZoneInfo EasternTime =
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
     private readonly IBrokerService _broker;
     private readonly ILogger<TradeGuard> _logger;
+    private readonly double _maxDailyExposurePct;
+    private readonly double _marginPct;
 
     // In-memory open positions, keyed by match key (userName + contractSymbol or symbol)
     private readonly Dictionary<string, TradeRecord> _openTrades = new();
@@ -30,17 +36,17 @@ public class TradeGuard
     private decimal _cachedOpenValue = 0m;
     private readonly Lock _cacheLock = new();
 
-    // Daily trade counter that resets at midnight ET
-    private int _dailyTradeCount = 0;
-    private DateOnly _countDate = DateOnly.MinValue;
-
     private CancellationTokenSource? _refreshCts;
 
-    public TradeGuard(IBrokerService broker, IOptions<RiskEngineOptions> riskOptions, ILogger<TradeGuard> logger)
+    public TradeGuard(
+        IBrokerService broker,
+        IOptions<RiskEngineOptions> riskOptions,
+        ILogger<TradeGuard> logger)
     {
-        _broker = broker;
-        _maxDailyTrades = riskOptions.Value.MaxDailyTrades;
-        _logger = logger;
+        _broker              = broker;
+        _logger              = logger;
+        _maxDailyExposurePct = riskOptions.Value.MaxDailyExposurePct;
+        _marginPct           = riskOptions.Value.MarginPct;
     }
 
     /// <summary>
@@ -68,25 +74,25 @@ public class TradeGuard
 
                 var record = new TradeRecord
                 {
-                    AlertId = p.AlertId,
-                    OrderId = p.OrderId,
-                    StopOrderId = p.StopOrderId,
-                    TargetOrderId = p.TargetOrderId,
-                    UserName = p.UserName,
-                    Symbol = p.Symbol,
-                    TradeType = tradeType,
+                    AlertId         = p.AlertId,
+                    OrderId         = p.OrderId,
+                    StopOrderId     = p.StopOrderId,
+                    TargetOrderId   = p.TargetOrderId,
+                    UserName        = p.UserName,
+                    Symbol          = p.Symbol,
+                    TradeType       = tradeType,
                     OptionsContract = p.OptionsContract,
-                    Direction = p.Direction,
-                    Strike = p.Strike,
-                    Expiration = p.Expiration,
-                    Quantity = p.Quantity,
-                    EntryPrice = p.EntryPrice,
-                    EntryAmount = p.EntryAmount,
-                    StopPrice = p.StopPrice,
-                    TargetPrice = p.TargetPrice,
-                    OpenedAt = p.OpenedAt,
-                    IsAverage = p.IsAverage,
-                    HasAveraged = p.HasAveraged,
+                    Direction       = p.Direction,
+                    Strike          = p.Strike,
+                    Expiration      = p.Expiration,
+                    Quantity        = p.Quantity,
+                    EntryPrice      = p.EntryPrice,
+                    EntryAmount     = p.EntryAmount,
+                    StopPrice       = p.StopPrice,
+                    TargetPrice     = p.TargetPrice,
+                    OpenedAt        = p.OpenedAt,
+                    IsAverage       = p.IsAverage,
+                    HasAveraged     = p.HasAveraged,
                 };
 
                 var matchKey = BuildMatchKey(p.UserName, p.OptionsContract, p.Symbol);
@@ -103,41 +109,14 @@ public class TradeGuard
     }
 
     /// <summary>
-    /// Seeds the daily trade counter from a persisted count on startup.
-    /// Prevents the counter resetting to zero after a Worker restart within the same trading day.
-    /// </summary>
-    public void SeedDailyCount(int count)
-    {
-        var todayEt = TimeZoneInfo.ConvertTime(
-            DateTimeOffset.UtcNow,
-            TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).Date;
-
-        var today = DateOnly.FromDateTime(todayEt);
-
-        lock (_lock)
-        {
-            _dailyTradeCount = count;
-            _countDate = today;
-            _logger.LogInformation(
-                "TradeGuard: seeded daily trade count {Count} for {Date}", count, today);
-        }
-    }
-
-    /// <summary>
     /// Returns null if the order is allowed, or a rejection reason string if blocked.
     /// Uses cached balance and open positions value — no IBKR round trips on the hot path.
     /// </summary>
     public Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)
     {
-        ResetDailyCountIfNewDay();
-
-        // 1. Daily limit
-        if (_dailyTradeCount >= _maxDailyTrades)
-            return Task.FromResult<string?>($"Daily trade limit reached ({_maxDailyTrades}/day)");
-
         lock (_lock)
         {
-            // 2. Symbol-level check — block any new entry if the underlying symbol already
+            // 1. Symbol-level check — block any new entry if the underlying symbol already
             // has an open position regardless of instrument type. Prevents holding TSLA stock
             // and a TSLA option simultaneously, which doubles exposure on one underlying.
             // Averaging is exempt since it is deliberately adding to an existing position.
@@ -151,7 +130,7 @@ public class TradeGuard
                         $"Position already open for {order.Symbol} — only one instrument per underlying allowed");
             }
 
-            // 3. Contract-level duplicate and averaging rules
+            // 2. Contract-level duplicate and averaging rules
             var matchKey = BuildMatchKey(order.UserName, order.OptionsContractSymbol, order.Symbol);
 
             if (_openTrades.TryGetValue(matchKey, out var existing))
@@ -168,7 +147,7 @@ public class TradeGuard
             }
         }
 
-        // 4. Exposure check using cached values — no IBKR round trip
+        // 3. Exposure cap and balance check using cached values — no IBKR round trip
         decimal balance, openValue;
         lock (_cacheLock)
         {
@@ -176,26 +155,41 @@ public class TradeGuard
             openValue = _cachedOpenValue;
         }
 
-        var available = balance - openValue;
-
-        if (balance > 0 && order.BudgetUsed > available)
+        if (balance > 0)
         {
-            return Task.FromResult<string?>(
-                $"Insufficient available balance — need ${order.BudgetUsed:F2}, " +
-                $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})");
+            var todayOpenedValue   = GetTodayOpenedValue();
+            var carryOverValue     = openValue - todayOpenedValue;
+            var availableBalance   = balance - carryOverValue;
+            var effectiveBalance   = availableBalance * (1m + (decimal)_marginPct);
+            var maxDailyDeployment = effectiveBalance * (decimal)(_maxDailyExposurePct / 100.0);
+            var deployableRemaining = maxDailyDeployment - todayOpenedValue;
+
+            if (order.BudgetUsed > deployableRemaining)
+            {
+                return Task.FromResult<string?>(
+                    $"Daily exposure cap reached — need ${order.BudgetUsed:F2}, " +
+                    $"deployable ${deployableRemaining:F2} " +
+                    $"(cap ${maxDailyDeployment:F2}, today open ${todayOpenedValue:F2})");
+            }
+
+            // Hard balance check — never deploy more than available cash
+            var available = balance - openValue;
+            if (order.BudgetUsed > available)
+            {
+                return Task.FromResult<string?>(
+                    $"Insufficient available balance — need ${order.BudgetUsed:F2}, " +
+                    $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})");
+            }
         }
 
         return Task.FromResult<string?>(null);
     }
 
     /// <summary>
-    /// Called after a successful PlaceOrderAsync to register the position in memory
-    /// and persist it to the database.
+    /// Called after a successful PlaceOrderAsync to register the position in memory.
     /// </summary>
     public void RegisterOpen(TradeOrder order, BrokerOrderResult result)
     {
-        ResetDailyCountIfNewDay();
-
         var matchKey = BuildMatchKey(order.UserName, order.OptionsContractSymbol, order.Symbol);
 
         lock (_lock)
@@ -231,11 +225,10 @@ public class TradeGuard
             };
 
             _openTrades[matchKey] = record;
-            _dailyTradeCount++;
 
             _logger.LogInformation(
-                "TradeGuard: position opened — {Symbol} | daily count: {Count}/{Max}",
-                order.Symbol, _dailyTradeCount, _maxDailyTrades);
+                "TradeGuard: position opened — {Symbol} | open positions: {Count}",
+                order.Symbol, _openTrades.Count);
         }
     }
 
@@ -297,11 +290,31 @@ public class TradeGuard
         }
     }
 
-    /// <summary>Returns the number of trades placed today. Resets at midnight ET.</summary>
-    public int GetDailyTradeCount()
+    /// <summary>
+    /// Logs a snapshot of current exposure after a position closes.
+    /// Only today's opened positions count against the daily cap — carry-over positions
+    /// from prior days reduce available balance but do not consume today's cap.
+    /// </summary>
+    public void LogExposureUpdate()
     {
-        ResetDailyCountIfNewDay();
-        lock (_lock) { return _dailyTradeCount; }
+        decimal balance, openValue;
+        lock (_cacheLock)
+        {
+            balance   = _cachedBalance;
+            openValue = _cachedOpenValue;
+        }
+
+        var todayOpenedValue    = GetTodayOpenedValue();
+        var carryOverValue      = openValue - todayOpenedValue;
+        var availableBalance    = balance - carryOverValue;
+        var effectiveBalance    = availableBalance * (1m + (decimal)_marginPct);
+        var maxDailyDeployment  = effectiveBalance * (decimal)(_maxDailyExposurePct / 100.0);
+        var deployableRemaining = maxDailyDeployment - todayOpenedValue;
+
+        _logger.LogInformation(
+            "Exposure update — balance ${Balance:F2} | carry-over ${CarryOver:F2} | " +
+            "today open ${TodayOpen:F2} | cap ${Cap:F2} | available ${Available:F2}",
+            balance, carryOverValue, todayOpenedValue, maxDailyDeployment, deployableRemaining);
     }
 
     /// <summary>
@@ -319,11 +332,26 @@ public class TradeGuard
 
     // -- Helpers --
 
+    // Returns the total entry amount of positions opened today in ET.
+    // Used to separate today's deployment from carry-over positions when calculating the cap.
+    private decimal GetTodayOpenedValue()
+    {
+        var todayEt = DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
+
+        lock (_lock)
+        {
+            return _openTrades.Values
+                .Where(t => DateOnly.FromDateTime(
+                    TimeZoneInfo.ConvertTime(t.OpenedAt, EasternTime).DateTime) == todayEt)
+                .Sum(t => t.EntryAmount);
+        }
+    }
+
     // Refreshes cached balance and open positions value every 30 seconds.
     // Runs on a background thread so IBKR round trips never block trade execution.
     private async Task RefreshCacheLoopAsync(CancellationToken ct)
     {
-        // Short initial delay to let Gateway settle before first fetch
         await Task.Delay(InitialRefreshDelayMs, ct);
 
         while (!ct.IsCancellationRequested)
@@ -360,23 +388,4 @@ public class TradeGuard
         contractSymbol is not null
             ? $"{userName}::{contractSymbol}"
             : $"{userName}::{symbol}";
-
-    private void ResetDailyCountIfNewDay()
-    {
-        var todayEt = TimeZoneInfo.ConvertTime(
-            DateTimeOffset.UtcNow,
-            TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).Date;
-
-        var today = DateOnly.FromDateTime(todayEt);
-
-        lock (_lock)
-        {
-            if (today > _countDate)
-            {
-                _dailyTradeCount = 0;
-                _countDate       = today;
-                _logger.LogInformation("TradeGuard: daily trade count reset for {Date}", today);
-            }
-        }
-    }
 }

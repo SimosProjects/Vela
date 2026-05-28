@@ -52,17 +52,25 @@ public class RiskEngineOptions
     [Range(0, 100, ErrorMessage = "MaxEntrySlippagePct must be between 0 and 100.")]
     public decimal MaxEntrySlippagePct { get; init; } = 5.0m;
 
-    [Range(1, 100, ErrorMessage = "MaxDailyTrades must be between 1 and 100.")]
-    public int MaxDailyTrades { get; init; } = 25;
+    // Maximum percentage of effective account balance that can be deployed per day.
+    // When open positions value reaches this threshold, new entries are blocked.
+    // Defaults to 30% — limits daily exposure to $22,500 on a $75,000 account.
+    [Range(1, 100, ErrorMessage = "MaxDailyExposurePct must be between 1 and 100.")]
+    public double MaxDailyExposurePct { get; init; } = 30.0;
+
+    // Optional margin multiplier applied to account balance before calculating exposure.
+    // Set to 0 for cash accounts. Set to 1.0 to allow up to 2x margin deployment.
+    [Range(0, 10, ErrorMessage = "MarginPct must be between 0 and 10.")]
+    public double MarginPct { get; init; } = 0.0;
 
     // Hour (ET) after which same-day expiry option entries are blocked.
-    // Defaults to 12 (noon ET), 0DTE entries after this time risk total loss
+    // Defaults to 12 (noon ET) — 0DTE entries after this time risk total loss
     // due to liquidity drying up near close.
     [Range(0, 23, ErrorMessage = "ZeroDteEntryCutoffHour must be between 0 and 23.")]
     public int ZeroDteEntryCutoffHour { get; init; } = 12;
 
     // Time (ET, HH:mm) at which any open same-day expiry options are force-closed.
-    // Defaults to 15:30, gives 30 minutes buffer before close to exit while
+    // Defaults to 15:30 — gives 30 minutes buffer before close to exit while
     // liquidity still exists, preventing total loss from expiry.
     public string SameDayExpiryAutoCloseCutoff { get; init; } = "15:30";
 }

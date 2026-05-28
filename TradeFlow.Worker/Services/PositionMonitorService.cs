@@ -104,6 +104,7 @@ public class PositionMonitorService : BackgroundService
         }
 
         await _csv.CloseTradeAsync(closedTrade, ct);
+        _guard.LogExposureUpdate();
 
         _logger.LogInformation(
             "POSITION CLOSED — {Symbol} × {Qty} @ ${Price:F2} | " +

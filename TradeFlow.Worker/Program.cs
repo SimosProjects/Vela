@@ -149,12 +149,11 @@ if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
     guard.StartCacheRefresh(CancellationToken.None);
 }
 
-// Reload open positions and daily trade count from DB into TradeGuard on restart
+// Reload open positions from DB into TradeGuard on restart
 using (var scope = host.Services.CreateScope())
 {
-    var repo    = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
-    var metrics = scope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
-    var guard   = host.Services.GetRequiredService<TradeGuard>();
+    var repo  = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+    var guard = host.Services.GetRequiredService<TradeGuard>();
 
     var positions = await repo.GetAllAsync();
     if (positions.Count > 0)
@@ -169,15 +168,6 @@ using (var scope = host.Services.CreateScope())
             broker.ReRegisterStopCallbacks(positions);
         }
     }
-
-    // Seed daily trade count from trade_metrics so restarts within the same
-    // trading day don't reset the counter and allow more than the daily limit
-    var todayEt    = TimeZoneInfo.ConvertTime(
-        DateTimeOffset.UtcNow,
-        TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).Date;
-    var todayCount = await metrics.GetTodayTradeCountAsync(DateOnly.FromDateTime(todayEt));
-    if (todayCount > 0)
-        guard.SeedDailyCount(todayCount);
 }
 
 host.Run();
