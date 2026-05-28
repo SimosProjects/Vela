@@ -107,17 +107,17 @@ public class BrokerExecutionService
                     "Slippage check timed out for {Symbol} — proceeding without price check",
                     alert.Symbol);
             }
-            else if (order.EstimatedEntryPrice > 0)
+            else if (alertedPrice > 0)
             {
-                var slippage = Math.Abs(currentPrice - order.EstimatedEntryPrice)
-                    / order.EstimatedEntryPrice * 100;
+                var slippage = Math.Abs(currentPrice - alertedPrice)
+                    / alertedPrice * 100;
 
                 if (slippage > _riskOptions.MaxEntrySlippagePct)
                 {
                     _logger.LogWarning(
                         "Slippage check failed for {Symbol} — alerted ${Alerted:F2} " +
                         "current ${Current:F2} slippage {Slippage:F1}% exceeds max {Max:F1}%",
-                        alert.Symbol, order.EstimatedEntryPrice,
+                        alert.Symbol, alertedPrice,
                         currentPrice, slippage, _riskOptions.MaxEntrySlippagePct);
                     return;
                 }
