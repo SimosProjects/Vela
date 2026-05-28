@@ -16,8 +16,9 @@ public class IbkrEWrapper : EWrapper
     private readonly Dictionary<string, TaskCompletionSource<decimal>> _positionCallbacks = new();
     private readonly Dictionary<int, string> _rejectionReasons = new();
     private readonly Dictionary<int, Action<decimal>> _execDetailsCallbacks = new();
+    private readonly Dictionary<int, TaskCompletionSource<decimal>> _execDetailsTcsCallbacks = new();
 
-    // Market data streaming callbacks keyed by reqId — resolves with midpoint or LAST price
+    // Market data streaming callbacks keyed by reqId, resolves with midpoint or LAST price
     private readonly Dictionary<int, TaskCompletionSource<decimal>> _marketDataCallbacks = new();
     private readonly Dictionary<int, decimal> _marketDataBids = new();
     private readonly Dictionary<int, decimal> _marketDataAsks = new();
@@ -75,10 +76,18 @@ public class IbkrEWrapper : EWrapper
 
         lock (_lock)
         {
+            // Fire action-based callback (used by stop/target order detection)
             if (_execDetailsCallbacks.TryGetValue(execution.OrderId, out var handler))
             {
                 handler((decimal)execution.AvgPrice);
                 _execDetailsCallbacks.Remove(execution.OrderId);
+            }
+
+            // Resolve TCS-based callback (used by close order timeout recovery)
+            if (_execDetailsTcsCallbacks.TryGetValue(execution.OrderId, out var tcs))
+            {
+                tcs.TrySetResult((decimal)execution.AvgPrice);
+                _execDetailsTcsCallbacks.Remove(execution.OrderId);
             }
         }
     }
@@ -209,6 +218,25 @@ public class IbkrEWrapper : EWrapper
     public void UnregisterExecDetailsCallback(int orderId)
     {
         lock (_lock) { _execDetailsCallbacks.Remove(orderId); }
+    }
+
+    /// <summary>
+    /// Registers an awaitable callback that resolves when IBKR reports an execution for the given order ID.
+    /// Used by ClosePositionAsync to recover the actual fill price after a close order timeout.
+    /// </summary>
+    public TaskCompletionSource<decimal> RegisterExecDetailsTcsCallback(int orderId)
+    {
+        var tcs = new TaskCompletionSource<decimal>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_lock) { _execDetailsTcsCallbacks[orderId] = tcs; }
+        return tcs;
+    }
+
+    /// <summary>
+    /// Removes an awaitable exec details callback, called when no longer needed.
+    /// </summary>
+    public void UnregisterExecDetailsTcsCallback(int orderId)
+    {
+        lock (_lock) { _execDetailsTcsCallbacks.Remove(orderId); }
     }
 
     /// <summary>
