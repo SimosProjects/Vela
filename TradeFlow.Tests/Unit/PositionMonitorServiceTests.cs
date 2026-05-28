@@ -1,5 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Data;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Models;
@@ -26,7 +28,8 @@ public class PositionMonitorServiceTests : IDisposable
         _brokerMock.Setup(b => b.RegisterBrokerFillHandler(
             It.IsAny<Action<string, decimal, TradeOutcome>>()));
 
-        _guard = new TradeGuard(_brokerMock.Object, NullLogger<TradeGuard>.Instance);
+        var riskOptions = Options.Create(new RiskEngineOptions());
+        _guard = new TradeGuard(_brokerMock.Object, riskOptions, NullLogger<TradeGuard>.Instance);  
 
         _tempDir = Path.Combine(Path.GetTempPath(), $"tradeflow_monitor_{Guid.NewGuid():N}");
         Directory.CreateDirectory(_tempDir);

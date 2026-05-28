@@ -56,7 +56,8 @@ public class BrokerExecutionServiceTests
             It.IsAny<DateTimeOffset>(), It.IsAny<int?>(), It.IsAny<decimal?>(),
             default)).Returns(Task.CompletedTask);
 
-        _guard = new TradeGuard(_brokerMock.Object, NullLogger<TradeGuard>.Instance);
+        var riskOptions = Options.Create(new RiskEngineOptions());
+        _guard = new TradeGuard(_brokerMock.Object, riskOptions, NullLogger<TradeGuard>.Instance);
         _sizer = new PositionSizer(Options.Create(new RiskEngineOptions()));
 
         var services = new ServiceCollection();

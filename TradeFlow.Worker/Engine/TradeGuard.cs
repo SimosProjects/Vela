@@ -14,8 +14,8 @@ namespace TradeFlow.Worker.Engine;
 // in the background to avoid blocking the trade execution path with IBKR round trips.
 public class TradeGuard
 {
-    private const int MaxDailyTrades        = 25;
-    private const int CacheRefreshSeconds   = 30;
+    private readonly int _maxDailyTrades;
+    private const int CacheRefreshSeconds = 30;
     private const int InitialRefreshDelayMs = 500;
 
     private readonly IBrokerService _broker;
@@ -31,14 +31,15 @@ public class TradeGuard
     private readonly Lock _cacheLock = new();
 
     // Daily trade counter that resets at midnight ET
-    private int      _dailyTradeCount = 0;
-    private DateOnly _countDate       = DateOnly.MinValue;
+    private int _dailyTradeCount = 0;
+    private DateOnly _countDate = DateOnly.MinValue;
 
     private CancellationTokenSource? _refreshCts;
 
-    public TradeGuard(IBrokerService broker, ILogger<TradeGuard> logger)
+    public TradeGuard(IBrokerService broker, IOptions<RiskEngineOptions> riskOptions, ILogger<TradeGuard> logger)
     {
         _broker = broker;
+        _maxDailyTrades = riskOptions.Value.MaxDailyTrades;
         _logger = logger;
     }
 
@@ -67,25 +68,25 @@ public class TradeGuard
 
                 var record = new TradeRecord
                 {
-                    AlertId         = p.AlertId,
-                    OrderId         = p.OrderId,
-                    StopOrderId     = p.StopOrderId,
-                    TargetOrderId   = p.TargetOrderId,
-                    UserName        = p.UserName,
-                    Symbol          = p.Symbol,
-                    TradeType       = tradeType,
+                    AlertId = p.AlertId,
+                    OrderId = p.OrderId,
+                    StopOrderId = p.StopOrderId,
+                    TargetOrderId = p.TargetOrderId,
+                    UserName = p.UserName,
+                    Symbol = p.Symbol,
+                    TradeType = tradeType,
                     OptionsContract = p.OptionsContract,
-                    Direction       = p.Direction,
-                    Strike          = p.Strike,
-                    Expiration      = p.Expiration,
-                    Quantity        = p.Quantity,
-                    EntryPrice      = p.EntryPrice,
-                    EntryAmount     = p.EntryAmount,
-                    StopPrice       = p.StopPrice,
-                    TargetPrice     = p.TargetPrice,
-                    OpenedAt        = p.OpenedAt,
-                    IsAverage       = p.IsAverage,
-                    HasAveraged     = p.HasAveraged,
+                    Direction = p.Direction,
+                    Strike = p.Strike,
+                    Expiration = p.Expiration,
+                    Quantity = p.Quantity,
+                    EntryPrice = p.EntryPrice,
+                    EntryAmount = p.EntryAmount,
+                    StopPrice = p.StopPrice,
+                    TargetPrice = p.TargetPrice,
+                    OpenedAt = p.OpenedAt,
+                    IsAverage = p.IsAverage,
+                    HasAveraged = p.HasAveraged,
                 };
 
                 var matchKey = BuildMatchKey(p.UserName, p.OptionsContract, p.Symbol);
@@ -116,7 +117,7 @@ public class TradeGuard
         lock (_lock)
         {
             _dailyTradeCount = count;
-            _countDate       = today;
+            _countDate = today;
             _logger.LogInformation(
                 "TradeGuard: seeded daily trade count {Count} for {Date}", count, today);
         }
@@ -131,8 +132,8 @@ public class TradeGuard
         ResetDailyCountIfNewDay();
 
         // 1. Daily limit
-        if (_dailyTradeCount >= MaxDailyTrades)
-            return Task.FromResult<string?>($"Daily trade limit reached ({MaxDailyTrades}/day)");
+        if (_dailyTradeCount >= _maxDailyTrades)
+            return Task.FromResult<string?>($"Daily trade limit reached ({_maxDailyTrades}/day)");
 
         lock (_lock)
         {
@@ -234,7 +235,7 @@ public class TradeGuard
 
             _logger.LogInformation(
                 "TradeGuard: position opened — {Symbol} | daily count: {Count}/{Max}",
-                order.Symbol, _dailyTradeCount, MaxDailyTrades);
+                order.Symbol, _dailyTradeCount, _maxDailyTrades);
         }
     }
 

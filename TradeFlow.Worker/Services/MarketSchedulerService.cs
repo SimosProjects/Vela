@@ -1,5 +1,6 @@
-using TradeFlow.Worker.Models;
+using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Engine;
+using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Services;
 
@@ -14,29 +15,15 @@ public class MarketSchedulerService : BackgroundService
     private readonly DiscordNotificationService _discord;
     private readonly TradeGuard _guard;
     private readonly IBrokerService _broker;
+    private readonly BrokerExecutionService _execution;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<MarketSchedulerService> _logger;
     private readonly IConfiguration _config;
+    private readonly RiskEngineOptions _riskOptions;
 
     private readonly string? _healthWebhookUrl;
     private readonly string? _summaryWebhookUrl;
     private readonly HttpClient _httpClient;
-
-    // Scheduled task times in ET (hour, minute).
-    // WeeklyReport fires every Friday at 4:30pm ET.
-    // MonthlyReport fires on the last trading day of each month at 4:30pm ET.
-    private static readonly (int Hour, int Minute, string Task)[] Schedule =
-    [
-        (8,  30, "HealthCheck"),
-        (9,  15, "PositionSummary"),
-        (11, 23, "HealthCheck"),
-        (13, 17, "HealthCheck"),
-        (15, 10, "HealthCheck"),
-        (16,  5, "HealthCheck"),
-        (16, 15, "PositionSummary"),
-        (16, 30, "WeeklyReport"),
-        (16, 30, "MonthlyReport")
-    ];
 
     // Fixed US market holidays that fall on the same date every year
     private static readonly HashSet<(int Month, int Day)> FixedHolidays =
@@ -51,25 +38,32 @@ public class MarketSchedulerService : BackgroundService
         DiscordNotificationService discord,
         TradeGuard guard,
         IBrokerService broker,
+        BrokerExecutionService execution,
         IServiceScopeFactory scopeFactory,
         ILogger<MarketSchedulerService> logger,
-        IConfiguration config)
+        IConfiguration config,
+        IOptions<RiskEngineOptions> riskOptions)
     {
-        _discord = discord;
-        _guard = guard;
-        _broker = broker;
+        _discord      = discord;
+        _guard        = guard;
+        _broker       = broker;
+        _execution    = execution;
         _scopeFactory = scopeFactory;
-        _logger = logger;
-        _config = config;
-        _httpClient = new HttpClient();
+        _logger       = logger;
+        _config       = config;
+        _riskOptions  = riskOptions.Value;
+        _httpClient   = new HttpClient();
 
-        _healthWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_HEALTH_WEBHOOK_URL");
+        _healthWebhookUrl  = Environment.GetEnvironmentVariable("DISCORD_HEALTH_WEBHOOK_URL");
         _summaryWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_SUMMARY_WEBHOOK_URL");
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Market scheduler service started.");
+
+        // Build schedule dynamically so SameDayExpiryClose uses the configured cutoff time
+        var schedule = BuildSchedule();
 
         // Track which tasks have already fired today to avoid duplicate triggers
         var firedToday = new HashSet<string>();
@@ -92,7 +86,7 @@ public class MarketSchedulerService : BackgroundService
             if (!IsMarketDay(et))
                 continue;
 
-            foreach (var (hour, minute, task) in Schedule)
+            foreach (var (hour, minute, task) in schedule)
             {
                 var key = $"{today}::{hour}:{minute:D2}::{task}";
 
@@ -125,14 +119,16 @@ public class MarketSchedulerService : BackgroundService
                     await SendPositionSummaryAsync(ct);
                     break;
 
+                case "SameDayExpiryClose":
+                    await CloseSameDayExpiryPositionsAsync(ct);
+                    break;
+
                 case "WeeklyReport":
-                    // Only fires on Fridays
                     if (et.DayOfWeek == DayOfWeek.Friday)
                         await GenerateAnalyticsReportAsync("weekly", ct);
                     break;
 
                 case "MonthlyReport":
-                    // Only fires on the last trading day of the month
                     if (IsLastTradingDayOfMonth(et))
                         await GenerateAnalyticsReportAsync("monthly", ct);
                     break;
@@ -141,6 +137,37 @@ public class MarketSchedulerService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Market scheduler failed to execute task {Task}.", task);
+        }
+    }
+
+    // Closes all open option positions expiring today before liquidity dries up near close.
+    // Prevents total loss from positions expiring worthless when trail stops can no longer fill.
+    private async Task CloseSameDayExpiryPositionsAsync(CancellationToken ct)
+    {
+        var et = GetEasternTime();
+        var todayEt = DateOnly.FromDateTime(et.DateTime);
+
+        var sameDayPositions = _guard.GetOpenTrades()
+            .Where(t =>
+                t.TradeType == TradeType.Options &&
+                t.Expiration is not null &&
+                DateTimeOffset.TryParse(t.Expiration, out var expiry) &&
+                DateOnly.FromDateTime(expiry.DateTime) == todayEt)
+            .ToList();
+
+        if (sameDayPositions.Count == 0)
+        {
+            _logger.LogInformation("Same-day expiry close: no positions to close.");
+            return;
+        }
+
+        _logger.LogInformation(
+            "Same-day expiry close: force closing {Count} position(s) expiring today.",
+            sameDayPositions.Count);
+
+        foreach (var trade in sameDayPositions)
+        {
+            await _execution.ForceCloseAsync(trade, TradeOutcome.ForcedClose, ct);
         }
     }
 
@@ -165,12 +192,10 @@ public class MarketSchedulerService : BackgroundService
 
             var analyticsDll = Path.Combine(AppContext.BaseDirectory, "TradeFlow.Analytics.dll");
 
-            // In production the Analytics DLL is published alongside the Worker.
-            // In development use dotnet run against the project directly.
             string fileName, arguments;
             if (File.Exists(analyticsDll))
             {
-                fileName = "dotnet";
+                fileName  = "dotnet";
                 arguments = $"{analyticsDll} --report {reportType} --output \"{reportsDir}\"";
             }
             else
@@ -181,7 +206,7 @@ public class MarketSchedulerService : BackgroundService
                         "TradeFlow.Analytics",
                         "TradeFlow.Analytics.csproj"));
 
-                fileName = "dotnet";
+                fileName  = "dotnet";
                 arguments = $"run --project \"{projectPath}\" -- --report {reportType} --output \"{reportsDir}\"";
             }
 
@@ -189,17 +214,16 @@ public class MarketSchedulerService : BackgroundService
             {
                 StartInfo = new System.Diagnostics.ProcessStartInfo
                 {
-                    FileName = fileName,
-                    Arguments = arguments,
+                    FileName               = fileName,
+                    Arguments              = arguments,
                     RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
+                    RedirectStandardError  = true,
+                    UseShellExecute        = false,
                 }
             };
 
             process.Start();
 
-            // Guard against a hung analytics process blocking the scheduler indefinitely
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(TimeSpan.FromMinutes(5));
 
@@ -209,7 +233,6 @@ public class MarketSchedulerService : BackgroundService
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                // Timeout fired — kill the process and log a warning
                 _logger.LogWarning(
                     "{ReportType} analytics process exceeded 5 minute timeout — killing process.",
                     reportType);
@@ -250,25 +273,25 @@ public class MarketSchedulerService : BackgroundService
 
         _logger.LogInformation("Market scheduler firing health check.");
 
-        var workerStatus = "✅ Running";
-        var ibkrStatus = await CheckIbkrAsync(ct);
+        var workerStatus   = "✅ Running";
+        var ibkrStatus     = await CheckIbkrAsync(ct);
         var postgresStatus = await CheckPostgresAsync(ct);
-        var xtradesStatus = await CheckXtradesAsync(ct);
-        var signalrStatus = "✅ Connected";
+        var xtradesStatus  = await CheckXtradesAsync(ct);
+        var signalrStatus  = "✅ Connected";
 
         var fields = new[]
         {
-            Field("Worker", workerStatus),
-            Field("IB Gateway", ibkrStatus),
-            Field("PostgreSQL", postgresStatus),
+            Field("Worker",       workerStatus),
+            Field("IB Gateway",   ibkrStatus),
+            Field("PostgreSQL",   postgresStatus),
             Field("Xtrades REST", xtradesStatus),
-            Field("SignalR", signalrStatus),
+            Field("SignalR",      signalrStatus),
         };
 
         var embed = new
         {
-            title = "🔍 SYSTEM HEALTH CHECK",
-            color = 0x3498DB,
+            title  = "🔍 SYSTEM HEALTH CHECK",
+            color  = 0x3498DB,
             fields,
             footer = new { text = "TradeFlow Health" },
             timestamp = DateTimeOffset.UtcNow.ToString("o")
@@ -288,13 +311,13 @@ public class MarketSchedulerService : BackgroundService
         _logger.LogInformation("Market scheduler firing position summary.");
 
         var openTrades = _guard.GetOpenTrades();
-        var balance = await _broker.GetAccountBalanceAsync(ct);
+        var balance    = await _broker.GetAccountBalanceAsync(ct);
         var dailyCount = _guard.GetDailyTradeCount();
 
         var accountSummary =
             $"Balance: **${balance:N2}**\n" +
             $"Open Positions: **{openTrades.Count}**\n" +
-            $"Daily Trades: **{dailyCount} / 10**";
+            $"Daily Trades: **{dailyCount} / {_riskOptions.MaxDailyTrades}**";
 
         var openSection = openTrades.Count > 0
             ? string.Join("\n", openTrades.Select(t =>
@@ -303,7 +326,7 @@ public class MarketSchedulerService : BackgroundService
                     : $"{t.Symbol} x{t.Quantity} @ ${t.EntryPrice:F2}"))
             : "No open positions";
 
-        var closedToday = ReadClosedTodayFromCsv();
+        var closedToday   = ReadClosedTodayFromCsv();
         var closedSection = closedToday.Count > 0
             ? string.Join("\n", closedToday.Select(t =>
             {
@@ -314,7 +337,7 @@ public class MarketSchedulerService : BackgroundService
             : "No closed trades today";
 
         var dailyPnl = closedToday.Sum(t => t.PnL ?? 0);
-        var pnlSign = dailyPnl >= 0 ? "+" : "";
+        var pnlSign  = dailyPnl >= 0 ? "+" : "";
 
         var fields = new[]
         {
@@ -326,8 +349,8 @@ public class MarketSchedulerService : BackgroundService
 
         var embed = new
         {
-            title = "📊 POSITION SUMMARY",
-            color = 0x9B59B6,
+            title  = "📊 POSITION SUMMARY",
+            color  = 0x9B59B6,
             fields,
             footer = new { text = "TradeFlow Summary" },
             timestamp = DateTimeOffset.UtcNow.ToString("o")
@@ -397,7 +420,7 @@ public class MarketSchedulerService : BackgroundService
 
         tradesDir = Path.GetFullPath(tradesDir);
 
-        var today = DateOnly.FromDateTime(GetEasternTime().DateTime);
+        var today  = DateOnly.FromDateTime(GetEasternTime().DateTime);
         var trades = new List<TradeRecord>();
 
         trades.AddRange(ReadClosedTodayFromFile(
@@ -416,7 +439,7 @@ public class MarketSchedulerService : BackgroundService
             return [];
 
         var trades = new List<TradeRecord>();
-        var lines = File.ReadAllLines(path);
+        var lines  = File.ReadAllLines(path);
 
         foreach (var line in lines.Skip(1))
         {
@@ -425,7 +448,8 @@ public class MarketSchedulerService : BackgroundService
 
             var cols = line.Split(',');
 
-            var statusIndex = tradeType == TradeType.Options ? 14 : 10;
+            // Column indices for new layout (with Entry Latency, Entry Slippage, Exit Latency, Exit Slippage)
+            var statusIndex     = tradeType == TradeType.Options ? 18 : 14;
             var closedDateIndex = 2;
 
             if (cols.Length <= statusIndex) continue;
@@ -433,12 +457,12 @@ public class MarketSchedulerService : BackgroundService
             if (!DateOnly.TryParse(cols[closedDateIndex], out var closedDate)) continue;
             if (closedDate != today) continue;
 
-            var entryPriceIndex = tradeType == TradeType.Options ? 11 : 7;
-            var exitPriceIndex  = tradeType == TradeType.Options ? 13 : 9;
-            var pnlIndex        = tradeType == TradeType.Options ? 17 : 13;
-            var pnlPctIndex     = tradeType == TradeType.Options ? 18 : 14;
-            var resultIndex     = tradeType == TradeType.Options ? 16 : 12;
-            var qtyIndex        = tradeType == TradeType.Options ? 10 : 6;
+            var entryPriceIndex = tradeType == TradeType.Options ? 10 : 6;
+            var exitPriceIndex  = tradeType == TradeType.Options ? 14 : 10;
+            var pnlIndex        = tradeType == TradeType.Options ? 21 : 17;
+            var pnlPctIndex     = tradeType == TradeType.Options ? 22 : 18;
+            var resultIndex     = tradeType == TradeType.Options ? 19 : 15;
+            var qtyIndex        = tradeType == TradeType.Options ? 9  : 5;
 
             decimal.TryParse(cols[entryPriceIndex], System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var entryPrice);
@@ -454,43 +478,62 @@ public class MarketSchedulerService : BackgroundService
 
             trades.Add(new TradeRecord
             {
-                AlertId       = string.Empty,
-                OrderId       = string.Empty,
-                StopOrderId   = null,
-                TargetOrderId = null,
-                UserName      = cols[0],
-                Symbol        = cols[5],
-                TradeType     = tradeType,
+                AlertId         = string.Empty,
+                OrderId         = string.Empty,
+                StopOrderId     = null,
+                TargetOrderId   = null,
+                UserName        = cols[0],
+                Symbol          = cols[4],
+                TradeType       = tradeType,
                 OptionsContract = null,
-                Direction     = null,
-                Strike        = null,
-                Expiration    = null,
-                Quantity      = qty,
-                EntryPrice    = entryPrice,
-                EntryAmount   = 0,
-                StopPrice     = 0,
-                TargetPrice   = 0,
-                ExitPrice     = exitPrice,
-                PnL           = pnl,
-                PnLPercent    = pnlPct,
-                Status        = TradeStatus.Closed,
-                Result        = result,
-                OpenedAt      = DateTimeOffset.UtcNow,
+                Direction       = null,
+                Strike          = null,
+                Expiration      = null,
+                Quantity        = qty,
+                EntryPrice      = entryPrice,
+                EntryAmount     = 0,
+                StopPrice       = 0,
+                TargetPrice     = 0,
+                ExitPrice       = exitPrice,
+                PnL             = pnl,
+                PnLPercent      = pnlPct,
+                Status          = TradeStatus.Closed,
+                Result          = result,
+                OpenedAt        = DateTimeOffset.UtcNow,
             });
         }
 
         return trades;
     }
 
-    // Returns true if today is the last market day of the current month in ET.
-    // Checks if tomorrow (or any day until month end) is still a trading day.
+    // Builds the schedule array dynamically, inserting SameDayExpiryClose at the configured time.
+    private (int Hour, int Minute, string Task)[] BuildSchedule()
+    {
+        var cutoff = TimeOnly.TryParse(_riskOptions.SameDayExpiryAutoCloseCutoff, out var t)
+            ? t
+            : new TimeOnly(15, 30);
+
+        return
+        [
+            (8,           30,           "HealthCheck"),
+            (9,           15,           "PositionSummary"),
+            (11,          23,           "HealthCheck"),
+            (13,          17,           "HealthCheck"),
+            (15,          10,           "HealthCheck"),
+            (cutoff.Hour, cutoff.Minute,"SameDayExpiryClose"),
+            (16,          5,            "HealthCheck"),
+            (16,          15,           "PositionSummary"),
+            (16,          30,           "WeeklyReport"),
+            (16,          30,           "MonthlyReport"),
+        ];
+    }
+
     private static bool IsLastTradingDayOfMonth(DateTimeOffset et)
     {
-        var today = DateOnly.FromDateTime(et.DateTime);
+        var today       = DateOnly.FromDateTime(et.DateTime);
         var lastOfMonth = new DateOnly(today.Year, today.Month,
             DateTime.DaysInMonth(today.Year, today.Month));
 
-        // Walk forward from tomorrow to end of month — if no trading day exists, today is last
         for (var d = today.AddDays(1); d <= lastOfMonth; d = d.AddDays(1))
         {
             var dow = d.DayOfWeek;
@@ -498,7 +541,6 @@ public class MarketSchedulerService : BackgroundService
                 continue;
             if (FixedHolidays.Contains((d.Month, d.Day)))
                 continue;
-            // Found a future trading day this month — today is not the last
             return false;
         }
 

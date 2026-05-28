@@ -8,5 +8,6 @@ public enum TradeOutcome
     XtradesExit,  // closed by Xtrades stc signal
     Averaged,     // averaged into position
     Cancelled,    // order cancelled
+    ForcedClose,  // order was forced to clase
     Expired       // options contract expired worthless
 }

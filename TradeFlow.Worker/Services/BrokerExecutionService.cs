@@ -373,6 +373,77 @@ public class BrokerExecutionService
         }
     }
 
+    /// <summary>
+    /// Force-closes an open position regardless of any exit alert.
+    /// Used by MarketSchedulerService to close same-day expiry options before liquidity dries up.
+    /// Writes to CSV, Discord, and trade_metrics identically to a normal exit.
+    /// </summary>
+    public async Task ForceCloseAsync(
+        TradeRecord trade,
+        TradeOutcome outcome,
+        CancellationToken ct = default)
+    {
+        _logger.LogInformation(
+            "Force closing {Symbol} — Outcome: {Outcome}", trade.Symbol, outcome);
+
+        BrokerOrderResult closeResult;
+        try
+        {
+            closeResult = await _broker.ClosePositionAsync(trade, outcome, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Broker ClosePositionAsync failed during force close for {Symbol}", trade.Symbol);
+            return;
+        }
+
+        var closedTrade = _guard.RegisterClose(
+            trade.UserName,
+            trade.OptionsContract,
+            trade.Symbol,
+            closeResult.FillPrice,
+            outcome);
+
+        if (closedTrade is null) return;
+
+        closedTrade.ExitLatencyMs   = null;
+        closedTrade.ExitSlippagePct = null;
+
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+            await repo.DeleteAsync(trade.OrderId, ct);
+        }
+
+        await _csv.CloseTradeAsync(closedTrade, ct);
+
+        _logger.LogInformation(
+            "FORCE CLOSED — {Symbol} × {Qty} @ ${Price:F2} | " +
+            "P&L: {PnL:+$#,##0.00;-$#,##0.00} ({PnLPct:+0.00;-0.00}%) | Outcome: {Outcome}",
+            closedTrade.Symbol, closedTrade.Quantity, closeResult.FillPrice,
+            closedTrade.PnL ?? 0, closedTrade.PnLPercent ?? 0, outcome);
+
+        await _discord.NotifyPositionClosedAsync(closedTrade, ct);
+
+        if (closedTrade.PnL.HasValue && closedTrade.PnLPercent.HasValue)
+        {
+            using var metricScope = _scopeFactory.CreateScope();
+            var metrics = metricScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+            await metrics.CloseAsync(
+                orderId:         trade.OrderId,
+                exitPrice:       closeResult.FillPrice,
+                exitAmount:      closeResult.FillAmount,
+                pnl:             closedTrade.PnL.Value,
+                pnlPct:          closedTrade.PnLPercent.Value,
+                outcome:         outcome.ToString(),
+                closedAt:        closedTrade.ClosedAt ?? DateTimeOffset.UtcNow,
+                exitLatencyMs:   null,
+                exitSlippagePct: null,
+                ct:              ct);
+        }
+    }
+
     // Returns true if the current time falls within regular market hours (9:30am to 4:00pm ET, Mon-Fri)
     private static bool IsMarketOpenDefault()
     {

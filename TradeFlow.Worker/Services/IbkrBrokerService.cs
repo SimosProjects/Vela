@@ -44,6 +44,48 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// Re-registers stop and target order callbacks for positions restored from the database on restart.
+    /// Without this, broker-side trail stop or target fills after a restart are silently ignored
+    /// because _stopOrderMap is empty and execDetails callbacks are never wired up.
+    /// Called from Program.cs after LoadFromDatabase.
+    /// </summary>
+    public void ReRegisterStopCallbacks(IEnumerable<OpenPosition> positions)
+    {
+        var count = 0;
+
+        foreach (var p in positions)
+        {
+            if (!int.TryParse(p.StopOrderId, out var stopId) ||
+                !int.TryParse(p.TargetOrderId, out var targetId) ||
+                !int.TryParse(p.OrderId, out _))
+                continue;
+
+            var entryOrderId = p.OrderId;
+
+            lock (_stopMapLock)
+            {
+                _stopOrderMap[stopId]   = (entryOrderId, TradeOutcome.StoppedOut);
+                _stopOrderMap[targetId] = (entryOrderId, TradeOutcome.TargetHit);
+            }
+
+            _connection.Wrapper.RegisterExecDetailsCallback(stopId, fillPrice =>
+                OnStopOrderFilled(stopId, fillPrice));
+
+            _connection.Wrapper.RegisterExecDetailsCallback(targetId, fillPrice =>
+                OnStopOrderFilled(targetId, fillPrice));
+
+            count++;
+
+            _logger.LogInformation(
+                "IBKR re-registered stop callbacks for {Symbol} — StopOrderId: {StopId} TargetOrderId: {TargetId}",
+                p.Symbol, stopId, targetId);
+        }
+
+        _logger.LogInformation(
+            "IBKR stop callback re-registration complete — {Count} position(s) re-wired", count);
+    }
+
+    /// <summary>
     /// Returns the net liquidation value of the IBKR account.
     /// Used by <see cref="TradeGuard"/> to verify available capital before placing orders.
     /// </summary>
