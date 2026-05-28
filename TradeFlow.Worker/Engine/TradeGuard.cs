@@ -367,9 +367,17 @@ public class TradeGuard
                     _cachedOpenValue = openValue;
                 }
 
-                _logger.LogDebug(
-                    "TradeGuard cache refreshed — balance ${Balance:F2} open ${Open:F2}",
-                    balance, openValue);
+                var todayOpenedValue    = GetTodayOpenedValue();
+                var carryOverValue      = openValue - todayOpenedValue;
+                var availableBalance    = balance - carryOverValue;
+                var effectiveBalance    = availableBalance * (1m + (decimal)_marginPct);
+                var maxDailyDeployment  = effectiveBalance * (decimal)(_maxDailyExposurePct / 100.0);
+                var deployableRemaining = maxDailyDeployment - todayOpenedValue;
+
+                _logger.LogInformation(
+                    "TradeGuard cache refreshed — balance ${Balance:F2} | carry-over ${CarryOver:F2} | " +
+                    "today open ${TodayOpen:F2} | cap ${Cap:F2} | available ${Available:F2}",
+                    balance, carryOverValue, todayOpenedValue, maxDailyDeployment, deployableRemaining);
             }
             catch (OperationCanceledException)
             {
