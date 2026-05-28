@@ -112,5 +112,23 @@ public class PositionMonitorService : BackgroundService
             closedTrade.PnL ?? 0, closedTrade.PnLPercent ?? 0, outcome);
 
         await _discord.NotifyPositionClosedAsync(closedTrade, ct);
+
+        // Write exit metrics so broker-side closes appear in analytics alongside Xtrades exits
+        if (closedTrade.PnL.HasValue && closedTrade.PnLPercent.HasValue)
+        {
+            using var metricScope = _scopeFactory.CreateScope();
+            var metrics = metricScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+            await metrics.CloseAsync(
+                orderId:         trade.OrderId,
+                exitPrice:       fillPrice,
+                exitAmount:      closedTrade.ExitAmount ?? 0m,
+                pnl:             closedTrade.PnL.Value,
+                pnlPct:          closedTrade.PnLPercent.Value,
+                outcome:         outcome.ToString(),
+                closedAt:        closedTrade.ClosedAt ?? DateTimeOffset.UtcNow,
+                exitLatencyMs:   null,
+                exitSlippagePct: null,
+                ct:              ct);
+        }
     }
 }

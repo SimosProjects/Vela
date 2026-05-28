@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Models;
 using TradeFlow.Worker.Services;
@@ -17,7 +19,8 @@ public class TradeGuardTests
         _brokerMock.Setup(b => b.GetOpenPositionsValueAsync(default))
             .ReturnsAsync(0m);
 
-        _guard = new TradeGuard(_brokerMock.Object, NullLogger<TradeGuard>.Instance);
+        var riskOptions = Options.Create(new RiskEngineOptions());
+        _guard = new TradeGuard(_brokerMock.Object, riskOptions, NullLogger<TradeGuard>.Instance);
     }
 
     private static TradeOrder BuildOrder(

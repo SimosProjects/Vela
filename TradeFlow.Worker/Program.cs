@@ -89,11 +89,11 @@ builder.Services.AddSingleton<RiskEngineService>(sp =>
     if (!riskOptions.AllowHigh)
         rules.Insert(1, new NoHighRiskRule());
 
-    // Add penny stock filter if a minimum price is configured.
-    // Inserted after EntryOnlyRule so non-entry alerts skip it cheaply,
-    // but before the more expensive trader and score lookups.
     if (riskOptions.MinStockPriceDollars > 0)
         rules.Insert(1, new MinStockPriceRule(riskOptions.MinStockPriceDollars));
+
+    // Block same-day expiry entries after the configured cutoff hour
+    rules.Insert(1, new No0DTEAfterCutoffRule(riskOptions.ZeroDteEntryCutoffHour));
 
     // Blocked symbols inserted at position 0 so they short-circuit before all other rules
     if (riskOptions.BlockedSymbols.Count > 0)
@@ -158,7 +158,17 @@ using (var scope = host.Services.CreateScope())
 
     var positions = await repo.GetAllAsync();
     if (positions.Count > 0)
+    {
         guard.LoadFromDatabase(positions);
+
+        // Re-register stop/target callbacks for restored positions so broker-side
+        // trail stop and target fills are detected correctly after a restart
+        if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+        {
+            var broker = host.Services.GetRequiredService<IbkrBrokerService>();
+            broker.ReRegisterStopCallbacks(positions);
+        }
+    }
 
     // Seed daily trade count from trade_metrics so restarts within the same
     // trading day don't reset the counter and allow more than the daily limit
