@@ -390,6 +390,8 @@ public class IbkrBrokerService : IBrokerService
     /// <summary>
     /// Cancels any active stop and target orders then places a market close order.
     /// Uses the actual average fill price from the IBKR callback for accurate P&amp;L calculation.
+    /// On timeout, waits an additional 10 seconds for the execDetails callback before
+    /// falling back to entry price — prevents $0.00 P&amp;L from slow fills.
     /// </summary>
     public async Task<BrokerOrderResult> ClosePositionAsync(
         TradeRecord trade,
@@ -430,8 +432,11 @@ public class IbkrBrokerService : IBrokerService
 
         var closeOrderId = GetNextOrderId();
         var tcs          = _connection.Wrapper.RegisterOrderCallback(closeOrderId);
-        var contract     = BuildCloseContract(trade);
-        var closeOrder   = BuildCloseOrder(closeOrderId, trade);
+
+        // Register exec details TCS before placing — catches the fill even if orderStatus times out
+        var execTcs  = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
+        var contract = BuildCloseContract(trade);
+        var closeOrder = BuildCloseOrder(closeOrderId, trade);
 
         try
         {
@@ -440,9 +445,12 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
 
-            var fill       = await tcs.Task.WaitAsync(cts.Token);
-            var fillPrice  = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
+            var fill      = await tcs.Task.WaitAsync(cts.Token);
+            var fillPrice = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
             var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
+
+            // Order callback resolved — exec details TCS no longer needed
+            _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
 
             _logger.LogInformation(
                 "IBKR position closed. OrderId: {OrderId} Symbol: {Symbol} Status: {Status} FillPrice: {Price:F2}",
@@ -461,20 +469,55 @@ public class IbkrBrokerService : IBrokerService
         catch (OperationCanceledException)
         {
             _logger.LogWarning(
-                "IBKR ClosePosition timed out for {Symbol}. Close order may still be pending.",
+                "IBKR ClosePosition timed out for {Symbol} — waiting for execDetails callback.",
                 trade.Symbol);
 
             _connection.Wrapper.UnregisterOrderCallback(closeOrderId);
 
-            return new BrokerOrderResult(
-                OrderId: closeOrderId.ToString(),
-                StopOrderId: null,
-                TargetOrderId: null,
-                FillPrice: trade.EntryPrice,
-                FillQuantity: trade.Quantity,
-                FillAmount: trade.EntryAmount,
-                Status: OrderStatus.Pending,
-                FilledAt: DateTimeOffset.UtcNow);
+            // Wait a further 10 seconds for execDetails to arrive with the real fill price.
+            // This covers slow fills where the order was placed but confirmation was delayed.
+            try
+            {
+                using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                execCts.CancelAfter(TimeSpan.FromSeconds(10));
+
+                var execFillPrice = await execTcs.Task.WaitAsync(execCts.Token);
+                var multiplier    = trade.TradeType == TradeType.Options ? 100m : 1m;
+
+                _logger.LogInformation(
+                    "IBKR ClosePosition recovered fill via execDetails — Symbol: {Symbol} FillPrice: {Price:F2}",
+                    trade.Symbol, execFillPrice);
+
+                return new BrokerOrderResult(
+                    OrderId: closeOrderId.ToString(),
+                    StopOrderId: null,
+                    TargetOrderId: null,
+                    FillPrice: execFillPrice,
+                    FillQuantity: trade.Quantity,
+                    FillAmount: execFillPrice * trade.Quantity * multiplier,
+                    Status: OrderStatus.Filled,
+                    FilledAt: DateTimeOffset.UtcNow);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    "IBKR ClosePosition execDetails also timed out for {Symbol} — using entry price fallback.",
+                    trade.Symbol);
+
+                _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
+
+                var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
+
+                return new BrokerOrderResult(
+                    OrderId: closeOrderId.ToString(),
+                    StopOrderId: null,
+                    TargetOrderId: null,
+                    FillPrice: trade.EntryPrice,
+                    FillQuantity: trade.Quantity,
+                    FillAmount: trade.EntryAmount,
+                    Status: OrderStatus.Pending,
+                    FilledAt: DateTimeOffset.UtcNow);
+            }
         }
     }
 
