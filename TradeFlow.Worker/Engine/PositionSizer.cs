@@ -21,13 +21,11 @@ public class PositionSizer
     private const decimal OptionsInitialBudget = 1_000m;
     private const decimal OptionsAverageBudget =   500m;
     private const decimal OptionsStopMultiplier =  0.50m; // -50% initial bracket stop
-    private const decimal OptionsTgtMultiplier  =  3.00m; // +200% target
 
     // Stock sizing
     private const decimal StockInitialBudget  = 3_000m;
     private const decimal StockAverageBudget  = 1_500m;
     private const decimal StockStopMultiplier =  0.85m; // -15% initial bracket stop
-    private const decimal StockTgtMultiplier  =  1.30m; // +30% target
 
     private const int MinQuantity = 1;
 
@@ -75,8 +73,8 @@ public class PositionSizer
             : price.Value * StockStopMultiplier;
 
         var targetPrice = isOptions
-            ? price.Value * OptionsTgtMultiplier
-            : price.Value * StockTgtMultiplier;
+            ? price.Value * (decimal)_options.OptionsTargetMultiple
+            : price.Value * (decimal)_options.StockTargetMultiple;
 
         var trailPercent = ResolveTrailPercent(isOptions, effectiveRisk);
 

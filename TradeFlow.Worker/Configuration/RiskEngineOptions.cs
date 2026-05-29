@@ -73,4 +73,10 @@ public class RiskEngineOptions
     // Defaults to 15:30 — gives 30 minutes buffer before close to exit while
     // liquidity still exists, preventing total loss from expiry.
     public string SameDayExpiryAutoCloseCutoff { get; init; } = "15:30";
+
+    [Range(1, 100, ErrorMessage = "OptionsTargetMultiple must be between 1 and 100.")]
+    public double OptionsTargetMultiple { get; init; } = 3.0;
+
+    [Range(1, 100, ErrorMessage = "StockTargetMultiple must be between 1 and 100.")]
+    public double StockTargetMultiple { get; init; } = 1.3;
 }
