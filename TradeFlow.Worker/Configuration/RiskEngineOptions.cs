@@ -6,6 +6,8 @@ public class RiskEngineOptions
 {
     public const string SectionName = "RiskEngine";
 
+    public bool TradingPaused { get; init; } = false;
+
     [Range(0, 100, ErrorMessage = "MinXScore must be between 0 and 100.")]
     public int MinXScore { get; init; } = 60;
 
@@ -79,4 +81,9 @@ public class RiskEngineOptions
 
     [Range(1, 100, ErrorMessage = "StockTargetMultiple must be between 1 and 100.")]
     public double StockTargetMultiple { get; init; } = 1.3;
+
+    public decimal OptionsInitialBudget { get; init; } = 2_000m;
+    public decimal OptionsAverageBudget { get; init; } = 1_000m;
+    public decimal StockInitialBudget   { get; init; } = 3_000m;
+    public decimal StockAverageBudget   { get; init; } = 1_500m;
 }

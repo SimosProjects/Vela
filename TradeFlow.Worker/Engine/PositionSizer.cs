@@ -17,14 +17,8 @@ public class PositionSizer
 {
     private readonly RiskEngineOptions _options;
 
-    // Options sizing
-    private const decimal OptionsInitialBudget = 1_000m;
-    private const decimal OptionsAverageBudget =   500m;
     private const decimal OptionsStopMultiplier =  0.50m; // -50% initial bracket stop
 
-    // Stock sizing
-    private const decimal StockInitialBudget  = 3_000m;
-    private const decimal StockAverageBudget  = 1_500m;
     private const decimal StockStopMultiplier =  0.85m; // -15% initial bracket stop
 
     private const int MinQuantity = 1;
@@ -57,9 +51,10 @@ public class PositionSizer
             ? ClassifyOptionsRisk(alert)
             : (alert.Risk?.ToLowerInvariant() ?? "standard");
 
+
         var budget = isOptions
-            ? (isAverage ? OptionsAverageBudget : OptionsInitialBudget)
-            : (isAverage ? StockAverageBudget   : StockInitialBudget);
+            ? (isAverage ? _options.OptionsAverageBudget : _options.OptionsInitialBudget)
+            : (isAverage ? _options.StockAverageBudget   : _options.StockInitialBudget);
 
         var quantity = isOptions
             ? (int)(budget / (price.Value * 100))
