@@ -24,6 +24,9 @@ public class IbkrBrokerService : IBrokerService
     // Subscribed by PositionMonitorService to handle broker-side stop and target fills
     private Action<string, decimal, TradeOutcome>? _brokerFillHandler;
 
+    private static readonly TimeZoneInfo EasternTime =
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
     public IbkrBrokerService(
         IbkrConnectionService connection,
         IOptions<IbkrOptions> options,
@@ -47,6 +50,7 @@ public class IbkrBrokerService : IBrokerService
     /// Re-registers stop and target order callbacks for positions restored from the database on restart.
     /// Without this, broker-side trail stop or target fills after a restart are silently ignored
     /// because _stopOrderMap is empty and execDetails callbacks are never wired up.
+    /// Positions with no TargetOrderId (0DTE) only register the trail stop callback.
     /// Called from Program.cs after LoadFromDatabase.
     /// </summary>
     public void ReRegisterStopCallbacks(IEnumerable<OpenPosition> positions)
@@ -56,29 +60,36 @@ public class IbkrBrokerService : IBrokerService
         foreach (var p in positions)
         {
             if (!int.TryParse(p.StopOrderId, out var stopId) ||
-                !int.TryParse(p.TargetOrderId, out var targetId) ||
                 !int.TryParse(p.OrderId, out _))
                 continue;
+
+            var hasTarget = p.TargetOrderId is not null &&
+                            int.TryParse(p.TargetOrderId, out var _);
+
+            int.TryParse(p.TargetOrderId, out var targetId);
 
             var entryOrderId = p.OrderId;
 
             lock (_stopMapLock)
             {
-                _stopOrderMap[stopId]   = (entryOrderId, TradeOutcome.StoppedOut);
-                _stopOrderMap[targetId] = (entryOrderId, TradeOutcome.TargetHit);
+                _stopOrderMap[stopId] = (entryOrderId, TradeOutcome.StoppedOut);
+
+                if (hasTarget)
+                    _stopOrderMap[targetId] = (entryOrderId, TradeOutcome.TargetHit);
             }
 
             _connection.Wrapper.RegisterExecDetailsCallback(stopId, fillPrice =>
                 OnStopOrderFilled(stopId, fillPrice));
 
-            _connection.Wrapper.RegisterExecDetailsCallback(targetId, fillPrice =>
-                OnStopOrderFilled(targetId, fillPrice));
+            if (hasTarget)
+                _connection.Wrapper.RegisterExecDetailsCallback(targetId, fillPrice =>
+                    OnStopOrderFilled(targetId, fillPrice));
 
             count++;
 
             _logger.LogInformation(
                 "IBKR re-registered stop callbacks for {Symbol} — StopOrderId: {StopId} TargetOrderId: {TargetId}",
-                p.Symbol, stopId, targetId);
+                p.Symbol, stopId, hasTarget ? targetId : null);
         }
 
         _logger.LogInformation(
@@ -267,8 +278,9 @@ public class IbkrBrokerService : IBrokerService
 
     /// <summary>
     /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
-    /// an OCA group containing a TRAIL stop and LMT target. This gives trailing stop
-    /// protection while ensuring the target and stop cancel each other automatically.
+    /// an OCA group containing a TRAIL stop and optional LMT target. For same-day expiry
+    /// options (0DTE), the target order is skipped — trail stop only — to avoid margin
+    /// rejection on large quantities and to let winners run without a fixed ceiling.
     /// </summary>
     public async Task<BrokerOrderResult> PlaceOrderAsync(
         TradeOrder order,
@@ -287,9 +299,7 @@ public class IbkrBrokerService : IBrokerService
         var tempStopId    = orderId + 1;
         var minTick       = order.TradeType == TradeType.Options ? 0.05 : 0.01;
         var roundedStop   = Math.Round(Math.Round((double)order.StopPrice / minTick) * minTick, 2);
-        var tempStopOrder = BuildStopOrder(
-            tempStopId, orderId, order.Quantity,
-            roundedStop);
+        var tempStopOrder = BuildStopOrder(tempStopId, orderId, order.Quantity, roundedStop);
 
         entryOrder.Transmit    = false;
         tempStopOrder.Transmit = true;
@@ -321,32 +331,47 @@ public class IbkrBrokerService : IBrokerService
 
             var trailPercent = order.TrailPercent;
             var trailOrder   = BuildOcaTrailOrder(trailStopId, order.Quantity, trailPercent, ocaGroup);
-            var targetOrder  = BuildOcaLimitOrder(
-                targetOrderId, order.Quantity,
-                Math.Round((double)order.TargetPrice, 2), ocaGroup);
+
+            // Skip target order for same-day expiry options — liquidity dries up near close
+            // making limit targets unreachable, and margin rejection on large qty is common.
+            // Trail stop provides the only exit protection for 0DTE positions.
+            var isZeroDte = order.TradeType == TradeType.Options &&
+                order.Expiration is not null &&
+                DateTimeOffset.TryParse(order.Expiration, out var expiry) &&
+                DateOnly.FromDateTime(expiry.DateTime) ==
+                DateOnly.FromDateTime(
+                    TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
 
             _connection.Client.placeOrder(trailStopId, contract, trailOrder);
-            _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
+
+            if (!isZeroDte)
+            {
+                var targetOrder = BuildOcaLimitOrder(
+                    targetOrderId, order.Quantity,
+                    Math.Round((double)order.TargetPrice, 2), ocaGroup);
+                _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
+            }
 
             _logger.LogInformation(
-                "IBKR OCA group placed — Trail: {TrailPct}% | Target: ${Target:F2} | OCA: {Oca}",
-                trailPercent, order.TargetPrice, ocaGroup);
+                "IBKR OCA group placed — Trail: {TrailPct}% | Target: {Target} | OCA: {Oca}",
+                trailPercent,
+                isZeroDte ? "none (0DTE)" : $"${order.TargetPrice:F2}",
+                ocaGroup);
 
-            // Register exec callbacks so broker-side fills are detected without polling
-            RegisterStopOrderCallbacks(orderId, trailStopId, targetOrderId);
+            RegisterStopOrderCallbacks(orderId, trailStopId, isZeroDte ? null : targetOrderId);
 
             var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
             var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
 
             return new BrokerOrderResult(
-                OrderId: orderId.ToString(),
-                StopOrderId: trailStopId.ToString(),
-                TargetOrderId: targetOrderId.ToString(),
-                FillPrice: fillPrice,
-                FillQuantity: order.Quantity,
-                FillAmount: fillPrice * order.Quantity * multiplier,
-                Status: OrderStatus.Filled,
-                FilledAt: DateTimeOffset.UtcNow);
+                OrderId:       orderId.ToString(),
+                StopOrderId:   trailStopId.ToString(),
+                TargetOrderId: isZeroDte ? null : targetOrderId.ToString(),
+                FillPrice:     fillPrice,
+                FillQuantity:  order.Quantity,
+                FillAmount:    fillPrice * order.Quantity * multiplier,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow);
         }
         catch (OperationCanceledException)
         {
@@ -356,7 +381,6 @@ public class IbkrBrokerService : IBrokerService
 
             _connection.Wrapper.UnregisterOrderCallback(orderId);
 
-            // A timeout after a 201 rejection means the order was rejected, not pending
             var rejectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
             if (rejectionReason is not null)
             {
@@ -364,33 +388,33 @@ public class IbkrBrokerService : IBrokerService
                     "IBKR order rejected for {Symbol}: {Reason}", order.Symbol, rejectionReason);
 
                 return new BrokerOrderResult(
-                    OrderId: orderId.ToString(),
-                    StopOrderId: null,
+                    OrderId:       orderId.ToString(),
+                    StopOrderId:   null,
                     TargetOrderId: null,
-                    FillPrice: 0m,
-                    FillQuantity: 0,
-                    FillAmount: 0m,
-                    Status: OrderStatus.Rejected,
-                    FilledAt: DateTimeOffset.UtcNow,
+                    FillPrice:     0m,
+                    FillQuantity:  0,
+                    FillAmount:    0m,
+                    Status:        OrderStatus.Rejected,
+                    FilledAt:      DateTimeOffset.UtcNow,
                     RejectionReason: rejectionReason);
             }
 
             return new BrokerOrderResult(
-                OrderId: orderId.ToString(),
-                StopOrderId: (orderId + 1).ToString(),
+                OrderId:       orderId.ToString(),
+                StopOrderId:   (orderId + 1).ToString(),
                 TargetOrderId: (orderId + 2).ToString(),
-                FillPrice: order.EstimatedEntryPrice,
-                FillQuantity: order.Quantity,
-                FillAmount: order.BudgetUsed,
-                Status: OrderStatus.Pending,
-                FilledAt: DateTimeOffset.UtcNow);
+                FillPrice:     order.EstimatedEntryPrice,
+                FillQuantity:  order.Quantity,
+                FillAmount:    order.BudgetUsed,
+                Status:        OrderStatus.Pending,
+                FilledAt:      DateTimeOffset.UtcNow);
         }
     }
 
     /// <summary>
     /// Cancels any active stop and target orders then places a market close order.
     /// Uses the actual average fill price from the IBKR callback for accurate P&amp;L calculation.
-    /// On timeout, waits an additional 10 seconds for the execDetails callback before
+    /// On timeout, waits an additional 30 seconds for the execDetails callback before
     /// falling back to entry price — prevents $0.00 P&amp;L from slow fills.
     /// </summary>
     public async Task<BrokerOrderResult> ClosePositionAsync(
@@ -434,8 +458,8 @@ public class IbkrBrokerService : IBrokerService
         var tcs          = _connection.Wrapper.RegisterOrderCallback(closeOrderId);
 
         // Register exec details TCS before placing — catches the fill even if orderStatus times out
-        var execTcs  = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
-        var contract = BuildCloseContract(trade);
+        var execTcs    = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
+        var contract   = BuildCloseContract(trade);
         var closeOrder = BuildCloseOrder(closeOrderId, trade);
 
         try
@@ -445,8 +469,8 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
 
-            var fill      = await tcs.Task.WaitAsync(cts.Token);
-            var fillPrice = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
+            var fill       = await tcs.Task.WaitAsync(cts.Token);
+            var fillPrice  = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
             var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
 
             // Order callback resolved — exec details TCS no longer needed
@@ -457,14 +481,14 @@ public class IbkrBrokerService : IBrokerService
                 closeOrderId, trade.Symbol, fill.Status, fillPrice);
 
             return new BrokerOrderResult(
-                OrderId: closeOrderId.ToString(),
-                StopOrderId: null,
+                OrderId:       closeOrderId.ToString(),
+                StopOrderId:   null,
                 TargetOrderId: null,
-                FillPrice: fillPrice,
-                FillQuantity: trade.Quantity,
-                FillAmount: fillPrice * trade.Quantity * multiplier,
-                Status: OrderStatus.Filled,
-                FilledAt: DateTimeOffset.UtcNow);
+                FillPrice:     fillPrice,
+                FillQuantity:  trade.Quantity,
+                FillAmount:    fillPrice * trade.Quantity * multiplier,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow);
         }
         catch (OperationCanceledException)
         {
@@ -474,12 +498,12 @@ public class IbkrBrokerService : IBrokerService
 
             _connection.Wrapper.UnregisterOrderCallback(closeOrderId);
 
-            // Wait a further 10 seconds for execDetails to arrive with the real fill price.
+            // Wait a further 30 seconds for execDetails to arrive with the real fill price.
             // This covers slow fills where the order was placed but confirmation was delayed.
             try
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                execCts.CancelAfter(TimeSpan.FromSeconds(10));
+                execCts.CancelAfter(TimeSpan.FromSeconds(30));
 
                 var execFillPrice = await execTcs.Task.WaitAsync(execCts.Token);
                 var multiplier    = trade.TradeType == TradeType.Options ? 100m : 1m;
@@ -489,14 +513,14 @@ public class IbkrBrokerService : IBrokerService
                     trade.Symbol, execFillPrice);
 
                 return new BrokerOrderResult(
-                    OrderId: closeOrderId.ToString(),
-                    StopOrderId: null,
+                    OrderId:       closeOrderId.ToString(),
+                    StopOrderId:   null,
                     TargetOrderId: null,
-                    FillPrice: execFillPrice,
-                    FillQuantity: trade.Quantity,
-                    FillAmount: execFillPrice * trade.Quantity * multiplier,
-                    Status: OrderStatus.Filled,
-                    FilledAt: DateTimeOffset.UtcNow);
+                    FillPrice:     execFillPrice,
+                    FillQuantity:  trade.Quantity,
+                    FillAmount:    execFillPrice * trade.Quantity * multiplier,
+                    Status:        OrderStatus.Filled,
+                    FilledAt:      DateTimeOffset.UtcNow);
             }
             catch (OperationCanceledException)
             {
@@ -506,17 +530,15 @@ public class IbkrBrokerService : IBrokerService
 
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
 
-                var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
-
                 return new BrokerOrderResult(
-                    OrderId: closeOrderId.ToString(),
-                    StopOrderId: null,
+                    OrderId:       closeOrderId.ToString(),
+                    StopOrderId:   null,
                     TargetOrderId: null,
-                    FillPrice: trade.EntryPrice,
-                    FillQuantity: trade.Quantity,
-                    FillAmount: trade.EntryAmount,
-                    Status: OrderStatus.Pending,
-                    FilledAt: DateTimeOffset.UtcNow);
+                    FillPrice:     trade.EntryPrice,
+                    FillQuantity:  trade.Quantity,
+                    FillAmount:    trade.EntryAmount,
+                    Status:        OrderStatus.Pending,
+                    FilledAt:      DateTimeOffset.UtcNow);
             }
         }
     }
@@ -528,7 +550,7 @@ public class IbkrBrokerService : IBrokerService
     public void SyncOrderId()
     {
         var gatewayId = _connection.Wrapper.NextValidOrderId;
-        var target = Math.Max(gatewayId - 10, 1);
+        var target    = Math.Max(gatewayId - 10, 1);
         Interlocked.Exchange(ref _nextOrderId, target);
         _logger.LogInformation(
             "IBKR order ID synced — Gateway: {GatewayId}, next order will use: {Next}",
@@ -537,23 +559,27 @@ public class IbkrBrokerService : IBrokerService
 
     // -- Helpers --
 
-    // Registers exec detail callbacks for both trail and target OCA orders.
+    // Registers exec detail callbacks for trail and optionally target OCA orders.
     // When either fires, routes the fill to PositionMonitorService via the broker fill handler.
-    private void RegisterStopOrderCallbacks(int entryOrderId, int trailStopId, int targetOrderId)
+    // targetOrderId is null for 0DTE positions where no target order is placed.
+    private void RegisterStopOrderCallbacks(int entryOrderId, int trailStopId, int? targetOrderId)
     {
         var entryIdStr = entryOrderId.ToString();
 
         lock (_stopMapLock)
         {
-            _stopOrderMap[trailStopId]   = (entryIdStr, TradeOutcome.StoppedOut);
-            _stopOrderMap[targetOrderId] = (entryIdStr, TradeOutcome.TargetHit);
+            _stopOrderMap[trailStopId] = (entryIdStr, TradeOutcome.StoppedOut);
+
+            if (targetOrderId.HasValue)
+                _stopOrderMap[targetOrderId.Value] = (entryIdStr, TradeOutcome.TargetHit);
         }
 
         _connection.Wrapper.RegisterExecDetailsCallback(trailStopId, fillPrice =>
             OnStopOrderFilled(trailStopId, fillPrice));
 
-        _connection.Wrapper.RegisterExecDetailsCallback(targetOrderId, fillPrice =>
-            OnStopOrderFilled(targetOrderId, fillPrice));
+        if (targetOrderId.HasValue)
+            _connection.Wrapper.RegisterExecDetailsCallback(targetOrderId.Value, fillPrice =>
+                OnStopOrderFilled(targetOrderId.Value, fillPrice));
     }
 
     // Called by IbkrEWrapper when a stop or target order fills broker-side.
