@@ -107,7 +107,13 @@ public class BrokerExecutionService
                     "Slippage check timed out for {Symbol} — proceeding without price check",
                     alert.Symbol);
             }
-            else if (alertedPrice > 0)
+            else if (alertedPrice <= 0)
+            {
+                _logger.LogWarning(
+                    "Slippage check skipped for {Symbol} — alerted price is 0 (PricePaid missing from alert)",
+                    alert.Symbol);
+            }
+            else
             {
                 var slippage = Math.Abs(currentPrice - alertedPrice)
                     / alertedPrice * 100;
