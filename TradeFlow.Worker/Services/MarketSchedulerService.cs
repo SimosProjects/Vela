@@ -24,6 +24,7 @@ public class MarketSchedulerService : BackgroundService
     private readonly string? _healthWebhookUrl;
     private readonly string? _summaryWebhookUrl;
     private readonly HttpClient _httpClient;
+    private readonly CsvTradeLogger _csv;
 
     // Fixed US market holidays that fall on the same date every year
     private static readonly HashSet<(int Month, int Day)> FixedHolidays =
@@ -42,6 +43,7 @@ public class MarketSchedulerService : BackgroundService
         IServiceScopeFactory scopeFactory,
         ILogger<MarketSchedulerService> logger,
         IConfiguration config,
+        CsvTradeLogger csv,
         IOptions<RiskEngineOptions> riskOptions)
     {
         _discord      = discord;
@@ -51,6 +53,7 @@ public class MarketSchedulerService : BackgroundService
         _scopeFactory = scopeFactory;
         _logger       = logger;
         _config       = config;
+        _csv = csv;
         _riskOptions  = riskOptions.Value;
         _httpClient   = new HttpClient();
 
@@ -131,6 +134,11 @@ public class MarketSchedulerService : BackgroundService
                 case "MonthlyReport":
                     if (IsLastTradingDayOfMonth(et))
                         await GenerateAnalyticsReportAsync("monthly", ct);
+                    break;
+                
+                case "WeeklyArchive":
+                    if (et.DayOfWeek == DayOfWeek.Friday)
+                        await _csv.ArchiveWeekAsync(ct);
                     break;
             }
         }
@@ -529,8 +537,9 @@ public class MarketSchedulerService : BackgroundService
             (cutoff.Hour, cutoff.Minute,"SameDayExpiryClose"),
             (16,          5,            "HealthCheck"),
             (16,          15,           "PositionSummary"),
-            (16,          30,           "WeeklyReport"),
-            (16,          30,           "MonthlyReport"),
+            (16,          20,           "WeeklyReport"),
+            (16,          25,           "MonthlyReport"),
+            (16,          30,           "WeeklyArchive"),
         ];
     }
 
