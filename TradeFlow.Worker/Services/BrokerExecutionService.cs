@@ -63,6 +63,13 @@ public class BrokerExecutionService
             return;
         }
 
+        if (_riskOptions.TradingPaused)
+        {
+            _logger.LogWarning(
+                "Trading is paused — skipping new entry for {Symbol}", alert.Symbol);
+            return;
+        }
+
         var order = _sizer.Size(alert, classification, isAverage);
         if (order is null)
         {
