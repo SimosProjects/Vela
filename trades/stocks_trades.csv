@@ -1,16 +1,7 @@
-Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,P&L,P&L %,
-2026-05-27,10:15:39,,,BBAI,696,4.29,2985.84,1987,-0.46%,,,,,Open,Open,Mike B,,,
-2026-05-27,11:58:36,2026-05-28,11:58:05,PAAS,55,54.01,2970.55,,,55.00,3025.00,1449,-0.04%,Closed,XtradesExit,Theo,+54.45,+1.83%
-2026-05-27,13:59:41,2026-05-28,08:33:00,ASTC,174,17.23,2998.02,2022,0.47%,22.30,3880.20,,,Closed,TargetHit,yoyomun,+882.18,+29.43%
-2026-05-27,13:59:49,,,PLAY,227,13.22,3001.94,5420,0.26%,,,,,Open,Open,johnjm90,,,
-2026-05-27,14:00:57,,,CHWY,141,21.21,2990.61,3504,0.00%,,,,,Open,Open,johnjm90,,,
-2026-05-28,11:24:03,,,MNTS,168,17.85,2998.80,1983,+0.34%,,,,,Open,Open,Kevin Izaguirrre,,
-2026-05-28,11:46:28,,,TMUS,15,189.63,2844.45,2581,+0.07%,,,,,Open,Open,Theo,,
-2026-05-28,13:14:38,,,RH,20,148.88,2977.60,2342,+0.15%,,,,,Open,Open,Buzo,,
-2026-05-28,14:28:23,,,CRM,17,176.24,2996.08,2614,+0.14%,,,,,Open,Open,Theo,,
+Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,P&L,P&L %
 
 ,,SUMMARY
-,,Total Trades,9
-,,Open,7,Closed,2
-,,Wins,2,Losses,0,Win Rate,100.0%
-,,Total P&L,+936.63
+,,Total Trades,0
+,,Open,0,Closed,0
+,,Wins,0,Losses,0,Win Rate,0.0%
+,,Total P&L,+0.00

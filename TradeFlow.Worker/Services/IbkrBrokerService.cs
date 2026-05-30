@@ -311,7 +311,7 @@ public class IbkrBrokerService : IBrokerService
 
             // Use a longer timeout — illiquid stocks (OTC, low-float) can take minutes to fill at market.
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(120));
+            cts.CancelAfter(TimeSpan.FromSeconds(8));
 
             // Only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
             var state = await tcs.Task.WaitAsync(cts.Token);
@@ -376,9 +376,11 @@ public class IbkrBrokerService : IBrokerService
         catch (OperationCanceledException)
         {
             _logger.LogWarning(
-                "IBKR PlaceOrder timed out for {Symbol} after 120s. Order may still be pending in Gateway.",
+                "IBKR PlaceOrder timed out for {Symbol} after 8s — cancelling order.",
                 order.Symbol);
 
+            _connection.Client.cancelOrder(orderId);
+            _connection.Client.cancelOrder(tempStopId);
             _connection.Wrapper.UnregisterOrderCallback(orderId);
 
             var rejectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
@@ -388,26 +390,27 @@ public class IbkrBrokerService : IBrokerService
                     "IBKR order rejected for {Symbol}: {Reason}", order.Symbol, rejectionReason);
 
                 return new BrokerOrderResult(
-                    OrderId:       orderId.ToString(),
-                    StopOrderId:   null,
-                    TargetOrderId: null,
-                    FillPrice:     0m,
-                    FillQuantity:  0,
-                    FillAmount:    0m,
-                    Status:        OrderStatus.Rejected,
-                    FilledAt:      DateTimeOffset.UtcNow,
+                    OrderId:         orderId.ToString(),
+                    StopOrderId:     null,
+                    TargetOrderId:   null,
+                    FillPrice:       0m,
+                    FillQuantity:    0,
+                    FillAmount:      0m,
+                    Status:          OrderStatus.Rejected,
+                    FilledAt:        DateTimeOffset.UtcNow,
                     RejectionReason: rejectionReason);
             }
 
             return new BrokerOrderResult(
                 OrderId:       orderId.ToString(),
-                StopOrderId:   (orderId + 1).ToString(),
-                TargetOrderId: (orderId + 2).ToString(),
-                FillPrice:     order.EstimatedEntryPrice,
-                FillQuantity:  order.Quantity,
-                FillAmount:    order.BudgetUsed,
-                Status:        OrderStatus.Pending,
-                FilledAt:      DateTimeOffset.UtcNow);
+                StopOrderId:   null,
+                TargetOrderId: null,
+                FillPrice:     0m,
+                FillQuantity:  0,
+                FillAmount:    0m,
+                Status:        OrderStatus.Rejected,
+                FilledAt:      DateTimeOffset.UtcNow,
+                RejectionReason: "Entry timed out after 10s — order cancelled");
         }
     }
 
