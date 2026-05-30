@@ -110,6 +110,7 @@ builder.Services.AddSingleton<PositionSizer>();
 builder.Services.AddSingleton<TradeGuard>();
 builder.Services.AddSingleton<CsvTradeLogger>();
 builder.Services.AddSingleton<BrokerExecutionService>();
+builder.Services.AddSingleton<MarketConditionsLogger>();
 builder.Services.AddHostedService<MarketSchedulerService>();
 
 builder.Services.AddSingleton<IbkrConnectionService>();
