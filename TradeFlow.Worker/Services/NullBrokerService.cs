@@ -82,6 +82,29 @@ public class NullBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// No-op partial close for testing, returns a simulated fill at entry price.
+    /// </summary>
+    public Task<BrokerOrderResult> PartialCloseAsync(
+        TradeRecord trade,
+        int quantityToClose,
+        CancellationToken ct = default) =>
+        Task.FromResult(new BrokerOrderResult(
+            OrderId:       "NULL",
+            StopOrderId:   null,
+            TargetOrderId: null,
+            FillPrice:     trade.EntryPrice,
+            FillQuantity:  quantityToClose,
+            FillAmount:    trade.EntryPrice * quantityToClose * 100m,
+            Status:        OrderStatus.Filled,
+            FilledAt:      DateTimeOffset.UtcNow));
+
+    /// <summary>
+    /// No-op order cancellation for testing, does nothing.
+    /// </summary>
+    public Task CancelOrderAsync(int orderId, CancellationToken ct = default) =>
+        Task.CompletedTask;
+
+    /// <summary>
     /// Simulates closing a position and returns a fake fill at 10% above entry.
     /// </summary>
     public Task<BrokerOrderResult> ClosePositionAsync(

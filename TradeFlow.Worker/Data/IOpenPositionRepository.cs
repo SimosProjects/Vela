@@ -13,6 +13,9 @@ public interface IOpenPositionRepository
 
     /// <summary>Removes a position when it closes.</summary>
     Task DeleteAsync(string orderId, CancellationToken ct = default);
+
+    /// <summary>Updates the quantity of an open position after a partial close.</summary>
+    Task UpdateQuantityAsync(string orderId, int newQuantity, CancellationToken ct = default);
 }
 
 /// <inheritdoc/>
@@ -76,6 +79,22 @@ public class OpenPositionRepository : IOpenPositionRepository
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to delete open position OrderId: {OrderId}", orderId);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task UpdateQuantityAsync(string orderId, int newQuantity, CancellationToken ct = default)
+    {
+        try
+        {
+            await _db.OpenPositions
+                .Where(p => p.OrderId == orderId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.Quantity, newQuantity), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to update quantity for open position OrderId: {OrderId}", orderId);
         }
     }
 }

@@ -9,10 +9,9 @@ public record TradeRecord
     // Identity
     public required string AlertId { get; init; }
     public required string OrderId { get; init; }
-    public required string? StopOrderId { get; init; }
+    public required string? StopOrderId { get; set; }
     public required string? TargetOrderId { get; init; }
 
-    // Trader — needed to match exit alerts back to the position that opened them
     public required string UserName { get; init; }
 
     // Instrument
@@ -24,7 +23,7 @@ public record TradeRecord
     public required string? Expiration { get; init; }
 
     // Position
-    public required int Quantity { get; init; }
+    public required int Quantity { get; set; }
     public required decimal EntryPrice { get; init; }
     public required decimal EntryAmount { get; init; }
     public required decimal StopPrice { get; init; }
@@ -40,11 +39,11 @@ public record TradeRecord
     public decimal? PnL { get; set; }
     public decimal? PnLPercent { get; set; }
 
-    // Entry execution quality — populated by BrokerExecutionService after fill
+    // Entry execution quality
     public int? LatencyMs { get; set; }
     public decimal? SlippagePct { get; set; }
 
-    // Exit execution quality — populated by BrokerExecutionService on close
+    // Exit execution quality
     public int? ExitLatencyMs { get; set; }
     public decimal? ExitSlippagePct { get; set; }
 

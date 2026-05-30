@@ -152,6 +152,53 @@ public class DiscordNotificationService
     }
 
     /// <summary>
+    /// Posts a partial close notification to the trade execution Discord channel.
+    /// Fires when a 1DTE position is partially closed at 3pm ET with the remainder
+    /// riding overnight as a lotto play.
+    /// </summary>
+    public async Task NotifyPartialCloseAsync(
+        TradeRecord trade,
+        int quantityClosed,
+        decimal fillPrice,
+        decimal partialPnl,
+        int remainingQuantity,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(_executionWebhookUrl)) return;
+
+        try
+        {
+            var isWin   = partialPnl >= 0;
+            var emoji   = isWin ? "✅" : "🛑";
+            var pnlSign = partialPnl >= 0 ? "+" : "";
+
+            var embed = new
+            {
+                title  = $"{emoji} PARTIAL CLOSE — {trade.Symbol}",
+                color  = isWin ? 0x2ECC71 : 0xE74C3C,
+                fields = new[]
+                {
+                    new { name = "Symbol",        value = trade.Symbol,                             inline = true },
+                    new { name = "Sold",          value = $"{quantityClosed} contracts",            inline = true },
+                    new { name = "Fill Price",    value = $"${fillPrice:F2}",                      inline = true },
+                    new { name = "Partial P&L",   value = $"{pnlSign}${partialPnl:F2}",            inline = true },
+                    new { name = "Remaining",     value = $"{remainingQuantity} contracts (lotto)", inline = true },
+                    new { name = "Stop",          value = "Cancelled — overnight lotto hold",       inline = true },
+                },
+                footer    = new { text = "TradeFlow Execution" },
+                timestamp = DateTimeOffset.UtcNow.ToString("o")
+            };
+
+            var payload = new { embeds = new[] { embed } };
+            await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send partial close Discord notification.");
+        }
+    }
+
+    /// <summary>
     /// Posts a critical system alert to the critical Discord channel.
     /// Used for infrastructure events, Gateway connect/disconnect, unrecoverable errors.
     /// </summary>

@@ -231,6 +231,38 @@ public class TradeGuard
                 order.Symbol, _openTrades.Count);
         }
     }
+    
+    /// <summary>
+    /// Updates a position's quantity after a partial close.
+    /// Called when part of a 1DTE position is sold at 3pm and the remainder rides overnight.
+    /// Also clears the stop order ID since the trail stop is cancelled after partial close.
+    /// </summary>
+    public void UpdateAfterPartialClose(
+        string userName,
+        string? contractSymbol,
+        string symbol,
+        int newQuantity)
+    {
+        var matchKey = BuildMatchKey(userName, contractSymbol, symbol);
+
+        lock (_lock)
+        {
+            if (!_openTrades.TryGetValue(matchKey, out var trade))
+            {
+                _logger.LogWarning(
+                    "TradeGuard: no open position found for {Symbol} — cannot update after partial close",
+                    symbol);
+                return;
+            }
+
+            trade.Quantity    = newQuantity;
+            trade.StopOrderId = null;
+
+            _logger.LogInformation(
+                "TradeGuard: partial close recorded — {Symbol} quantity updated to {Qty}, stop removed",
+                symbol, newQuantity);
+        }
+    }
 
     /// <summary>
     /// Called when a position closes. Removes it from open trades and populates exit data.
