@@ -46,6 +46,21 @@ public interface IBrokerService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Places a market sell order for a specific quantity without affecting the remaining
+    /// position. Used for partial closes on 1DTE positions at end of day.
+    /// </summary>
+    Task<BrokerOrderResult> PartialCloseAsync(
+        TradeRecord trade,
+        int quantityToClose,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Cancels a specific order by ID. Used to remove trail stops on positions
+    /// converted to lotto overnight holds.
+    /// </summary>
+    Task CancelOrderAsync(int orderId, CancellationToken ct = default);
+
+    /// <summary>
     /// Returns the net liquidation value of the account.
     /// Used by TradeGuard for exposure checks before placing orders.
     /// </summary>

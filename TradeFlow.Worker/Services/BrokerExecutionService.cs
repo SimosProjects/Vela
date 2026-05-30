@@ -463,6 +463,75 @@ public class BrokerExecutionService
         }
     }
 
+    /// <summary>
+    /// Partially closes a 1DTE options position at 3pm ET when profit exceeds the threshold.
+    /// Sells a portion of the position, cancels the trail stop, and lets the remainder
+    /// ride overnight as a lotto play with no stop protection.
+    /// </summary>
+    public async Task PartialCloseAndRemoveStopAsync(
+        TradeRecord trade,
+        int quantityToClose,
+        CancellationToken ct = default)
+    {
+        _logger.LogInformation(
+            "Partial close — {Symbol} selling {QtyToClose} of {TotalQty} contracts, removing stop",
+            trade.Symbol, quantityToClose, trade.Quantity);
+
+        BrokerOrderResult closeResult;
+        try
+        {
+            closeResult = await _broker.PartialCloseAsync(trade, quantityToClose, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Broker PartialCloseAsync failed for {Symbol}", trade.Symbol);
+            return;
+        }
+
+        if (closeResult.Status != OrderStatus.Filled)
+        {
+            _logger.LogWarning(
+                "Partial close did not fill for {Symbol} — stop not cancelled", trade.Symbol);
+            return;
+        }
+
+        // Cancel the trail stop — remaining position is a pure lotto overnight hold
+        if (trade.StopOrderId is not null && int.TryParse(trade.StopOrderId, out var stopId))
+        {
+            await _broker.CancelOrderAsync(stopId, ct);
+            _logger.LogInformation(
+                "Trail stop cancelled for {Symbol} — remaining {RemainingQty} contracts riding overnight",
+                trade.Symbol, trade.Quantity - quantityToClose);
+        }
+
+        // Update TradeGuard with new quantity and cleared stop
+        var remainingQty = trade.Quantity - quantityToClose;
+        _guard.UpdateAfterPartialClose(
+            trade.UserName,
+            trade.OptionsContract,
+            trade.Symbol,
+            remainingQty);
+
+        // Update the database open position quantity
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+            await repo.UpdateQuantityAsync(trade.OrderId, remainingQty, ct);
+        }
+
+        var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
+        var partialPnl = (closeResult.FillPrice - trade.EntryPrice) * quantityToClose * multiplier;
+        var pnlSign    = partialPnl >= 0 ? "+" : "";
+
+        _logger.LogInformation(
+            "PARTIAL CLOSE — {Symbol} × {QtyClose} @ ${Price:F2} | " +
+            "Partial P&L: {PnL:+$#,##0.00;-$#,##0.00} | Remaining: {RemainingQty} contracts (lotto, no stop)",
+            trade.Symbol, quantityToClose, closeResult.FillPrice, partialPnl, remainingQty);
+
+        await _discord.NotifyPartialCloseAsync(trade, quantityToClose, closeResult.FillPrice, partialPnl, remainingQty, ct);
+    }
+
     // Returns true if the current time falls within regular market hours (9:30am to 4:00pm ET, Mon-Fri)
     private static bool IsMarketOpenDefault()
     {

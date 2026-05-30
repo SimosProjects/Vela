@@ -92,6 +92,38 @@ public class PositionSizerTests
     }
 
     [Fact]
+    public void Size_RestrictedTrader_ScalesBudget()
+    {
+        var options = new RiskEngineOptions
+        {
+            RestrictedTraders = new Dictionary<string, int> { ["TestTrader"] = 25 }
+        };
+        var sizer = new PositionSizer(Options.Create(options));
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        var order = sizer.Size(alert, CallClassification());
+
+        // 25% of $2,000 = $500 budget → floor($500 / ($4.95 * 100)) = 1 contract
+        order.Should().NotBeNull();
+        order!.Quantity.Should().Be(1);
+    }
+
+    [Fact]
+    public void Size_BlockedTrader_ReturnsNull()
+    {
+        var options = new RiskEngineOptions
+        {
+            RestrictedTraders = new Dictionary<string, int> { ["TestTrader"] = 0 }
+        };
+        var sizer = new PositionSizer(Options.Create(options));
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        var order = sizer.Size(alert, CallClassification());
+
+        order.Should().BeNull();
+    }
+
+    [Fact]
     public void Size_StockEntry_CalculatesCorrectQuantity()
     {
         const decimal price = 165.33m;

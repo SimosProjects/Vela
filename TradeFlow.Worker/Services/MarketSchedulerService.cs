@@ -122,6 +122,14 @@ public class MarketSchedulerService : BackgroundService
                     await CloseSameDayExpiryPositionsAsync(ct);
                     break;
 
+                case "OneDteProfitClose":
+                    await HandleOneDteProfitCloseAsync(ct);
+                    break;
+
+                case "OneDteLottoConvert":
+                    await HandleOneDteLottoConvertAsync(ct);
+                    break;
+
                 case "PauseTrading":
                     BrokerExecutionService.IsPaused = true;
                     _logger.LogInformation("Trading paused by scheduler — no new entries will be placed.");
@@ -175,6 +183,131 @@ public class MarketSchedulerService : BackgroundService
 
         foreach (var trade in sameDayPositions)
             await _execution.ForceCloseAsync(trade, TradeOutcome.ForcedClose, ct);
+    }
+
+    // Fires at 3pm ET, checks options expiring tomorrow.
+    // In profit above threshold AND qty > 1 → partial close + remove stop (lotto remainder).
+    // In profit below threshold OR qty == 1 → force close entirely.
+    // In the red → do nothing, handled at 3:55pm.
+    private async Task HandleOneDteProfitCloseAsync(CancellationToken ct)
+    {
+        var et         = GetEasternTime();
+        var tomorrowEt = DateOnly.FromDateTime(et.DateTime).AddDays(1);
+
+        var positions = _guard.GetOpenTrades()
+            .Where(t =>
+                t.TradeType == TradeType.Options &&
+                t.Expiration is not null &&
+                DateTimeOffset.TryParse(t.Expiration, out var expiry) &&
+                DateOnly.FromDateTime(expiry.DateTime) == tomorrowEt)
+            .ToList();
+
+        if (positions.Count == 0)
+        {
+            _logger.LogInformation("1DTE profit close: no positions expiring tomorrow.");
+            return;
+        }
+
+        _logger.LogInformation(
+            "1DTE profit close: reviewing {Count} position(s) expiring tomorrow.", positions.Count);
+
+        foreach (var trade in positions)
+        {
+            // Get current market price to evaluate P&L
+            var currentPrice = await _broker.GetCurrentMarketPriceAsync(
+                trade.Symbol,
+                trade.TradeType,
+                trade.Direction,
+                trade.Strike,
+                trade.Expiration,
+                ct);
+
+            if (currentPrice <= 0)
+            {
+                _logger.LogWarning(
+                    "1DTE profit close: could not get price for {Symbol} — skipping", trade.Symbol);
+                continue;
+            }
+
+            var multiplier  = 100m;
+            var currentPnl  = (currentPrice - trade.EntryPrice) * trade.Quantity * multiplier;
+            var currentPnlPct = trade.EntryAmount > 0
+                ? currentPnl / trade.EntryAmount * 100
+                : 0m;
+
+            if (currentPnlPct <= 0)
+            {
+                _logger.LogInformation(
+                    "1DTE profit close: {Symbol} in red ({PnlPct:F1}%) — skipping, will convert to lotto at close",
+                    trade.Symbol, currentPnlPct);
+                continue;
+            }
+
+            var threshold = (decimal)_riskOptions.OptionCloseThresholdPct;
+
+            if (currentPnlPct > threshold && trade.Quantity > 1)
+            {
+                // Partial close — sell configured ratio, let remainder ride as lotto
+                var qtyToClose = Math.Max(1, (int)Math.Floor(trade.Quantity * _riskOptions.OptionPartialCloseRatio));
+                _logger.LogInformation(
+                    "1DTE profit close: {Symbol} +{PnlPct:F1}% > {Threshold}% threshold — partial close {QtyClose}/{TotalQty} contracts",
+                    trade.Symbol, currentPnlPct, threshold, qtyToClose, trade.Quantity);
+
+                await _execution.PartialCloseAndRemoveStopAsync(trade, qtyToClose, ct);
+            }
+            else
+            {
+                // Full close — profit below threshold or only 1 contract
+                _logger.LogInformation(
+                    "1DTE profit close: {Symbol} +{PnlPct:F1}% — force closing full position (qty {Qty} or below threshold)",
+                    trade.Symbol, currentPnlPct, trade.Quantity);
+
+                await _execution.ForceCloseAsync(trade, TradeOutcome.ForcedClose, ct);
+            }
+        }
+    }
+
+    // Fires at 3:55pm ET, checks options expiring tomorrow still open and in the red.
+    // Cancels the trail stop so the position rides overnight as a lotto play.
+    private async Task HandleOneDteLottoConvertAsync(CancellationToken ct)
+    {
+        var et         = GetEasternTime();
+        var tomorrowEt = DateOnly.FromDateTime(et.DateTime).AddDays(1);
+
+        var positions = _guard.GetOpenTrades()
+            .Where(t =>
+                t.TradeType == TradeType.Options &&
+                t.Expiration is not null &&
+                t.StopOrderId is not null &&
+                DateTimeOffset.TryParse(t.Expiration, out var expiry) &&
+                DateOnly.FromDateTime(expiry.DateTime) == tomorrowEt)
+            .ToList();
+
+        if (positions.Count == 0)
+        {
+            _logger.LogInformation("1DTE lotto convert: no positions expiring tomorrow with active stops.");
+            return;
+        }
+
+        _logger.LogInformation(
+            "1DTE lotto convert: converting {Count} position(s) to lotto overnight hold.", positions.Count);
+
+        foreach (var trade in positions)
+        {
+            if (!int.TryParse(trade.StopOrderId, out var stopId))
+                continue;
+
+            await _broker.CancelOrderAsync(stopId, ct);
+            _guard.UpdateAfterPartialClose(
+                trade.UserName,
+                trade.OptionsContract,
+                trade.Symbol,
+                trade.Quantity);
+
+            _logger.LogInformation(
+                "1DTE lotto convert: {Symbol} stop cancelled — holding {Qty} contracts overnight as lotto",
+                trade.Symbol, trade.Quantity);
+        }
     }
 
     /// <summary>
@@ -530,6 +663,8 @@ public class MarketSchedulerService : BackgroundService
             (11,          23,           "HealthCheck"),
             (13,          17,           "HealthCheck"),
             (cutoff.Hour, cutoff.Minute,"SameDayExpiryClose"),
+            (15,          0,            "OneDteProfitClose"),
+            (15,          55,           "OneDteLottoConvert"),
             (16,          5,            "HealthCheck"),
             (16,          15,           "PositionSummary"),
             (16,          20,           "WeeklyReport"),

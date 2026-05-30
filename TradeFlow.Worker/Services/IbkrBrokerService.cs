@@ -415,6 +415,112 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// Places a market sell order for a specific quantity of an existing position.
+    /// Used for partial profit taking on 1DTE positions at 3pm ET.
+    /// The remaining position stays open, caller must handle stop management separately.
+    /// </summary>
+    public async Task<BrokerOrderResult> PartialCloseAsync(
+        TradeRecord trade,
+        int quantityToClose,
+        CancellationToken ct = default)
+    {
+        if (!EnsureConnected())
+            return FailedResult("Not connected to IB Gateway");
+
+        var closeOrderId = GetNextOrderId();
+        var tcs          = _connection.Wrapper.RegisterOrderCallback(closeOrderId);
+        var execTcs      = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
+        var contract     = BuildCloseContract(trade);
+
+        var partialCloseOrder = new Order
+        {
+            OrderId       = closeOrderId,
+            Action        = "SELL",
+            OrderType     = "MKT",
+            TotalQuantity = quantityToClose,
+            Transmit      = true,
+        };
+
+        try
+        {
+            _connection.Client.placeOrder(closeOrderId, contract, partialCloseOrder);
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(_options.TimeoutMs);
+
+            var fill       = await tcs.Task.WaitAsync(cts.Token);
+            var fillPrice  = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
+            var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
+
+            _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
+
+            _logger.LogInformation(
+                "IBKR partial close filled. OrderId: {OrderId} Symbol: {Symbol} Qty: {Qty} FillPrice: {Price:F2}",
+                closeOrderId, trade.Symbol, quantityToClose, fillPrice);
+
+            return new BrokerOrderResult(
+                OrderId:       closeOrderId.ToString(),
+                StopOrderId:   null,
+                TargetOrderId: null,
+                FillPrice:     fillPrice,
+                FillQuantity:  quantityToClose,
+                FillAmount:    fillPrice * quantityToClose * multiplier,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "IBKR PartialClose timed out for {Symbol} — waiting for execDetails callback.",
+                trade.Symbol);
+
+            _connection.Wrapper.UnregisterOrderCallback(closeOrderId);
+
+            try
+            {
+                using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                execCts.CancelAfter(TimeSpan.FromSeconds(30));
+
+                var execFillPrice = await execTcs.Task.WaitAsync(execCts.Token);
+                var multiplier    = trade.TradeType == TradeType.Options ? 100m : 1m;
+
+                return new BrokerOrderResult(
+                    OrderId:       closeOrderId.ToString(),
+                    StopOrderId:   null,
+                    TargetOrderId: null,
+                    FillPrice:     execFillPrice,
+                    FillQuantity:  quantityToClose,
+                    FillAmount:    execFillPrice * quantityToClose * multiplier,
+                    Status:        OrderStatus.Filled,
+                    FilledAt:      DateTimeOffset.UtcNow);
+            }
+            catch (OperationCanceledException)
+            {
+                _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
+                return FailedResult("Partial close timed out");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Cancels a specific order by ID and removes it from internal tracking.
+    /// Used to cancel trail stops on positions converted to lotto overnight holds.
+    /// </summary>
+    public Task CancelOrderAsync(int orderId, CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return Task.CompletedTask;
+
+        _connection.Client.cancelOrder(orderId);
+        _connection.Wrapper.UnregisterExecDetailsCallback(orderId);
+        RemoveStopOrderMapping(orderId);
+
+        _logger.LogInformation(
+            "IBKR order {OrderId} cancelled — removed from stop tracking.", orderId);
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
     /// Cancels any active stop and target orders then places a market close order.
     /// Uses the actual average fill price from the IBKR callback for accurate P&amp;L calculation.
     /// On timeout, waits an additional 30 seconds for the execDetails callback before
