@@ -4,7 +4,7 @@ namespace TradeFlow.Worker.Engine;
 
 // Converts an approved Alert into a TradeOrder with sizing, stop, target, and trail prices.
 // Fixed sizing rules for paper trading phase:
-//   Options: $1,000 initial, $500 average
+//   Options: $2,000 initial, $1,000 average
 //   Stocks:  $3,000 initial, $1,500 average
 //
 // Risk tier is auto-classified for options based on expiry:
@@ -13,13 +13,15 @@ namespace TradeFlow.Worker.Engine;
 //   Expires beyond week    → use Xtrades risk label as-is
 //
 // Trailing stop percentages are risk-tiered and configurable via RiskEngineOptions.
+//
+// Trader restrictions — if a trader appears in RestrictedTraders, their budget is scaled
+// by the configured allocation percentage (0 = blocked, 25 = 25% of normal budget, etc).
 public class PositionSizer
 {
     private readonly RiskEngineOptions _options;
 
-    private const decimal OptionsStopMultiplier =  0.50m; // -50% initial bracket stop
-
-    private const decimal StockStopMultiplier =  0.85m; // -15% initial bracket stop
+    private const decimal OptionsStopMultiplier = 0.50m; // -50% initial bracket stop
+    private const decimal StockStopMultiplier   = 0.85m; // -15% initial bracket stop
 
     private const int MinQuantity = 1;
 
@@ -51,10 +53,19 @@ public class PositionSizer
             ? ClassifyOptionsRisk(alert)
             : (alert.Risk?.ToLowerInvariant() ?? "standard");
 
-
         var budget = isOptions
             ? (isAverage ? _options.OptionsAverageBudget : _options.OptionsInitialBudget)
             : (isAverage ? _options.StockAverageBudget   : _options.StockInitialBudget);
+
+        // Apply trader restriction if configured to scale budget by allocation percentage.
+        var userName = alert.UserName ?? string.Empty;
+        if (_options.RestrictedTraders.TryGetValue(userName, out var allocationPct))
+        {
+            if (allocationPct <= 0)
+                return null;
+
+            budget = budget * allocationPct / 100m;
+        }
 
         var quantity = isOptions
             ? (int)(budget / (price.Value * 100))
@@ -107,33 +118,30 @@ public class PositionSizer
         if (!DateTimeOffset.TryParse(alert.Expiration, out var expiry))
             return alert.Risk?.ToLowerInvariant() ?? "standard";
 
-        var et      = TimeZoneInfo.ConvertTime(
+        var et         = TimeZoneInfo.ConvertTime(
             DateTimeOffset.UtcNow,
             TimeZoneInfo.FindSystemTimeZoneById("America/New_York"));
-        var todayEt = DateOnly.FromDateTime(et.DateTime);
+        var todayEt    = DateOnly.FromDateTime(et.DateTime);
         var expiryDate = DateOnly.FromDateTime(expiry.DateTime);
 
-        // Expires today → lotto regardless of Xtrades label
         if (expiryDate == todayEt)
             return "lotto";
 
-        // Expires this week (tomorrow through Friday) → high regardless of Xtrades label
         var endOfWeekEt = todayEt.AddDays((int)DayOfWeek.Friday - (int)todayEt.DayOfWeek);
         if (expiryDate <= endOfWeekEt)
             return "high";
 
-        // Beyond this week → use Xtrades label as-is
         return alert.Risk?.ToLowerInvariant() ?? "standard";
     }
 
     private double ResolveTrailPercent(bool isOptions, string effectiveRisk) =>
         (isOptions, effectiveRisk) switch
         {
-            (true,  "lotto")    => _options.OptionsLottoTrailPct,
-            (true,  "high")     => _options.OptionsHighTrailPct,
-            (true,  _)          => _options.OptionsStandardTrailPct,
-            (false, "lotto")    => _options.StockLottoTrailPct,
-            (false, "high")     => _options.StockHighTrailPct,
-            (false, _)          => _options.StockStandardTrailPct,
+            (true,  "lotto") => _options.OptionsLottoTrailPct,
+            (true,  "high")  => _options.OptionsHighTrailPct,
+            (true,  _)       => _options.OptionsStandardTrailPct,
+            (false, "lotto") => _options.StockLottoTrailPct,
+            (false, "high")  => _options.StockHighTrailPct,
+            (false, _)       => _options.StockStandardTrailPct,
         };
 }
