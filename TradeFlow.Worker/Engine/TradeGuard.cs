@@ -7,10 +7,12 @@ namespace TradeFlow.Worker.Engine;
 // Rules checked in order:
 //   1. Daily exposure cap — today's open positions must not exceed MaxDailyExposurePct
 //      of available balance (account balance minus carry-over positions from prior days)
-//   2. Symbol already open (any instrument type) — prevents doubled exposure on same underlying
-//   3. Total open exposure + new trade cost <= account balance
-//   4. No duplicate open position for same trader + contract
-//   5. Averaging rules (one average per position, at 50% budget)
+//   2. Stock sub-cap — if StockDailyAllocationPct > 0, stock orders are limited to that
+//      percentage of the daily cap, preventing stocks from consuming all available capital
+//   3. Symbol already open (any instrument type) — prevents doubled exposure on same underlying
+//   4. Total open exposure + new trade cost <= account balance
+//   5. No duplicate open position for same trader + contract
+//   6. Averaging rules (one average per position, at 50% budget)
 //
 // Account balance and open positions value are cached and refreshed every 30 seconds
 // in the background to avoid blocking the trade execution path with IBKR round trips.
@@ -25,6 +27,7 @@ public class TradeGuard
     private readonly IBrokerService _broker;
     private readonly ILogger<TradeGuard> _logger;
     private readonly double _maxDailyExposurePct;
+    private readonly double _stockDailyAllocationPct;
     private readonly double _marginPct;
 
     // In-memory open positions, keyed by match key (userName + contractSymbol or symbol)
@@ -43,10 +46,11 @@ public class TradeGuard
         IOptions<RiskEngineOptions> riskOptions,
         ILogger<TradeGuard> logger)
     {
-        _broker              = broker;
-        _logger              = logger;
-        _maxDailyExposurePct = riskOptions.Value.MaxDailyExposurePct;
-        _marginPct           = riskOptions.Value.MarginPct;
+        _broker                  = broker;
+        _logger                  = logger;
+        _maxDailyExposurePct     = riskOptions.Value.MaxDailyExposurePct;
+        _stockDailyAllocationPct = riskOptions.Value.StockDailyAllocationPct;
+        _marginPct               = riskOptions.Value.MarginPct;
     }
 
     /// <summary>
@@ -147,7 +151,7 @@ public class TradeGuard
             }
         }
 
-        // 3. Exposure cap and balance check using cached values — no IBKR round trip
+        // 3. Exposure cap, stock sub-cap, and balance check using cached values
         decimal balance, openValue;
         lock (_cacheLock)
         {
@@ -157,11 +161,11 @@ public class TradeGuard
 
         if (balance > 0)
         {
-            var todayOpenedValue   = GetTodayOpenedValue();
-            var carryOverValue     = openValue - todayOpenedValue;
-            var availableBalance   = balance - carryOverValue;
-            var effectiveBalance   = availableBalance * (1m + (decimal)_marginPct);
-            var maxDailyDeployment = effectiveBalance * (decimal)(_maxDailyExposurePct / 100.0);
+            var todayOpenedValue    = GetTodayOpenedValue();
+            var carryOverValue      = openValue - todayOpenedValue;
+            var availableBalance    = balance - carryOverValue;
+            var effectiveBalance    = availableBalance * (1m + (decimal)_marginPct);
+            var maxDailyDeployment  = effectiveBalance * (decimal)(_maxDailyExposurePct / 100.0);
             var deployableRemaining = maxDailyDeployment - todayOpenedValue;
 
             if (order.BudgetUsed > deployableRemaining)
@@ -170,6 +174,21 @@ public class TradeGuard
                     $"Daily exposure cap reached — need ${order.BudgetUsed:F2}, " +
                     $"deployable ${deployableRemaining:F2} " +
                     $"(cap ${maxDailyDeployment:F2}, today open ${todayOpenedValue:F2})");
+            }
+
+            // Stock sub-cap that limits how much of the daily cap stocks can consume.
+            if (order.TradeType == TradeType.Stock && _stockDailyAllocationPct > 0)
+            {
+                var todayStockValue    = GetTodayOpenedValueByType(TradeType.Stock);
+                var maxStockDeployment = maxDailyDeployment * (decimal)(_stockDailyAllocationPct / 100.0);
+
+                if (order.BudgetUsed + todayStockValue > maxStockDeployment)
+                {
+                    return Task.FromResult<string?>(
+                        $"Stock daily allocation cap reached — need ${order.BudgetUsed:F2}, " +
+                        $"stock deployable ${Math.Max(0, maxStockDeployment - todayStockValue):F2} " +
+                        $"(stock cap ${maxStockDeployment:F2}, stock open today ${todayStockValue:F2})");
+                }
             }
 
             // Hard balance check — never deploy more than available cash
@@ -231,7 +250,7 @@ public class TradeGuard
                 order.Symbol, _openTrades.Count);
         }
     }
-    
+
     /// <summary>
     /// Updates a position's quantity after a partial close.
     /// Called when part of a 1DTE position is sold at 3pm and the remainder rides overnight.
@@ -365,7 +384,6 @@ public class TradeGuard
     // -- Helpers --
 
     // Returns the total entry amount of positions opened today in ET.
-    // Used to separate today's deployment from carry-over positions when calculating the cap.
     private decimal GetTodayOpenedValue()
     {
         var todayEt = DateOnly.FromDateTime(
@@ -380,8 +398,25 @@ public class TradeGuard
         }
     }
 
+    // Returns the total entry amount of positions of a specific type opened today in ET.
+    // Used for the stock sub-cap check to limit how much of the daily cap stocks can consume.
+    private decimal GetTodayOpenedValueByType(TradeType tradeType)
+    {
+        var todayEt = DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
+
+        lock (_lock)
+        {
+            return _openTrades.Values
+                .Where(t =>
+                    t.TradeType == tradeType &&
+                    DateOnly.FromDateTime(
+                        TimeZoneInfo.ConvertTime(t.OpenedAt, EasternTime).DateTime) == todayEt)
+                .Sum(t => t.EntryAmount);
+        }
+    }
+
     // Refreshes cached balance and open positions value every 30 seconds.
-    // Runs on a background thread so IBKR round trips never block trade execution.
     private async Task RefreshCacheLoopAsync(CancellationToken ct)
     {
         await Task.Delay(InitialRefreshDelayMs, ct);
