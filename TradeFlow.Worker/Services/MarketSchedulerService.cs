@@ -53,7 +53,7 @@ public class MarketSchedulerService : BackgroundService
         _scopeFactory = scopeFactory;
         _logger       = logger;
         _config       = config;
-        _csv = csv;
+        _csv          = csv;
         _riskOptions  = riskOptions.Value;
         _httpClient   = new HttpClient();
 
@@ -65,21 +65,18 @@ public class MarketSchedulerService : BackgroundService
     {
         _logger.LogInformation("Market scheduler service started.");
 
-        // Build schedule dynamically so SameDayExpiryClose uses the configured cutoff time
         var schedule = BuildSchedule();
 
-        // Track which tasks have already fired today to avoid duplicate triggers
-        var firedToday = new HashSet<string>();
+        var firedToday      = new HashSet<string>();
         var lastCheckedDate = DateOnly.MinValue;
 
         while (!stoppingToken.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
 
-            var et = GetEasternTime();
+            var et    = GetEasternTime();
             var today = DateOnly.FromDateTime(et.DateTime);
 
-            // Reset fired tasks at the start of each new ET day
             if (today != lastCheckedDate)
             {
                 firedToday.Clear();
@@ -96,7 +93,6 @@ public class MarketSchedulerService : BackgroundService
                 if (firedToday.Contains(key))
                     continue;
 
-                // Fire if we are within the 30s polling window of the scheduled ET time
                 if (et.Hour == hour && et.Minute == minute)
                 {
                     firedToday.Add(key);
@@ -126,6 +122,11 @@ public class MarketSchedulerService : BackgroundService
                     await CloseSameDayExpiryPositionsAsync(ct);
                     break;
 
+                case "PauseTrading":
+                    BrokerExecutionService.IsPaused = true;
+                    _logger.LogInformation("Trading paused by scheduler — no new entries will be placed.");
+                    break;
+
                 case "WeeklyReport":
                     if (et.DayOfWeek == DayOfWeek.Friday)
                         await GenerateAnalyticsReportAsync("weekly", ct);
@@ -135,7 +136,7 @@ public class MarketSchedulerService : BackgroundService
                     if (IsLastTradingDayOfMonth(et))
                         await GenerateAnalyticsReportAsync("monthly", ct);
                     break;
-                
+
                 case "WeeklyArchive":
                     if (et.DayOfWeek == DayOfWeek.Friday)
                         await _csv.ArchiveWeekAsync(ct);
@@ -149,10 +150,9 @@ public class MarketSchedulerService : BackgroundService
     }
 
     // Closes all open option positions expiring today before liquidity dries up near close.
-    // Prevents total loss from positions expiring worthless when trail stops can no longer fill.
     private async Task CloseSameDayExpiryPositionsAsync(CancellationToken ct)
     {
-        var et = GetEasternTime();
+        var et      = GetEasternTime();
         var todayEt = DateOnly.FromDateTime(et.DateTime);
 
         var sameDayPositions = _guard.GetOpenTrades()
@@ -174,9 +174,7 @@ public class MarketSchedulerService : BackgroundService
             sameDayPositions.Count);
 
         foreach (var trade in sameDayPositions)
-        {
             await _execution.ForceCloseAsync(trade, TradeOutcome.ForcedClose, ct);
-        }
     }
 
     /// <summary>
@@ -462,7 +460,6 @@ public class MarketSchedulerService : BackgroundService
 
             var cols = line.Split(',');
 
-            // Column indices for new layout (with Entry Latency, Entry Slippage, Exit Latency, Exit Slippage)
             var statusIndex     = tradeType == TradeType.Options ? 18 : 14;
             var closedDateIndex = 2;
 
@@ -520,7 +517,6 @@ public class MarketSchedulerService : BackgroundService
         return trades;
     }
 
-    // Builds the schedule array dynamically, inserting SameDayExpiryClose at the configured time.
     private (int Hour, int Minute, string Task)[] BuildSchedule()
     {
         var cutoff = TimeOnly.TryParse(_riskOptions.SameDayExpiryAutoCloseCutoff, out var t)
@@ -533,7 +529,6 @@ public class MarketSchedulerService : BackgroundService
             (9,           15,           "PositionSummary"),
             (11,          23,           "HealthCheck"),
             (13,          17,           "HealthCheck"),
-            (15,          10,           "HealthCheck"),
             (cutoff.Hour, cutoff.Minute,"SameDayExpiryClose"),
             (16,          5,            "HealthCheck"),
             (16,          15,           "PositionSummary"),

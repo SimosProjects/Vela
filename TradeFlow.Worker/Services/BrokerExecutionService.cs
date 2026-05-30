@@ -20,6 +20,9 @@ public class BrokerExecutionService
     private readonly Func<bool> _isMarketOpen;
     private readonly RiskEngineOptions _riskOptions;
 
+    // Set by MarketSchedulerService to pause new entries without requiring a restart
+    public static bool IsPaused { get; set; } = false;
+
     public BrokerExecutionService(
         IBrokerService broker,
         PositionSizer sizer,
@@ -63,7 +66,7 @@ public class BrokerExecutionService
             return;
         }
 
-        if (_riskOptions.TradingPaused)
+        if (_riskOptions.TradingPaused || IsPaused)
         {
             _logger.LogWarning(
                 "Trading is paused — skipping new entry for {Symbol}", alert.Symbol);
@@ -119,6 +122,7 @@ public class BrokerExecutionService
                 _logger.LogWarning(
                     "Slippage check skipped for {Symbol} — alerted price is 0 (PricePaid missing from alert)",
                     alert.Symbol);
+                return;
             }
             else
             {

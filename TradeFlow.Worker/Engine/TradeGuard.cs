@@ -374,7 +374,7 @@ public class TradeGuard
                 var maxDailyDeployment  = effectiveBalance * (decimal)(_maxDailyExposurePct / 100.0);
                 var deployableRemaining = maxDailyDeployment - todayOpenedValue;
 
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "TradeGuard cache refreshed — balance ${Balance:F2} | carry-over ${CarryOver:F2} | " +
                     "today open ${TodayOpen:F2} | cap ${Cap:F2} | available ${Available:F2}",
                     balance, carryOverValue, todayOpenedValue, maxDailyDeployment, deployableRemaining);
