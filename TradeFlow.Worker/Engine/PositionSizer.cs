@@ -54,8 +54,10 @@ public class PositionSizer
             : (alert.Risk?.ToLowerInvariant() ?? "standard");
 
         var budget = isOptions
-            ? (isAverage ? _options.OptionsAverageBudget : _options.OptionsInitialBudget)
-            : (isAverage ? _options.StockAverageBudget   : _options.StockInitialBudget);
+            ? effectiveRisk == "lotto"
+                ? (isAverage ? _options.OptionsLottoAverageBudget : _options.OptionsLottoBudget)
+                : (isAverage ? _options.OptionsAverageBudget : _options.OptionsInitialBudget)
+            : (isAverage ? _options.StockAverageBudget : _options.StockInitialBudget);
 
         // Apply trader restriction if configured to scale budget by allocation percentage.
         var userName = alert.UserName ?? string.Empty;

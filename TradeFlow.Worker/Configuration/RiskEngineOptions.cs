@@ -47,6 +47,9 @@ public class RiskEngineOptions
     [Range(1, 100, ErrorMessage = "OptionsHighTrailPct must be between 1 and 100.")]
     public double OptionsHighTrailPct { get; init; } = 50.0;
 
+    public decimal OptionsLottoBudget        { get; init; } = 500m;
+    public decimal OptionsLottoAverageBudget { get; init; } = 250m;
+
     [Range(1, 100, ErrorMessage = "OptionsLottoTrailPct must be between 1 and 100.")]
     public double OptionsLottoTrailPct { get; init; } = 50.0;
 
