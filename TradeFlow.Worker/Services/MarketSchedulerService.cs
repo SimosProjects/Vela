@@ -20,6 +20,7 @@ public class MarketSchedulerService : BackgroundService
     private readonly ILogger<MarketSchedulerService> _logger;
     private readonly IConfiguration _config;
     private readonly RiskEngineOptions _riskOptions;
+    private readonly MarketConditionsLogger _marketConditions;
 
     private readonly string? _healthWebhookUrl;
     private readonly string? _summaryWebhookUrl;
@@ -44,7 +45,8 @@ public class MarketSchedulerService : BackgroundService
         ILogger<MarketSchedulerService> logger,
         IConfiguration config,
         CsvTradeLogger csv,
-        IOptions<RiskEngineOptions> riskOptions)
+        IOptions<RiskEngineOptions> riskOptions,
+        MarketConditionsLogger marketConditions)
     {
         _discord      = discord;
         _guard        = guard;
@@ -56,6 +58,7 @@ public class MarketSchedulerService : BackgroundService
         _csv          = csv;
         _riskOptions  = riskOptions.Value;
         _httpClient   = new HttpClient();
+        _marketConditions = marketConditions;
 
         _healthWebhookUrl  = Environment.GetEnvironmentVariable("DISCORD_HEALTH_WEBHOOK_URL");
         _summaryWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_SUMMARY_WEBHOOK_URL");
@@ -133,6 +136,10 @@ public class MarketSchedulerService : BackgroundService
                 case "PauseTrading":
                     BrokerExecutionService.IsPaused = true;
                     _logger.LogInformation("Trading paused by scheduler — no new entries will be placed.");
+                    break;
+
+                case "MarketConditions":
+                    await _marketConditions.LogMarketConditionsAsync(ct);
                     break;
 
                 case "WeeklyReport":
@@ -659,6 +666,7 @@ public class MarketSchedulerService : BackgroundService
         return
         [
             (8,           30,           "HealthCheck"),
+            (9,            0,           "MarketConditions"),
             (9,           15,           "PositionSummary"),
             (11,          23,           "HealthCheck"),
             (13,          17,           "HealthCheck"),
