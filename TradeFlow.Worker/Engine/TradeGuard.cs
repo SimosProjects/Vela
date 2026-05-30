@@ -29,6 +29,7 @@ public class TradeGuard
     private readonly double _maxDailyExposurePct;
     private readonly double _stockDailyAllocationPct;
     private readonly double _marginPct;
+    private readonly int _maxPositionsPerSymbol;
 
     // In-memory open positions, keyed by match key (userName + contractSymbol or symbol)
     private readonly Dictionary<string, TradeRecord> _openTrades = new();
@@ -51,6 +52,7 @@ public class TradeGuard
         _maxDailyExposurePct     = riskOptions.Value.MaxDailyExposurePct;
         _stockDailyAllocationPct = riskOptions.Value.StockDailyAllocationPct;
         _marginPct               = riskOptions.Value.MarginPct;
+        _maxPositionsPerSymbol   = riskOptions.Value.MaxPositionsPerSymbol;
     }
 
     /// <summary>
@@ -120,18 +122,20 @@ public class TradeGuard
     {
         lock (_lock)
         {
-            // 1. Symbol-level check — block any new entry if the underlying symbol already
+            // 1. Symbol-level check, block any new entry if the underlying symbol already
             // has an open position regardless of instrument type. Prevents holding TSLA stock
             // and a TSLA option simultaneously, which doubles exposure on one underlying.
             // Averaging is exempt since it is deliberately adding to an existing position.
             if (!order.IsAverage)
             {
-                var symbolAlreadyOpen = _openTrades.Values
-                    .Any(t => string.Equals(t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
+                var symbolCount = _openTrades.Values
+                    .Count(t => string.Equals(
+                        t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
 
-                if (symbolAlreadyOpen)
+                if (symbolCount >= _maxPositionsPerSymbol)
                     return Task.FromResult<string?>(
-                        $"Position already open for {order.Symbol} — only one instrument per underlying allowed");
+                        $"Max positions per symbol reached for {order.Symbol} " +
+                        $"({symbolCount}/{_maxPositionsPerSymbol})");
             }
 
             // 2. Contract-level duplicate and averaging rules
