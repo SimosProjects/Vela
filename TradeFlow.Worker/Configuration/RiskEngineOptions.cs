@@ -59,6 +59,10 @@ public class RiskEngineOptions
     [Range(1, 100, ErrorMessage = "MaxDailyExposurePct must be between 1 and 100.")]
     public double MaxDailyExposurePct { get; init; } = 30.0;
 
+    // Percentage of the daily deployment cap reserved for stock positions.
+    [Range(0, 100, ErrorMessage = "StockDailyAllocationPct must be between 0 and 100.")]
+    public double StockDailyAllocationPct { get; init; } = 0.0;
+
     [Range(0, 10, ErrorMessage = "MarginPct must be between 0 and 10.")]
     public double MarginPct { get; init; } = 0.0;
 
@@ -78,13 +82,9 @@ public class RiskEngineOptions
     public decimal StockInitialBudget   { get; init; } = 3_000m;
     public decimal StockAverageBudget   { get; init; } = 1_500m;
 
-    // Profit threshold for partial close on 1DTE positions at 3pm ET.
-    // Defaults to 50%, only take partial profits on strong winners.
     [Range(0, 1000, ErrorMessage = "OptionCloseThresholdPct must be between 0 and 1000.")]
     public double OptionCloseThresholdPct { get; init; } = 50.0;
 
-    // Fraction of the position to close when the profit threshold is met.
-    // Defaults to 0.5, sell half, let the other half ride overnight.
     [Range(0.01, 1.0, ErrorMessage = "OptionPartialCloseRatio must be between 0.01 and 1.0.")]
     public double OptionPartialCloseRatio { get; init; } = 0.5;
 }
