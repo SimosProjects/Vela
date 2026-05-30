@@ -14,6 +14,14 @@ public class RiskEngineOptions
     [MinLength(1, ErrorMessage = "At least one approved trader must be specified.")]
     public List<string> ApprovedTraders { get; init; } = [];
 
+    // Trader allocation restrictions, keyed by trader username, value is allocation percentage.
+    // 100 = full budget
+    //  50 = 50% of normal budget
+    //  25 = 25% of normal budget
+    //   0 = fully blocked, no trades allowed
+    // Useful for restricting underperforming traders without removing them entirely.
+    public Dictionary<string, int> RestrictedTraders { get; init; } = [];
+
     public bool AllowLotto { get; init; } = false;
 
     public bool AllowHigh { get; init; } = true;
