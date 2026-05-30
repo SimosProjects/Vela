@@ -69,6 +69,9 @@ public class RiskEngineOptions
     [Range(0, 23, ErrorMessage = "ZeroDteEntryCutoffHour must be between 0 and 23.")]
     public int ZeroDteEntryCutoffHour { get; init; } = 12;
 
+    [Range(1, 10, ErrorMessage = "MaxPositionsPerSymbol must be between 1 and 10.")]
+    public int MaxPositionsPerSymbol { get; init; } = 1;
+
     public string SameDayExpiryAutoCloseCutoff { get; init; } = "15:30";
 
     [Range(1, 100, ErrorMessage = "OptionsTargetMultiple must be between 1 and 100.")]

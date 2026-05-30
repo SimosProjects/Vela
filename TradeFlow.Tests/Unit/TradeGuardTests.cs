@@ -74,7 +74,7 @@ public class TradeGuardTests
         var result = await _guard.CheckAsync(order);
 
         result.Should().NotBeNull();
-        result.Should().Contain("already open");
+        result.Should().Contain("Max positions per symbol reached");
     }
 
     [Fact]
@@ -262,6 +262,6 @@ public class TradeGuardTests
 
         result.Should().NotBeNull();
         result.Should().Contain("TSLA");
-        result.Should().Contain("one instrument per underlying");
+        result.Should().Contain("Max positions per symbol reached");
     }
 }
