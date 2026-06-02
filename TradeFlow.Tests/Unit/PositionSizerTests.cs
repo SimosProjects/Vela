@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Engine;
@@ -9,7 +10,8 @@ public class PositionSizerTests
     private static readonly RiskEngineOptions DefaultOptions = new();
 
     private readonly PositionSizer _sizer = new(
-        Options.Create(DefaultOptions));
+        Options.Create(DefaultOptions),
+        NullLogger<PositionSizer>.Instance);
 
     private static Alert BuildAlert(string side, string type, string direction,
         decimal? pricePaid, string? contractSymbol = null, decimal? strike = null,
@@ -98,7 +100,9 @@ public class PositionSizerTests
         {
             RestrictedTraders = new Dictionary<string, int> { ["TestTrader"] = 25 }
         };
-        var sizer = new PositionSizer(Options.Create(options));
+        var sizer = new PositionSizer(
+            Options.Create(options),
+            NullLogger<PositionSizer>.Instance);
 
         var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
         var order = sizer.Size(alert, CallClassification());
@@ -115,7 +119,9 @@ public class PositionSizerTests
         {
             RestrictedTraders = new Dictionary<string, int> { ["TestTrader"] = 0 }
         };
-        var sizer = new PositionSizer(Options.Create(options));
+        var sizer = new PositionSizer(
+            Options.Create(options),
+            NullLogger<PositionSizer>.Instance);
 
         var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
         var order = sizer.Size(alert, CallClassification());

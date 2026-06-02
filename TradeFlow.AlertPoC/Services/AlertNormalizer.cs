@@ -27,7 +27,12 @@ public class AlertNormalizer : IAlertNormalizer
         OriginalMessage = alert.OriginalMessage?.Trim(),
 
         // Trim whitespace from the original exit message as well
-        OriginalExitMessage = alert.OriginalExitMessage?.Trim()
+        OriginalExitMessage = alert.OriginalExitMessage?.Trim(),
+
+        // Fall back to actual market price at alert time when trader posts a market order
+        // without an explicit price — fixes null PricePaid on SignalR events for traders
+        // like Sean@BearishBull, woooh77, Shinobi, IGGY, Paltrader who use "@ m" notation.
+        PricePaid = alert.PricePaid ?? alert.ActualPriceAtTimeOfAlert
     };
 
     /// <summary>
