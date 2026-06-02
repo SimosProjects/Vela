@@ -77,8 +77,8 @@ public class BrokerExecutionService
         if (order is null)
         {
             _logger.LogWarning(
-                "PositionSizer returned null for {Symbol}, price may be missing or quantity < 1",
-                alert.Symbol);
+                "PositionSizer returned null for {Symbol} — PricePaid: {Price} ActualPrice: {Actual} Risk: {Risk} Type: {Type}",
+                alert.Symbol, alert.PricePaid, alert.ActualPriceAtTimeOfAlert, alert.Risk, alert.Type);
             return;
         }
 

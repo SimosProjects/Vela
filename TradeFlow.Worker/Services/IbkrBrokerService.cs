@@ -281,6 +281,8 @@ public class IbkrBrokerService : IBrokerService
     /// an OCA group containing a TRAIL stop and optional LMT target. For same-day expiry
     /// options (0DTE), the target order is skipped — trail stop only — to avoid margin
     /// rejection on large quantities and to let winners run without a fixed ceiling.
+    /// On timeout, waits an additional 10 seconds for a late ExecDetails callback before
+    /// giving up — prevents ghost trades when the fill arrives after the timeout fires.
     /// </summary>
     public async Task<BrokerOrderResult> PlaceOrderAsync(
         TradeOrder order,
@@ -293,6 +295,10 @@ public class IbkrBrokerService : IBrokerService
         var tcs        = _connection.Wrapper.RegisterOrderCallback(orderId);
         var contract   = BuildContract(order);
         var entryOrder = BuildMarketOrder(orderId, order.Quantity, "BUY");
+
+        // Register exec details TCS before placing — catches late fills that arrive
+        // after the 15s timeout fires and the order cancel is sent to IBKR.
+        var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId);
 
         // Place entry with a temporary fixed STP as bracket child so there is always
         // stop protection in place while we wait for the actual fill confirmation.
@@ -309,19 +315,19 @@ public class IbkrBrokerService : IBrokerService
             _connection.Client.placeOrder(orderId, contract, entryOrder);
             _connection.Client.placeOrder(tempStopId, contract, tempStopOrder);
 
-            // Use a longer timeout — illiquid stocks (OTC, low-float) can take minutes to fill at market.
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(8));
+            cts.CancelAfter(TimeSpan.FromSeconds(15));
 
             // Only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
             var state = await tcs.Task.WaitAsync(cts.Token);
+
+            // Normal fill — exec details TCS no longer needed
+            _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
             _logger.LogInformation(
                 "IBKR entry filled. OrderId: {OrderId} Status: {Status} — replacing stop with OCA trail+target",
                 orderId, state.Status);
 
-            // Cancel the temporary fixed stop and replace with OCA trail + limit target.
-            // OCA ensures whichever side triggers first automatically cancels the other.
             _connection.Client.cancelOrder(tempStopId);
             await Task.Delay(300, ct);
 
@@ -332,9 +338,6 @@ public class IbkrBrokerService : IBrokerService
             var trailPercent = order.TrailPercent;
             var trailOrder   = BuildOcaTrailOrder(trailStopId, order.Quantity, trailPercent, ocaGroup);
 
-            // Skip target order for same-day expiry options — liquidity dries up near close
-            // making limit targets unreachable, and margin rejection on large qty is common.
-            // Trail stop provides the only exit protection for 0DTE positions.
             var isZeroDte = order.TradeType == TradeType.Options &&
                 order.Expiration is not null &&
                 DateTimeOffset.TryParse(order.Expiration, out var expiry) &&
@@ -376,18 +379,97 @@ public class IbkrBrokerService : IBrokerService
         catch (OperationCanceledException)
         {
             _logger.LogWarning(
-                "IBKR PlaceOrder timed out for {Symbol} after 8s — cancelling order.",
+                "IBKR PlaceOrder timed out for {Symbol} after 15s — sending cancel, checking for late fill.",
                 order.Symbol);
 
             _connection.Client.cancelOrder(orderId);
             _connection.Client.cancelOrder(tempStopId);
             _connection.Wrapper.UnregisterOrderCallback(orderId);
 
-            var rejectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
-            if (rejectionReason is not null)
+            // Wait up to 10 seconds for a late ExecDetails callback — the fill may have
+            // already reached IBKR before the cancel arrived, creating a ghost trade.
+            try
             {
+                using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                execCts.CancelAfter(TimeSpan.FromSeconds(10));
+
+                var lateFillPrice = await lateExecTcs.Task.WaitAsync(execCts.Token);
+
+                _logger.LogInformation(
+                    "IBKR PlaceOrder late fill detected for {Symbol} @ ${Price:F2} — placing OCA and recording trade.",
+                    order.Symbol, lateFillPrice);
+
+                await Task.Delay(300, ct);
+
+                var ocaGroup      = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+                var trailStopId   = orderId + 2;
+                var targetOrderId = orderId + 3;
+
+                var trailOrder = BuildOcaTrailOrder(trailStopId, order.Quantity, order.TrailPercent, ocaGroup);
+
+                var isZeroDte = order.TradeType == TradeType.Options &&
+                    order.Expiration is not null &&
+                    DateTimeOffset.TryParse(order.Expiration, out var expiry) &&
+                    DateOnly.FromDateTime(expiry.DateTime) ==
+                    DateOnly.FromDateTime(
+                        TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
+
+                _connection.Client.placeOrder(trailStopId, contract, trailOrder);
+
+                if (!isZeroDte)
+                {
+                    var targetOrder = BuildOcaLimitOrder(
+                        targetOrderId, order.Quantity,
+                        Math.Round((double)order.TargetPrice, 2), ocaGroup);
+                    _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
+                }
+
+                _logger.LogInformation(
+                    "IBKR OCA group placed for late fill — Trail: {TrailPct}% | Target: {Target} | OCA: {Oca}",
+                    order.TrailPercent,
+                    isZeroDte ? "none (0DTE)" : $"${order.TargetPrice:F2}",
+                    ocaGroup);
+
+                RegisterStopOrderCallbacks(orderId, trailStopId, isZeroDte ? null : targetOrderId);
+
+                var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+
+                return new BrokerOrderResult(
+                    OrderId:       orderId.ToString(),
+                    StopOrderId:   trailStopId.ToString(),
+                    TargetOrderId: isZeroDte ? null : targetOrderId.ToString(),
+                    FillPrice:     lateFillPrice,
+                    FillQuantity:  order.Quantity,
+                    FillAmount:    lateFillPrice * order.Quantity * multiplier,
+                    Status:        OrderStatus.Filled,
+                    FilledAt:      DateTimeOffset.UtcNow);
+            }
+            catch (OperationCanceledException)
+            {
+                // No late fill arrived within 10s — order was truly cancelled
+                _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
+
                 _logger.LogWarning(
-                    "IBKR order rejected for {Symbol}: {Reason}", order.Symbol, rejectionReason);
+                    "IBKR PlaceOrder confirmed no fill for {Symbol} — order cancelled.",
+                    order.Symbol);
+
+                var rejectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
+                if (rejectionReason is not null)
+                {
+                    _logger.LogWarning(
+                        "IBKR order rejected for {Symbol}: {Reason}", order.Symbol, rejectionReason);
+
+                    return new BrokerOrderResult(
+                        OrderId:         orderId.ToString(),
+                        StopOrderId:     null,
+                        TargetOrderId:   null,
+                        FillPrice:       0m,
+                        FillQuantity:    0,
+                        FillAmount:      0m,
+                        Status:          OrderStatus.Rejected,
+                        FilledAt:        DateTimeOffset.UtcNow,
+                        RejectionReason: rejectionReason);
+                }
 
                 return new BrokerOrderResult(
                     OrderId:         orderId.ToString(),
@@ -398,19 +480,8 @@ public class IbkrBrokerService : IBrokerService
                     FillAmount:      0m,
                     Status:          OrderStatus.Rejected,
                     FilledAt:        DateTimeOffset.UtcNow,
-                    RejectionReason: rejectionReason);
+                    RejectionReason: "Entry timed out after 15s — order cancelled");
             }
-
-            return new BrokerOrderResult(
-                OrderId:       orderId.ToString(),
-                StopOrderId:   null,
-                TargetOrderId: null,
-                FillPrice:     0m,
-                FillQuantity:  0,
-                FillAmount:    0m,
-                Status:        OrderStatus.Rejected,
-                FilledAt:      DateTimeOffset.UtcNow,
-                RejectionReason: "Entry timed out after 10s — order cancelled");
         }
     }
 
@@ -607,8 +678,6 @@ public class IbkrBrokerService : IBrokerService
 
             _connection.Wrapper.UnregisterOrderCallback(closeOrderId);
 
-            // Wait a further 30 seconds for execDetails to arrive with the real fill price.
-            // This covers slow fills where the order was placed but confirmation was delayed.
             try
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -822,10 +891,6 @@ public class IbkrBrokerService : IBrokerService
         };
 
     // Standalone trailing stop in an OCA group — no ParentId so IBKR accepts TRAIL type.
-    // Both OCA orders use Transmit=true because OCA orders are independent — they are not
-    // a parent-child bracket chain. Setting Transmit=false on the trail previously caused it
-    // to exist only in Gateway's local queue and never reach IBKR's servers, so it was lost
-    // when Gateway crashed. Each OCA order must transmit independently.
     private static Order BuildOcaTrailOrder(int orderId, int quantity, double trailPercent, string ocaGroup) =>
         new()
         {

@@ -58,7 +58,7 @@ public class BrokerExecutionServiceTests
 
         var riskOptions = Options.Create(new RiskEngineOptions());
         _guard = new TradeGuard(_brokerMock.Object, riskOptions, NullLogger<TradeGuard>.Instance);
-        _sizer = new PositionSizer(Options.Create(new RiskEngineOptions()));
+        _sizer = new PositionSizer(Options.Create(new RiskEngineOptions()), NullLogger<PositionSizer>.Instance);
 
         var services = new ServiceCollection();
         services.AddScoped<ITradeMetricsRepository>(_ => _metricsMock.Object);

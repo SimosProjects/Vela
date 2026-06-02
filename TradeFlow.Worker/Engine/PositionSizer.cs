@@ -5,7 +5,7 @@ namespace TradeFlow.Worker.Engine;
 // Converts an approved Alert into a TradeOrder with sizing, stop, target, and trail prices.
 // Fixed sizing rules for paper trading phase:
 //   Options: $2,000 initial, $1,000 average
-//   Stocks:  $3,000 initial, $1,500 average
+//   Stocks:  $1,500 initial, $500 average
 //
 // Risk tier is auto-classified for options based on expiry:
 //   Expires today          → lotto (regardless of Xtrades label)
@@ -19,22 +19,28 @@ namespace TradeFlow.Worker.Engine;
 public class PositionSizer
 {
     private readonly RiskEngineOptions _options;
+    private readonly ILogger<PositionSizer> _logger;
 
-    private const decimal OptionsStopMultiplier = 0.50m; // -50% initial bracket stop
-    private const decimal StockStopMultiplier   = 0.85m; // -15% initial bracket stop
+    private const decimal OptionsStopMultiplier = 0.50m;
+    private const decimal StockStopMultiplier   = 0.85m;
+    private const int     MinQuantity           = 1;
 
-    private const int MinQuantity = 1;
-
-    public PositionSizer(IOptions<RiskEngineOptions> options)
+    public PositionSizer(IOptions<RiskEngineOptions> options, ILogger<PositionSizer> logger)
     {
         _options = options.Value;
+        _logger  = logger;
     }
 
     public TradeOrder? Size(Alert alert, AlertClassification classification, bool isAverage = false)
     {
         var price = alert.PricePaid;
         if (price is null or <= 0)
+        {
+            _logger.LogWarning(
+                "PositionSizer null — {Symbol}: price is null or zero (PricePaid={Paid}, ActualPrice={Actual})",
+                alert.Symbol, alert.PricePaid, alert.ActualPriceAtTimeOfAlert);
             return null;
+        }
 
         var tradeType = classification.Category switch
         {
@@ -45,7 +51,12 @@ public class PositionSizer
         };
 
         if (tradeType is null)
+        {
+            _logger.LogWarning(
+                "PositionSizer null — {Symbol}: unrecognised classification {Category}",
+                alert.Symbol, classification.Category);
             return null;
+        }
 
         var isOptions = tradeType == TradeType.Options;
 
@@ -64,7 +75,12 @@ public class PositionSizer
         if (_options.RestrictedTraders.TryGetValue(userName, out var allocationPct))
         {
             if (allocationPct <= 0)
+            {
+                _logger.LogWarning(
+                    "PositionSizer null — {Symbol}: trader {Trader} has 0% allocation",
+                    alert.Symbol, userName);
                 return null;
+            }
 
             budget = budget * allocationPct / 100m;
         }
@@ -74,7 +90,30 @@ public class PositionSizer
             : (int)(budget / price.Value);
 
         if (quantity < MinQuantity)
+        {
+            if (isOptions)
+            {
+                _logger.LogWarning(
+                    "PositionSizer null — {Symbol}: ${Price:F2}/contract = ${Cost:F0} per contract, " +
+                    "budget is ${Budget:F0} (risk={Risk}, trader={Trader}). Need ${Need:F0} for 1 contract.",
+                    alert.Symbol,
+                    price.Value,
+                    price.Value * 100,
+                    budget,
+                    effectiveRisk,
+                    string.IsNullOrEmpty(userName) ? "unknown" : userName,
+                    price.Value * 100);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "PositionSizer null — {Symbol}: ${Price:F2}/share, budget is ${Budget:F0}. " +
+                    "Need ${Need:F0} for 1 share.",
+                    alert.Symbol, price.Value, budget, price.Value);
+            }
+
             return null;
+        }
 
         var stopPrice = isOptions
             ? price.Value * OptionsStopMultiplier
