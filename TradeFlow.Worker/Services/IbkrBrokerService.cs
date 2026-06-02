@@ -722,17 +722,24 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
-    /// Syncs the internal order ID counter from Gateway's next valid order ID.
-    /// Called on startup to prevent order ID collisions across Worker restarts.
+    /// Syncs the internal order ID counter from Gateway's next valid order ID,
+    /// also accounting for the highest ID already stored in trade_metrics.
+    /// Prevents duplicate key errors when Gateway resets its weekly counter to
+    /// values that overlap with existing DB rows.
+    /// Called on startup after the nextValidId callback is received.
     /// </summary>
-    public void SyncOrderId()
+    public void SyncOrderId(int maxDbOrderId = 0)
     {
         var gatewayId = _connection.Wrapper.NextValidOrderId;
-        var target    = Math.Max(gatewayId - 10, 1);
+
+        // Ensure the first issued ID exceeds both Gateway's counter and the DB high-water mark.
+        // GetNextOrderId() adds 10, so target is set 10 below the safe floor.
+        var target = Math.Max(gatewayId - 10, maxDbOrderId);
         Interlocked.Exchange(ref _nextOrderId, target);
+
         _logger.LogInformation(
-            "IBKR order ID synced — Gateway: {GatewayId}, next order will use: {Next}",
-            gatewayId, target + 10);
+            "IBKR order ID synced — Gateway: {GatewayId}, MaxDB: {MaxDbId}, next order will use: {Next}",
+            gatewayId, maxDbOrderId, target + 10);
     }
 
     // -- Helpers --
