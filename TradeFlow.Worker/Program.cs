@@ -143,8 +143,15 @@ if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
     // Timeout of 15s as fallback in case Gateway is slow to respond.
     await connection.WaitForNextValidIdAsync(TimeSpan.FromSeconds(15));
 
+    int maxDbOrderId;
+    using (var metricsScope = host.Services.CreateScope())
+    {
+        var metrics  = metricsScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+        maxDbOrderId = await metrics.GetMaxOrderIdAsync();
+    }
+
     var broker = host.Services.GetRequiredService<IbkrBrokerService>();
-    broker.SyncOrderId();
+    broker.SyncOrderId(maxDbOrderId);
 
     var guard = host.Services.GetRequiredService<TradeGuard>();
     guard.StartCacheRefresh(CancellationToken.None);

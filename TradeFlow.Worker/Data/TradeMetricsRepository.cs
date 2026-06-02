@@ -34,6 +34,13 @@ public interface ITradeMetricsRepository
     /// Used on startup to seed TradeGuard's daily counter after a restart.
     /// </summary>
     Task<int> GetTodayTradeCountAsync(DateOnly dateEt, CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns the highest numeric order ID stored in trade_metrics.
+    /// Used on startup to ensure the next order ID never collides with an
+    /// existing DB row after a Gateway weekly ID reset.
+    /// </summary>
+    Task<int> GetMaxOrderIdAsync(CancellationToken ct = default);
 }
 
 /// <inheritdoc/>
@@ -141,6 +148,26 @@ public class TradeMetricsRepository : ITradeMetricsRepository
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to query today's trade count from trade_metrics");
+            return 0;
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<int> GetMaxOrderIdAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var ids = await _db.TradeMetrics
+                .Select(m => m.Id)
+                .ToListAsync(ct);
+
+            return ids.Count == 0
+                ? 0
+                : ids.Select(id => int.TryParse(id, out var n) ? n : 0).Max();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to query max order ID from trade_metrics");
             return 0;
         }
     }
