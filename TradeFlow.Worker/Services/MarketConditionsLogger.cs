@@ -132,7 +132,7 @@ public class MarketConditionsLogger
 
             var meta      = result.GetProperty("meta");
             var price     = meta.GetProperty("regularMarketPrice").GetDecimal();
-            var prevClose = meta.GetProperty("chartPreviousClose").GetDecimal();
+            var prevClose = meta.GetProperty("regularMarketPreviousClose").GetDecimal();
 
             var closes = result
                 .GetProperty("indicators")

@@ -68,6 +68,11 @@ builder.Services.AddHttpClient("SignalR", client =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
+builder.Services.AddHttpClient("Scheduler", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
 builder.Services.AddSingleton<IAlertNormalizer, AlertNormalizer>();
 builder.Services.AddSingleton<AlertMetrics>();
 
