@@ -15,10 +15,10 @@ var client = new AlertApiClient(token);
 var normalizer = new AlertNormalizer();
 
 var riskEngine = new RiskEngineService([
-   new EntryOnlyRule(),
-   new NoLottoRule(),
-   new MinXScoreRule(minimumScore: 60.0),
-   new ApprovedTraderRule([ "Fibonaccizer", "Theo", "Avalace" ])
+    new EntryOnlyRule(),
+    new NoLottoRule(configDisabled: false, isChoppy: () => false, chopScore: () => 0),
+    new MinXScoreRule(minimumScore: 60.0),
+    new ApprovedTraderRule([ "Fibonaccizer", "Theo", "Avalace" ])
 ]);
     
 using var cts = new CancellationTokenSource();

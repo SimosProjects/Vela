@@ -1,19 +1,23 @@
 using System.Globalization;
 using System.Text.Json;
+using TradeFlow.Worker.Configuration;
 
 namespace TradeFlow.Worker.Services;
 
 /// <summary>
 /// Fetches daily market conditions from Yahoo Finance and writes a row to market_conditions.csv.
 /// Called at 9:00am ET on each market day before the open, providing context for daily performance review.
-/// Data includes SPY and QQQ price vs moving averages, VIX level and day-over-day change,
-/// and SPY ADX (trend strength). All data sourced from Yahoo Finance free API.
+/// Also calculates the morning chop score and sets the MarketRegimeService for the session —
+/// a choppy regime automatically blocks high risk and lotto trades regardless of config flags.
+/// All data sourced from Yahoo Finance free API.
 /// </summary>
 public class MarketConditionsLogger
 {
     private readonly string _csvPath;
     private readonly HttpClient _httpClient;
     private readonly ILogger<MarketConditionsLogger> _logger;
+    private readonly RiskEngineOptions _riskOptions;
+    private readonly MarketRegimeService _regime;
 
     private static readonly TimeZoneInfo EasternTime =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
@@ -22,14 +26,18 @@ public class MarketConditionsLogger
         "Date," +
         "SPY Price,SPY Prev Close,SPY Gap %,SPY 50MA,SPY vs 50MA %,SPY 200MA,SPY vs 200MA %," +
         "QQQ Price,QQQ Prev Close,QQQ Gap %,QQQ 50MA,QQQ vs 50MA %,QQQ 200MA,QQQ vs 200MA %," +
-        "VIX,VIX Prev,VIX Delta %,SPY ADX,Market Bias";
+        "VIX,VIX Prev,VIX Delta %,SPY ADX,Chop Score,Market Bias";
 
     public MarketConditionsLogger(
         IConfiguration config,
-        ILogger<MarketConditionsLogger> logger)
+        ILogger<MarketConditionsLogger> logger,
+        IOptions<RiskEngineOptions> riskOptions,
+        MarketRegimeService regime)
     {
-        _logger     = logger;
-        _httpClient = new HttpClient();
+        _logger      = logger;
+        _riskOptions = riskOptions.Value;
+        _regime      = regime;
+        _httpClient  = new HttpClient();
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
 
         var configuredDir = config["Trades:Directory"];
@@ -44,7 +52,8 @@ public class MarketConditionsLogger
     }
 
     /// <summary>
-    /// Fetches market data from Yahoo Finance and appends a row to market_conditions.csv.
+    /// Fetches market data from Yahoo Finance, appends a row to market_conditions.csv,
+    /// and sets the MarketRegimeService for the trading session.
     /// Called at 9:00am ET by MarketSchedulerService.
     /// </summary>
     public async Task LogMarketConditionsAsync(CancellationToken ct = default)
@@ -75,6 +84,23 @@ public class MarketConditionsLogger
                 ? (vix.Price - vix.PrevClose) / vix.PrevClose * 100
                 : 0;
 
+            // -- Chop score: 1 point per signal, max 4 --
+            var chopScore = 0;
+
+            if (Math.Abs(vixDeltaPct) >= (decimal)_riskOptions.ChopVixSpikePct)
+                chopScore++; // VIX spiking vs yesterday
+
+            if (spy.Adx > 0 && spy.Adx < (decimal)_riskOptions.ChopAdxThreshold)
+                chopScore++; // No clear trend (low ADX)
+
+            if (spy50MaPct >= (decimal)_riskOptions.ChopSpyExtendedPct)
+                chopScore++; // SPY extended above 50MA, pullback risk
+
+            if (vix.Price >= (decimal)_riskOptions.ChopVixLevel)
+                chopScore++; // Elevated fear environment
+
+            _regime.SetRegime(chopScore, _riskOptions.ChopMinSignals);
+
             var bias = DetermineMarketBias(spy.Price, spy.Ma50, spy.Ma200, vix.Price);
 
             var today = DateOnly.FromDateTime(
@@ -90,16 +116,17 @@ public class MarketConditionsLogger
                 F(qqq.Ma200),     Pct(qqq200MaPct),
                 F(vix.Price),     F(vix.PrevClose), Pct(vixDeltaPct),
                 F(spy.Adx),
+                chopScore,
                 bias);
 
             await File.AppendAllTextAsync(_csvPath, row + Environment.NewLine, ct);
 
             _logger.LogInformation(
                 "Market conditions logged — SPY ${Spy:F2} ({SpyGap:+0.00;-0.00}% gap) vs 50MA {Spy50:+0.00;-0.00}% | " +
-                "VIX {Vix:F2} ({VixDelta:+0.00;-0.00}% vs prev) | SPY ADX {Adx:F1} | Bias: {Bias}",
+                "VIX {Vix:F2} ({VixDelta:+0.00;-0.00}%) | SPY ADX {Adx:F1} | ChopScore: {Chop}/4 | Bias: {Bias}",
                 spy.Price, spyGapPct, spy50MaPct,
                 vix.Price, vixDeltaPct,
-                spy.Adx, bias);
+                spy.Adx, chopScore, bias);
         }
         catch (Exception ex)
         {
@@ -122,16 +149,16 @@ public class MarketConditionsLogger
         var firstLine = File.ReadLines(_csvPath).FirstOrDefault() ?? "";
         if (firstLine == CsvHeader) return;
 
-        var allLines  = File.ReadAllLines(_csvPath);
-        allLines[0]   = CsvHeader;
+        var allLines = File.ReadAllLines(_csvPath);
+        allLines[0]  = CsvHeader;
         File.WriteAllLines(_csvPath, allLines);
 
         _logger.LogInformation(
-            "Market conditions: CSV header updated to include VIX delta and SPY ADX columns.");
+            "Market conditions: CSV header updated to include chop score and regime columns.");
     }
 
     // Fetches daily OHLCV data for the last 200 days from Yahoo Finance.
-    // Returns current price, previous close, 50MA, 200MA, and optionally ADX(14) for trend strength.
+    // Returns current price, previous close, 50MA, 200MA, and optionally ADX(14).
     private async Task<SymbolData?> FetchYahooDataAsync(
         string symbol, bool includeAdx, CancellationToken ct)
     {
@@ -190,9 +217,7 @@ public class MarketConditionsLogger
     }
 
     // Calculates ADX(14) using Wilder's smoothing from OHLCV data.
-    // ADX below 20 indicates a choppy/non-trending market.
-    // ADX above 25 indicates a trending market.
-    // Returns 0 if insufficient data.
+    // ADX below 20 = choppy/non-trending. ADX above 25 = trending. Returns 0 if insufficient data.
     private static decimal CalculateAdx(
         IList<decimal> highs,
         IList<decimal> lows,
@@ -221,7 +246,6 @@ public class MarketConditionsLogger
             trs.Add(tr);
         }
 
-        // Wilder's initial smoothed values from the first period bars
         var atr  = trs.Take(period).Sum();
         var apdm = pdms.Take(period).Sum();
         var andm = ndms.Take(period).Sum();
@@ -247,7 +271,6 @@ public class MarketConditionsLogger
 
         if (dxValues.Count < period) return 0m;
 
-        // Wilder's smoothed ADX
         var adx = dxValues.Take(period).Average();
         for (var i = period; i < dxValues.Count; i++)
             adx = (adx * (period - 1) + dxValues[i]) / period;
