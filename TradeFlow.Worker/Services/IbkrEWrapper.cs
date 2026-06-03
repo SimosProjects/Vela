@@ -329,14 +329,30 @@ public class IbkrEWrapper : EWrapper
 
     public void error(int id, int errorCode, string errorMsg)
     {
+        // 2000-2999 are IBKR system informational codes; 10349 (market data farm notice)
+        // and 202 (cancel confirmation) are benign and expected during normal operation.
         if (errorCode >= 2000 && errorCode < 3000 || errorCode is 10349 or 202)
         {
-            _logger.LogDebug("IBKR Info [{Code}]: {Message}", errorCode, errorMsg);
+            _logger.LogDebug("IBKR Info [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
         }
         else if (errorCode == 201)
         {
+            // 201 = order rejected (commonly margin insufficient for OCA target orders).
+            // Store the reason so PlaceOrderAsync can surface it for the entry order.
+            // For OCA stop/target orders this fires after the entry succeeds, meaning
+            // the position is open but may be missing stop or target protection.
             lock (_lock) { _rejectionReasons[id] = errorMsg; }
-            _logger.LogWarning("IBKR Order rejected [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
+            _logger.LogWarning(
+                "IBKR Order rejected [201] Id {Id} — order will not execute. " +
+                "If this is a target or stop order, the position may be unprotected. Reason: {Message}",
+                id, errorMsg);
+        }
+        else if (errorCode == 404)
+        {
+            // 404 = order held while IBKR locates shares (expected for stock OCA orders).
+            // Not a terminal error, IBKR will resume the order once shares are located.
+            _logger.LogWarning(
+                "IBKR Order held while locating [404] Id {Id} — {Message}", id, errorMsg);
         }
         else
         {

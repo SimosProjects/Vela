@@ -46,7 +46,8 @@ public class MarketSchedulerService : BackgroundService
         IConfiguration config,
         CsvTradeLogger csv,
         IOptions<RiskEngineOptions> riskOptions,
-        MarketConditionsLogger marketConditions)
+        MarketConditionsLogger marketConditions,
+        IHttpClientFactory httpClientFactory)
     {
         _discord      = discord;
         _guard        = guard;
@@ -57,7 +58,7 @@ public class MarketSchedulerService : BackgroundService
         _config       = config;
         _csv          = csv;
         _riskOptions  = riskOptions.Value;
-        _httpClient   = new HttpClient();
+        _httpClient   = httpClientFactory.CreateClient("Scheduler");
         _marketConditions = marketConditions;
 
         _healthWebhookUrl  = Environment.GetEnvironmentVariable("DISCORD_HEALTH_WEBHOOK_URL");
@@ -193,9 +194,9 @@ public class MarketSchedulerService : BackgroundService
     }
 
     // Fires at 3pm ET, checks options expiring tomorrow.
-    // In profit above threshold AND qty > 1 → partial close + remove stop (lotto remainder).
-    // In profit below threshold OR qty == 1 → force close entirely.
-    // In the red → do nothing, handled at 3:55pm.
+    // In profit above threshold AND qty > 1 — partial close + remove stop (lotto remainder).
+    // In profit below threshold OR qty == 1 — force close entirely.
+    // In the red — do nothing, handled at 3:55pm.
     private async Task HandleOneDteProfitCloseAsync(CancellationToken ct)
     {
         var et         = GetEasternTime();
@@ -220,7 +221,6 @@ public class MarketSchedulerService : BackgroundService
 
         foreach (var trade in positions)
         {
-            // Get current market price to evaluate P&L
             var currentPrice = await _broker.GetCurrentMarketPriceAsync(
                 trade.Symbol,
                 trade.TradeType,
@@ -236,8 +236,8 @@ public class MarketSchedulerService : BackgroundService
                 continue;
             }
 
-            var multiplier  = 100m;
-            var currentPnl  = (currentPrice - trade.EntryPrice) * trade.Quantity * multiplier;
+            var multiplier    = 100m;
+            var currentPnl    = (currentPrice - trade.EntryPrice) * trade.Quantity * multiplier;
             var currentPnlPct = trade.EntryAmount > 0
                 ? currentPnl / trade.EntryAmount * 100
                 : 0m;
@@ -254,7 +254,6 @@ public class MarketSchedulerService : BackgroundService
 
             if (currentPnlPct > threshold && trade.Quantity > 1)
             {
-                // Partial close — sell configured ratio, let remainder ride as lotto
                 var qtyToClose = Math.Max(1, (int)Math.Floor(trade.Quantity * _riskOptions.OptionPartialCloseRatio));
                 _logger.LogInformation(
                     "1DTE profit close: {Symbol} +{PnlPct:F1}% > {Threshold}% threshold — partial close {QtyClose}/{TotalQty} contracts",
@@ -264,7 +263,6 @@ public class MarketSchedulerService : BackgroundService
             }
             else
             {
-                // Full close — profit below threshold or only 1 contract
                 _logger.LogInformation(
                     "1DTE profit close: {Symbol} +{PnlPct:F1}% — force closing full position (qty {Qty} or below threshold)",
                     trade.Symbol, currentPnlPct, trade.Quantity);
