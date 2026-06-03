@@ -5,14 +5,12 @@ namespace TradeFlow.Worker.Engine;
 
 // Enforces trading safety rules before any order is placed.
 // Rules checked in order:
-//   1. Daily exposure cap — today's open positions must not exceed MaxDailyExposurePct
-//      of available balance (account balance minus carry-over positions from prior days)
-//   2. Stock sub-cap — if StockDailyAllocationPct > 0, stock orders are limited to that
-//      percentage of the daily cap, preventing stocks from consuming all available capital
-//   3. Symbol already open (any instrument type) — prevents doubled exposure on same underlying
-//   4. Total open exposure + new trade cost <= account balance
-//   5. No duplicate open position for same trader + contract
-//   6. Averaging rules (one average per position, at 50% budget)
+//   1. Symbol already open — prevents doubled exposure on same underlying
+//   2. Contract duplicate and averaging rules
+//   3. Daily exposure cap
+//   4. Stock sub-cap
+//   5. Hard balance check
+//   6. Daily loss limit — blocks new entries when today's realized P&L falls below the threshold
 //
 // Account balance and open positions value are cached and refreshed every 30 seconds
 // in the background to avoid blocking the trade execution path with IBKR round trips.
@@ -30,12 +28,14 @@ public class TradeGuard
     private readonly double _stockDailyAllocationPct;
     private readonly double _marginPct;
     private readonly int _maxPositionsPerSymbol;
+    private readonly decimal _dailyLossLimit;
+    private readonly CsvTradeLogger? _csv;
 
     // In-memory open positions, keyed by match key (userName + contractSymbol or symbol)
     private readonly Dictionary<string, TradeRecord> _openTrades = new();
     private readonly Lock _lock = new();
 
-    // Cached IBKR account values — refreshed every 30s in the background
+    // Cached IBKR account values, refreshed every 30s in the background
     private decimal _cachedBalance   = 0m;
     private decimal _cachedOpenValue = 0m;
     private readonly Lock _cacheLock = new();
@@ -45,7 +45,8 @@ public class TradeGuard
     public TradeGuard(
         IBrokerService broker,
         IOptions<RiskEngineOptions> riskOptions,
-        ILogger<TradeGuard> logger)
+        ILogger<TradeGuard> logger,
+        CsvTradeLogger? csv = null)
     {
         _broker                  = broker;
         _logger                  = logger;
@@ -53,6 +54,8 @@ public class TradeGuard
         _stockDailyAllocationPct = riskOptions.Value.StockDailyAllocationPct;
         _marginPct               = riskOptions.Value.MarginPct;
         _maxPositionsPerSymbol   = riskOptions.Value.MaxPositionsPerSymbol;
+        _dailyLossLimit          = riskOptions.Value.DailyLossLimit;
+        _csv                     = csv;
     }
 
     /// <summary>
@@ -116,16 +119,18 @@ public class TradeGuard
 
     /// <summary>
     /// Returns null if the order is allowed, or a rejection reason string if blocked.
-    /// Uses cached balance and open positions value — no IBKR round trips on the hot path.
+    /// Checks position limits, exposure caps, and the daily loss limit in sequence.
+    /// Uses cached balance and open positions value, no IBKR round trips on the hot path.
     /// </summary>
-    public Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)
+    public async Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)
     {
+        // -- Position checks under lock --
+        string? positionBlock = null;
         lock (_lock)
         {
-            // 1. Symbol-level check, block any new entry if the underlying symbol already
-            // has an open position regardless of instrument type. Prevents holding TSLA stock
-            // and a TSLA option simultaneously, which doubles exposure on one underlying.
-            // Averaging is exempt since it is deliberately adding to an existing position.
+            // Block any new entry if the underlying symbol already has the maximum number of open
+            // positions regardless of instrument type. Averaging is exempt since it is deliberately
+            // adding to an existing position.
             if (!order.IsAverage)
             {
                 var symbolCount = _openTrades.Values
@@ -133,29 +138,33 @@ public class TradeGuard
                         t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
 
                 if (symbolCount >= _maxPositionsPerSymbol)
-                    return Task.FromResult<string?>(
+                    positionBlock =
                         $"Max positions per symbol reached for {order.Symbol} " +
-                        $"({symbolCount}/{_maxPositionsPerSymbol})");
+                        $"({symbolCount}/{_maxPositionsPerSymbol})";
             }
 
-            // 2. Contract-level duplicate and averaging rules
-            var matchKey = BuildMatchKey(order.UserName, order.OptionsContractSymbol, order.Symbol);
-
-            if (_openTrades.TryGetValue(matchKey, out var existing))
+            if (positionBlock is null)
             {
-                if (!order.IsAverage)
-                    return Task.FromResult<string?>($"Position already open for {order.Symbol} — use averaging");
+                var matchKey = BuildMatchKey(order.UserName, order.OptionsContractSymbol, order.Symbol);
 
-                if (existing.HasAveraged)
-                    return Task.FromResult<string?>($"Already averaged into {order.Symbol} — only one average allowed");
-            }
-            else if (order.IsAverage)
-            {
-                return Task.FromResult<string?>($"No open position found for {order.Symbol} — cannot average");
+                if (_openTrades.TryGetValue(matchKey, out var existing))
+                {
+                    if (!order.IsAverage)
+                        positionBlock = $"Position already open for {order.Symbol} — use averaging";
+                    else if (existing.HasAveraged)
+                        positionBlock = $"Already averaged into {order.Symbol} — only one average allowed";
+                }
+                else if (order.IsAverage)
+                {
+                    positionBlock = $"No open position found for {order.Symbol} — cannot average";
+                }
             }
         }
 
-        // 3. Exposure cap, stock sub-cap, and balance check using cached values
+        if (positionBlock is not null)
+            return positionBlock;
+
+        // -- Exposure cap checks using cached values --
         decimal balance, openValue;
         lock (_cacheLock)
         {
@@ -173,39 +182,50 @@ public class TradeGuard
             var deployableRemaining = maxDailyDeployment - todayOpenedValue;
 
             if (order.BudgetUsed > deployableRemaining)
-            {
-                return Task.FromResult<string?>(
+                return
                     $"Daily exposure cap reached — need ${order.BudgetUsed:F2}, " +
                     $"deployable ${deployableRemaining:F2} " +
-                    $"(cap ${maxDailyDeployment:F2}, today open ${todayOpenedValue:F2})");
-            }
+                    $"(cap ${maxDailyDeployment:F2}, today open ${todayOpenedValue:F2})";
 
-            // Stock sub-cap that limits how much of the daily cap stocks can consume.
+            // Stock sub-cap limits how much of the daily cap stocks can consume.
             if (order.TradeType == TradeType.Stock && _stockDailyAllocationPct > 0)
             {
                 var todayStockValue    = GetTodayOpenedValueByType(TradeType.Stock);
                 var maxStockDeployment = maxDailyDeployment * (decimal)(_stockDailyAllocationPct / 100.0);
 
                 if (order.BudgetUsed + todayStockValue > maxStockDeployment)
-                {
-                    return Task.FromResult<string?>(
+                    return
                         $"Stock daily allocation cap reached — need ${order.BudgetUsed:F2}, " +
                         $"stock deployable ${Math.Max(0, maxStockDeployment - todayStockValue):F2} " +
-                        $"(stock cap ${maxStockDeployment:F2}, stock open today ${todayStockValue:F2})");
-                }
+                        $"(stock cap ${maxStockDeployment:F2}, stock open today ${todayStockValue:F2})";
             }
 
-            // Hard balance check — never deploy more than available cash
+            // Hard balance check — never deploy more than available cash.
             var available = balance - openValue;
             if (order.BudgetUsed > available)
-            {
-                return Task.FromResult<string?>(
+                return
                     $"Insufficient available balance — need ${order.BudgetUsed:F2}, " +
-                    $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})");
+                    $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})";
+        }
+
+        // Only active when DailyLossLimit is set to a negative value and CsvTradeLogger is injected.
+        if (_dailyLossLimit < 0 && _csv is not null)
+        {
+            var todayPnl = await _csv.GetTodayRealizedPnLAsync(ct);
+            if (todayPnl <= _dailyLossLimit)
+            {
+                _logger.LogWarning(
+                    "Daily loss limit reached — today's realized P&L ${PnL:F2} at or below limit ${Limit:F2}. " +
+                    "No new entries will be accepted for the rest of the session.",
+                    todayPnl, _dailyLossLimit);
+
+                return
+                    $"Daily loss limit reached — today's realized P&L ${todayPnl:F2} " +
+                    $"(limit ${_dailyLossLimit:F2})";
             }
         }
 
-        return Task.FromResult<string?>(null);
+        return null;
     }
 
     /// <summary>
@@ -347,8 +367,6 @@ public class TradeGuard
 
     /// <summary>
     /// Logs a snapshot of current exposure after a position closes.
-    /// Only today's opened positions count against the daily cap — carry-over positions
-    /// from prior days reduce available balance but do not consume today's cap.
     /// </summary>
     public void LogExposureUpdate()
     {
@@ -403,7 +421,6 @@ public class TradeGuard
     }
 
     // Returns the total entry amount of positions of a specific type opened today in ET.
-    // Used for the stock sub-cap check to limit how much of the daily cap stocks can consume.
     private decimal GetTodayOpenedValueByType(TradeType tradeType)
     {
         var todayEt = DateOnly.FromDateTime(

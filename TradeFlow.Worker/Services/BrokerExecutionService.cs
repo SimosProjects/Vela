@@ -210,6 +210,58 @@ public class BrokerExecutionService
             _logger.LogInformation(
                 "Gateway confirmed position for {Symbol} at ${Price:F2} after timeout — recording trade.",
                 alert.Symbol, positionPrice);
+
+            // Use the confirmed position price so CSV and metrics reflect the actual
+            // entry rather than a zero or estimated value from the timed-out result.
+            var pendingMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+            result = result with
+            {
+                FillPrice  = positionPrice,
+                FillAmount = positionPrice * order.Quantity * pendingMultiplier,
+                Status     = OrderStatus.Filled,
+            };
+        }
+
+        // Post-fill slippage guard — if the actual IBKR fill is too far above the alert
+        // price the position is closed immediately before it is recorded anywhere.
+        // This prevents bad fills from bypassing the pre-trade check (e.g. timeout path).
+        if (_riskOptions.PostFillMaxSlippagePct > 0 && alertedPrice > 0)
+        {
+            var postFillSlippage = (result.FillPrice - alertedPrice) / alertedPrice * 100;
+            if (postFillSlippage > _riskOptions.PostFillMaxSlippagePct)
+            {
+                _logger.LogWarning(
+                    "Post-fill slippage {Slippage:F1}% exceeds {Max:F1}% for {Symbol} — " +
+                    "closing position immediately, nothing recorded",
+                    postFillSlippage, _riskOptions.PostFillMaxSlippagePct, alert.Symbol);
+
+                // Close without registering in TradeGuard or writing to CSV/DB.
+                // The OCA stop and target orders are cancelled by IBKR automatically
+                // when the position is fully closed at market.
+                var emergencyClose = new TradeRecord
+                {
+                    AlertId         = alert.Id ?? string.Empty, 
+                    OrderId         = result.OrderId,
+                    StopOrderId     = result.StopOrderId,
+                    TargetOrderId   = result.TargetOrderId,
+                    UserName        = order.UserName,
+                    Symbol          = order.Symbol,
+                    TradeType       = order.TradeType,
+                    OptionsContract = order.OptionsContractSymbol,
+                    Direction       = order.Direction,
+                    Strike          = order.Strike,
+                    Expiration      = order.Expiration,
+                    Quantity        = result.FillQuantity,
+                    EntryPrice      = result.FillPrice,
+                    EntryAmount     = result.FillAmount,
+                    StopPrice       = order.StopPrice,
+                    TargetPrice     = order.TargetPrice,
+                    OpenedAt        = result.FilledAt,
+                };
+
+                await _broker.ClosePositionAsync(emergencyClose, TradeOutcome.ForcedClose, ct);
+                return;
+            }
         }
 
         _guard.RegisterOpen(order, result);
@@ -522,7 +574,6 @@ public class BrokerExecutionService
 
         var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
         var partialPnl = (closeResult.FillPrice - trade.EntryPrice) * quantityToClose * multiplier;
-        var pnlSign    = partialPnl >= 0 ? "+" : "";
 
         _logger.LogInformation(
             "PARTIAL CLOSE — {Symbol} × {QtyClose} @ ${Price:F2} | " +

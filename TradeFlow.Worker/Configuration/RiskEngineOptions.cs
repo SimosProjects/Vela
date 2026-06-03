@@ -56,10 +56,12 @@ public class RiskEngineOptions
     [Range(0, 100, ErrorMessage = "MaxEntrySlippagePct must be between 0 and 100.")]
     public decimal MaxEntrySlippagePct { get; init; } = 5.0m;
 
+    [Range(0, 100, ErrorMessage = "PostFillMaxSlippagePct must be between 0 and 100.")]
+    public decimal PostFillMaxSlippagePct { get; init; } = 10.0m;
+
     [Range(1, 100, ErrorMessage = "MaxDailyExposurePct must be between 1 and 100.")]
     public double MaxDailyExposurePct { get; init; } = 30.0;
 
-    // Percentage of the daily deployment cap reserved for stock positions.
     [Range(0, 100, ErrorMessage = "StockDailyAllocationPct must be between 0 and 100.")]
     public double StockDailyAllocationPct { get; init; } = 0.0;
 
@@ -90,4 +92,5 @@ public class RiskEngineOptions
 
     [Range(0.01, 1.0, ErrorMessage = "OptionPartialCloseRatio must be between 0.01 and 1.0.")]
     public double OptionPartialCloseRatio { get; init; } = 0.5;
+    public decimal DailyLossLimit { get; init; } = 0m;
 }
