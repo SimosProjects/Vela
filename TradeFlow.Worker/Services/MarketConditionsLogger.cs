@@ -6,8 +6,8 @@ namespace TradeFlow.Worker.Services;
 /// <summary>
 /// Fetches daily market conditions from Yahoo Finance and writes a row to market_conditions.csv.
 /// Called at 9:00am ET on each market day before the open, providing context for daily performance review.
-/// Data includes SPY and QQQ price vs moving averages and VIX level.
-/// All data sourced from Yahoo Finance free API.
+/// Data includes SPY and QQQ price vs moving averages, VIX level and day-over-day change,
+/// and SPY ADX (trend strength). All data sourced from Yahoo Finance free API.
 /// </summary>
 public class MarketConditionsLogger
 {
@@ -22,7 +22,7 @@ public class MarketConditionsLogger
         "Date," +
         "SPY Price,SPY Prev Close,SPY Gap %,SPY 50MA,SPY vs 50MA %,SPY 200MA,SPY vs 200MA %," +
         "QQQ Price,QQQ Prev Close,QQQ Gap %,QQQ 50MA,QQQ vs 50MA %,QQQ 200MA,QQQ vs 200MA %," +
-        "VIX,Market Bias";
+        "VIX,VIX Prev,VIX Delta %,SPY ADX,Market Bias";
 
     public MarketConditionsLogger(
         IConfiguration config,
@@ -40,8 +40,7 @@ public class MarketConditionsLogger
         Directory.CreateDirectory(tradesDir);
         _csvPath = Path.Combine(tradesDir, "market_conditions.csv");
 
-        if (!File.Exists(_csvPath))
-            File.WriteAllText(_csvPath, CsvHeader + Environment.NewLine);
+        EnsureHeader();
     }
 
     /// <summary>
@@ -54,9 +53,9 @@ public class MarketConditionsLogger
 
         try
         {
-            var spy = await FetchYahooDataAsync("SPY", ct);
-            var qqq = await FetchYahooDataAsync("QQQ", ct);
-            var vix = await FetchYahooDataAsync("^VIX", ct);
+            var spy = await FetchYahooDataAsync("SPY", includeAdx: true, ct);
+            var qqq = await FetchYahooDataAsync("QQQ", includeAdx: false, ct);
+            var vix = await FetchYahooDataAsync("^VIX", includeAdx: false, ct);
 
             if (spy is null || qqq is null || vix is null)
             {
@@ -64,13 +63,17 @@ public class MarketConditionsLogger
                 return;
             }
 
-            var spyGapPct    = spy.PrevClose > 0 ? (spy.Price - spy.PrevClose) / spy.PrevClose * 100 : 0;
-            var spy50MaPct   = spy.Ma50  > 0 ? (spy.Price - spy.Ma50)  / spy.Ma50  * 100 : 0;
-            var spy200MaPct  = spy.Ma200 > 0 ? (spy.Price - spy.Ma200) / spy.Ma200 * 100 : 0;
+            var spyGapPct   = spy.PrevClose > 0 ? (spy.Price - spy.PrevClose) / spy.PrevClose * 100 : 0;
+            var spy50MaPct  = spy.Ma50  > 0 ? (spy.Price - spy.Ma50)  / spy.Ma50  * 100 : 0;
+            var spy200MaPct = spy.Ma200 > 0 ? (spy.Price - spy.Ma200) / spy.Ma200 * 100 : 0;
 
-            var qqqGapPct    = qqq.PrevClose > 0 ? (qqq.Price - qqq.PrevClose) / qqq.PrevClose * 100 : 0;
-            var qqq50MaPct   = qqq.Ma50  > 0 ? (qqq.Price - qqq.Ma50)  / qqq.Ma50  * 100 : 0;
-            var qqq200MaPct  = qqq.Ma200 > 0 ? (qqq.Price - qqq.Ma200) / qqq.Ma200 * 100 : 0;
+            var qqqGapPct   = qqq.PrevClose > 0 ? (qqq.Price - qqq.PrevClose) / qqq.PrevClose * 100 : 0;
+            var qqq50MaPct  = qqq.Ma50  > 0 ? (qqq.Price - qqq.Ma50)  / qqq.Ma50  * 100 : 0;
+            var qqq200MaPct = qqq.Ma200 > 0 ? (qqq.Price - qqq.Ma200) / qqq.Ma200 * 100 : 0;
+
+            var vixDeltaPct = vix.PrevClose > 0
+                ? (vix.Price - vix.PrevClose) / vix.PrevClose * 100
+                : 0;
 
             var bias = DetermineMarketBias(spy.Price, spy.Ma50, spy.Ma200, vix.Price);
 
@@ -85,17 +88,18 @@ public class MarketConditionsLogger
                 F(qqq.Price),     F(qqq.PrevClose), Pct(qqqGapPct),
                 F(qqq.Ma50),      Pct(qqq50MaPct),
                 F(qqq.Ma200),     Pct(qqq200MaPct),
-                F(vix.Price),
+                F(vix.Price),     F(vix.PrevClose), Pct(vixDeltaPct),
+                F(spy.Adx),
                 bias);
 
             await File.AppendAllTextAsync(_csvPath, row + Environment.NewLine, ct);
 
             _logger.LogInformation(
                 "Market conditions logged — SPY ${Spy:F2} ({SpyGap:+0.00;-0.00}% gap) vs 50MA {Spy50:+0.00;-0.00}% | " +
-                "QQQ ${Qqq:F2} ({QqqGap:+0.00;-0.00}% gap) | VIX {Vix:F2} | Bias: {Bias}",
+                "VIX {Vix:F2} ({VixDelta:+0.00;-0.00}% vs prev) | SPY ADX {Adx:F1} | Bias: {Bias}",
                 spy.Price, spyGapPct, spy50MaPct,
-                qqq.Price, qqqGapPct,
-                vix.Price, bias);
+                vix.Price, vixDeltaPct,
+                spy.Adx, bias);
         }
         catch (Exception ex)
         {
@@ -105,9 +109,31 @@ public class MarketConditionsLogger
 
     // -- Helpers --
 
+    // Creates or updates the CSV header. Rewrites the header row if it does not match
+    // the current schema, preserving all existing data rows below it.
+    private void EnsureHeader()
+    {
+        if (!File.Exists(_csvPath))
+        {
+            File.WriteAllText(_csvPath, CsvHeader + Environment.NewLine);
+            return;
+        }
+
+        var firstLine = File.ReadLines(_csvPath).FirstOrDefault() ?? "";
+        if (firstLine == CsvHeader) return;
+
+        var allLines  = File.ReadAllLines(_csvPath);
+        allLines[0]   = CsvHeader;
+        File.WriteAllLines(_csvPath, allLines);
+
+        _logger.LogInformation(
+            "Market conditions: CSV header updated to include VIX delta and SPY ADX columns.");
+    }
+
     // Fetches daily OHLCV data for the last 200 days from Yahoo Finance.
-    // Returns current price, previous close, 50MA and 200MA.
-    private async Task<SymbolData?> FetchYahooDataAsync(string symbol, CancellationToken ct)
+    // Returns current price, previous close, 50MA, 200MA, and optionally ADX(14) for trend strength.
+    private async Task<SymbolData?> FetchYahooDataAsync(
+        string symbol, bool includeAdx, CancellationToken ct)
     {
         try
         {
@@ -126,33 +152,107 @@ public class MarketConditionsLogger
             var json = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(json);
 
-            var result = doc.RootElement
-                .GetProperty("chart")
-                .GetProperty("result")[0];
-
+            var result    = doc.RootElement.GetProperty("chart").GetProperty("result")[0];
             var meta      = result.GetProperty("meta");
             var price     = meta.GetProperty("regularMarketPrice").GetDecimal();
             var prevClose = meta.GetProperty("regularMarketPreviousClose").GetDecimal();
+            var quote     = result.GetProperty("indicators").GetProperty("quote")[0];
 
-            var closes = result
-                .GetProperty("indicators")
-                .GetProperty("quote")[0]
-                .GetProperty("close")
-                .EnumerateArray()
-                .Where(e => e.ValueKind == JsonValueKind.Number)
-                .Select(e => e.GetDecimal())
-                .ToList();
+            var closes = ExtractDecimals(quote, "close");
+            var ma50   = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
+            var ma200  = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Average();
 
-            var ma50  = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
-            var ma200 = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Average();
+            var adx = 0m;
+            if (includeAdx)
+            {
+                var highs = ExtractDecimals(quote, "high");
+                var lows  = ExtractDecimals(quote, "low");
+                adx = CalculateAdx(highs, lows, closes);
+            }
 
-            return new SymbolData(price, prevClose, ma50, ma200);
+            return new SymbolData(price, prevClose, ma50, ma200, adx);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Market conditions: failed to fetch data for {Symbol}", symbol);
             return null;
         }
+    }
+
+    // Extracts a numeric array field from a Yahoo Finance quote element, skipping nulls.
+    private static List<decimal> ExtractDecimals(JsonElement quote, string field)
+    {
+        return quote.GetProperty(field)
+            .EnumerateArray()
+            .Where(e => e.ValueKind == JsonValueKind.Number)
+            .Select(e => e.GetDecimal())
+            .ToList();
+    }
+
+    // Calculates ADX(14) using Wilder's smoothing from OHLCV data.
+    // ADX below 20 indicates a choppy/non-trending market.
+    // ADX above 25 indicates a trending market.
+    // Returns 0 if insufficient data.
+    private static decimal CalculateAdx(
+        IList<decimal> highs,
+        IList<decimal> lows,
+        IList<decimal> closes,
+        int period = 14)
+    {
+        if (highs.Count < period * 2 + 1) return 0m;
+
+        var trs  = new List<decimal>();
+        var pdms = new List<decimal>();
+        var ndms = new List<decimal>();
+
+        for (var i = 1; i < highs.Count; i++)
+        {
+            var tr = Math.Max(
+                highs[i] - lows[i],
+                Math.Max(
+                    Math.Abs(highs[i] - closes[i - 1]),
+                    Math.Abs(lows[i]  - closes[i - 1])));
+
+            var upMove   = highs[i] - highs[i - 1];
+            var downMove = lows[i - 1] - lows[i];
+
+            pdms.Add(upMove   > downMove && upMove   > 0 ? upMove   : 0m);
+            ndms.Add(downMove > upMove   && downMove > 0 ? downMove : 0m);
+            trs.Add(tr);
+        }
+
+        // Wilder's initial smoothed values from the first period bars
+        var atr  = trs.Take(period).Sum();
+        var apdm = pdms.Take(period).Sum();
+        var andm = ndms.Take(period).Sum();
+
+        var dxValues = new List<decimal>();
+
+        for (var i = period; i < trs.Count; i++)
+        {
+            atr  = atr  - atr  / period + trs[i];
+            apdm = apdm - apdm / period + pdms[i];
+            andm = andm - andm / period + ndms[i];
+
+            if (atr == 0) continue;
+
+            var pdi = 100m * apdm / atr;
+            var ndi = 100m * andm / atr;
+            var sum = pdi + ndi;
+
+            if (sum == 0) continue;
+
+            dxValues.Add(100m * Math.Abs(pdi - ndi) / sum);
+        }
+
+        if (dxValues.Count < period) return 0m;
+
+        // Wilder's smoothed ADX
+        var adx = dxValues.Take(period).Average();
+        for (var i = period; i < dxValues.Count; i++)
+            adx = (adx * (period - 1) + dxValues[i]) / period;
+
+        return Math.Round(adx, 2);
     }
 
     // Determines overall market bias from SPY position relative to moving averages and VIX level.
@@ -171,5 +271,5 @@ public class MarketConditionsLogger
     private static string F(decimal value)   => value.ToString("F2", CultureInfo.InvariantCulture);
     private static string Pct(decimal value) => $"{(value >= 0 ? "+" : "")}{value:F2}%";
 
-    private record SymbolData(decimal Price, decimal PrevClose, decimal Ma50, decimal Ma200);
+    private record SymbolData(decimal Price, decimal PrevClose, decimal Ma50, decimal Ma200, decimal Adx = 0m);
 }

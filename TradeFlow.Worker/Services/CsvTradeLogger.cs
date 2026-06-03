@@ -116,6 +116,22 @@ public class CsvTradeLogger
     }
 
     /// <summary>
+    /// Returns the total realized P&L for all trades closed today in ET across both CSV files.
+    /// Used by TradeGuard to enforce the daily loss limit before accepting new entries.
+    /// Reads without acquiring the write semaphore, call sites are read-only and the
+    /// minor race window between a concurrent write and this read is acceptable.
+    /// </summary>
+    public async Task<decimal> GetTodayRealizedPnLAsync(CancellationToken ct = default)
+    {
+        var todayEt = DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
+
+        var options = await ReadTodayPnLFromFileAsync(_optionsPath, TradeType.Options, todayEt, ct);
+        var stocks  = await ReadTodayPnLFromFileAsync(_stocksPath,  TradeType.Stock,   todayEt, ct);
+        return options + stocks;
+    }
+
+    /// <summary>
     /// Archives the current week's CSV files and resets the working files to open positions only.
     /// Three outputs per file:
     ///   archive/ — full copy of the original (open + closed), complete record
@@ -159,6 +175,40 @@ public class CsvTradeLogger
     }
 
     // -- Helpers --
+
+    // Reads all closed trades from a single CSV file for today and sums their P&L.
+    private static async Task<decimal> ReadTodayPnLFromFileAsync(
+        string path,
+        TradeType tradeType,
+        DateOnly todayEt,
+        CancellationToken ct)
+    {
+        if (!File.Exists(path)) return 0m;
+
+        var lines = await File.ReadAllLinesAsync(path, ct);
+        var total = 0m;
+
+        var statusIdx     = tradeType == TradeType.Options ? 18 : 14;
+        var closedDateIdx = 2;
+        var pnlIdx        = tradeType == TradeType.Options ? 21 : 17;
+
+        foreach (var line in lines.Skip(1))
+        {
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith(",,")) continue;
+
+            var cols = line.Split(',');
+            if (cols.Length <= pnlIdx) continue;
+            if (cols[statusIdx] != "Closed") continue;
+            if (!DateOnly.TryParse(cols[closedDateIdx], out var closedDate)) continue;
+            if (closedDate != todayEt) continue;
+
+            if (decimal.TryParse(cols[pnlIdx].TrimStart('+'),
+                NumberStyles.Any, CultureInfo.InvariantCulture, out var pnl))
+                total += pnl;
+        }
+
+        return total;
+    }
 
     // Three-way archive:
     //   fullArchivePath  — exact copy of source (open + closed), preserves complete history
@@ -413,7 +463,7 @@ public class CsvTradeLogger
 
     private async Task RewriteTradeRowAsync(string path, TradeRecord trade, CancellationToken ct)
     {
-        var lines = await File.ReadAllLinesAsync(path, ct);
+        var lines   = await File.ReadAllLinesAsync(path, ct);
         var updated = false;
 
         var exitPriceCol = trade.TradeType == TradeType.Options ? 14 : 10;
@@ -442,7 +492,7 @@ public class CsvTradeLogger
                     trade.SlippagePct = sp;
 
                 lines[i] = BuildClosedRow(trade);
-                updated = true;
+                updated  = true;
                 break;
             }
         }
