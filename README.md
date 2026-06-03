@@ -21,7 +21,7 @@ An event-driven automated trading platform that ingests trade alerts, evaluates 
 
 TradeFlow ingests trade alerts from Xtrades and screens each one through layered risk controls before routing approved orders to Interactive Brokers for execution. Open positions are protected by broker-side exit orders and persisted to PostgreSQL, so the system recovers its state after a restart and runs unattended through the trading day.
 
-![Architecture Overview](docs/architecture/architecture-overview.png)
+![Architecture Overview](docs/images/architecture-overview.png)
 
 ## Overview
 
