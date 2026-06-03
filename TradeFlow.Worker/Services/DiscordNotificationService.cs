@@ -84,9 +84,10 @@ public class DiscordNotificationService
 
             var embed = new
             {
-                title  = $"{typeEmoji} ORDER FILLED — {trade.Symbol}",
-                color  = trade.Direction == "call" ? 0x2ECC71 : trade.Direction == "put" ? 0xE74C3C : 0x3498DB,
-                fields = new[]
+                title       = $"{typeEmoji} ORDER FILLED — {trade.Symbol}",
+                description = FormatContract(trade),
+                color       = trade.Direction == "call" ? 0x2ECC71 : trade.Direction == "put" ? 0xE74C3C : 0x3498DB,
+                fields      = new[]
                 {
                     new { name = "Symbol",   value = trade.Symbol,                    inline = true },
                     new { name = "Qty",      value = trade.Quantity.ToString(),        inline = true },
@@ -178,12 +179,12 @@ public class DiscordNotificationService
                 color  = isWin ? 0x2ECC71 : 0xE74C3C,
                 fields = new[]
                 {
-                    new { name = "Symbol",        value = trade.Symbol,                             inline = true },
-                    new { name = "Sold",          value = $"{quantityClosed} contracts",            inline = true },
-                    new { name = "Fill Price",    value = $"${fillPrice:F2}",                      inline = true },
-                    new { name = "Partial P&L",   value = $"{pnlSign}${partialPnl:F2}",            inline = true },
-                    new { name = "Remaining",     value = $"{remainingQuantity} contracts (lotto)", inline = true },
-                    new { name = "Stop",          value = "Cancelled — overnight lotto hold",       inline = true },
+                    new { name = "Symbol",       value = trade.Symbol,                             inline = true },
+                    new { name = "Sold",         value = $"{quantityClosed} contracts",            inline = true },
+                    new { name = "Fill Price",   value = $"${fillPrice:F2}",                       inline = true },
+                    new { name = "Partial P&L",  value = $"{pnlSign}${partialPnl:F2}",            inline = true },
+                    new { name = "Remaining",    value = $"{remainingQuantity} contracts (lotto)", inline = true },
+                    new { name = "Stop",         value = "Cancelled — overnight lotto hold",       inline = true },
                 },
                 footer    = new { text = "TradeFlow Execution" },
                 timestamp = DateTimeOffset.UtcNow.ToString("o")
@@ -228,6 +229,28 @@ public class DiscordNotificationService
         {
             _logger.LogWarning(ex, "Failed to send critical Discord notification.");
         }
+    }
+
+    // -- Helpers --
+
+    // Builds a human readable contract description for the execution embed.
+    // Options: "RBLX Aug 21 2026 $60.00 Call"
+    // Stocks:  "RBLX"
+    private static string? FormatContract(TradeRecord trade)
+    {
+        if (trade.TradeType != TradeType.Options) return null;
+
+        var expiry = trade.Expiration is not null &&
+                     DateTimeOffset.TryParse(trade.Expiration, out var dt)
+            ? dt.ToString("MMM dd yyyy")
+            : trade.Expiration ?? "—";
+
+        var strike    = trade.Strike.HasValue ? $"${trade.Strike:F2}" : "—";
+        var direction = trade.Direction is not null
+            ? char.ToUpper(trade.Direction[0]) + trade.Direction[1..]
+            : "—";
+
+        return $"{trade.Symbol} {expiry} {strike} {direction}";
     }
 
     private static object BuildAlertEmbed(Alert alert, AlertClassification classification)
