@@ -93,4 +93,30 @@ public class RiskEngineOptions
     [Range(0.01, 1.0, ErrorMessage = "OptionPartialCloseRatio must be between 0.01 and 1.0.")]
     public double OptionPartialCloseRatio { get; init; } = 0.5;
     public decimal DailyLossLimit { get; init; } = 0m;
+
+    // -- Choppy market regime config --
+ 
+    // VIX day-over-day spike % that counts as a chop signal.
+    [Range(0, 100)]
+    public double ChopVixSpikePct { get; init; } = 3.0;
+ 
+    // SPY ADX below this threshold counts as a chop signal (no clear trend).
+    [Range(0, 100)]
+    public double ChopAdxThreshold { get; init; } = 20.0;
+ 
+    // SPY above its 50MA by more than this % counts as a chop signal (extended, pullback risk).
+    [Range(0, 100)]
+    public double ChopSpyExtendedPct { get; init; } = 7.0;
+ 
+    // VIX level above this counts as a chop signal (elevated fear).
+    [Range(0, 200)]
+    public double ChopVixLevel { get; init; } = 20.0;
+ 
+    // Number of chop signals required to declare a choppy regime (0-4).
+    [Range(1, 4)]
+    public int ChopMinSignals { get; init; } = 2;
+ 
+    // Daily loss limit applied when the session is classified as choppy.
+    // Must be negative to activate. Set to 0 to disable.
+    public decimal ChopDailyLossLimit { get; init; } = 0m;
 }

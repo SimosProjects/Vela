@@ -75,35 +75,30 @@ builder.Services.AddHttpClient("Scheduler", client =>
 
 builder.Services.AddSingleton<IAlertNormalizer, AlertNormalizer>();
 builder.Services.AddSingleton<AlertMetrics>();
+builder.Services.AddSingleton<MarketRegimeService>();
 
 // Risk engine rules composed from options at startup.
-// BlockedSymbolsRule is inserted first so blocked symbols short-circuit before any other evaluation.
 builder.Services.AddSingleton<RiskEngineService>(sp =>
 {
     var riskOptions = sp.GetRequiredService<IOptions<RiskEngineOptions>>().Value;
-
+    var regime = sp.GetRequiredService<MarketRegimeService>();
+ 
     var rules = new List<IRiskRule>
     {
         new EntryOnlyRule(),
         new ApprovedOrHighScoreRule(riskOptions.ApprovedTraders, riskOptions.MinXScore),
+        new NoHighRiskRule(!riskOptions.AllowHigh, () => regime.IsChoppy, () => regime.ChopScore),
+        new NoLottoRule(!riskOptions.AllowLotto,   () => regime.IsChoppy, () => regime.ChopScore),
     };
-
-    if (!riskOptions.AllowLotto)
-        rules.Insert(1, new NoLottoRule());
-
-    if (!riskOptions.AllowHigh)
-        rules.Insert(1, new NoHighRiskRule());
-
+ 
     if (riskOptions.MinStockPriceDollars > 0)
         rules.Insert(1, new MinStockPriceRule(riskOptions.MinStockPriceDollars));
-
-    // Block same-day expiry entries after the configured cutoff hour
+ 
     rules.Insert(1, new No0DTEAfterCutoffRule(riskOptions.ZeroDteEntryCutoffHour));
-
-    // Blocked symbols inserted at position 0 so they short-circuit before all other rules
+ 
     if (riskOptions.BlockedSymbols.Count > 0)
         rules.Insert(0, new BlockedSymbolsRule(riskOptions.BlockedSymbols));
-
+ 
     return new RiskEngineService(rules);
 });
 

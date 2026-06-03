@@ -87,7 +87,7 @@ public class RiskEngineTests
     [Fact]
     public void NoLottoRule_StandardRisk_Passes()
     {
-        var rule   = new NoLottoRule();
+        var rule   = new NoLottoRule(configDisabled: false, isChoppy: () => false, chopScore: () => 0);
         var alert  = BuildAlert(risk: "standard");
         var result = rule.Evaluate(alert);
         Assert.True(result.Passed);
@@ -96,7 +96,7 @@ public class RiskEngineTests
     [Fact]
     public void NoLottoRule_LottoRisk_Fails()
     {
-        var rule   = new NoLottoRule();
+        var rule   = new NoLottoRule(configDisabled: true, isChoppy: () => false, chopScore: () => 0);
         var alert  = BuildAlert(risk: "lotto");
         var result = rule.Evaluate(alert);
         Assert.False(result.Passed);

@@ -31,6 +31,9 @@ public class TradeGuard
     private readonly decimal _dailyLossLimit;
     private readonly CsvTradeLogger? _csv;
 
+    private readonly decimal _chopDailyLossLimit;
+    private readonly MarketRegimeService? _regime;
+
     // In-memory open positions, keyed by match key (userName + contractSymbol or symbol)
     private readonly Dictionary<string, TradeRecord> _openTrades = new();
     private readonly Lock _lock = new();
@@ -46,7 +49,8 @@ public class TradeGuard
         IBrokerService broker,
         IOptions<RiskEngineOptions> riskOptions,
         ILogger<TradeGuard> logger,
-        CsvTradeLogger? csv = null)
+        CsvTradeLogger? csv = null,
+        MarketRegimeService? regime = null)
     {
         _broker                  = broker;
         _logger                  = logger;
@@ -56,6 +60,8 @@ public class TradeGuard
         _maxPositionsPerSymbol   = riskOptions.Value.MaxPositionsPerSymbol;
         _dailyLossLimit          = riskOptions.Value.DailyLossLimit;
         _csv                     = csv;
+        _chopDailyLossLimit      = riskOptions.Value.ChopDailyLossLimit;
+        _regime                  = regime;
     }
 
     /// <summary>
@@ -208,20 +214,27 @@ public class TradeGuard
                     $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})";
         }
 
-        // Only active when DailyLossLimit is set to a negative value and CsvTradeLogger is injected.
-        if (_dailyLossLimit < 0 && _csv is not null)
+        // Pick the effective limit based on current market regime.
+        // Choppy sessions use the tighter ChopDailyLossLimit when set.
+        var effectiveLimit = _regime?.IsChoppy == true && _chopDailyLossLimit < 0
+            ? _chopDailyLossLimit
+            : _dailyLossLimit;
+ 
+        if (effectiveLimit < 0 && _csv is not null)
         {
             var todayPnl = await _csv.GetTodayRealizedPnLAsync(ct);
-            if (todayPnl <= _dailyLossLimit)
+            if (todayPnl <= effectiveLimit)
             {
+                var regimeLabel = _regime?.IsChoppy == true ? "choppy" : "normal";
                 _logger.LogWarning(
-                    "Daily loss limit reached — today's realized P&L ${PnL:F2} at or below limit ${Limit:F2}. " +
+                    "Daily loss limit reached ({Regime} regime) — " +
+                    "today's realized P&L ${PnL:F2} at or below limit ${Limit:F2}. " +
                     "No new entries will be accepted for the rest of the session.",
-                    todayPnl, _dailyLossLimit);
-
+                    regimeLabel, todayPnl, effectiveLimit);
+ 
                 return
-                    $"Daily loss limit reached — today's realized P&L ${todayPnl:F2} " +
-                    $"(limit ${_dailyLossLimit:F2})";
+                    $"Daily loss limit reached ({regimeLabel} regime) — " +
+                    $"today's realized P&L ${todayPnl:F2} (limit ${effectiveLimit:F2})";
             }
         }
 
