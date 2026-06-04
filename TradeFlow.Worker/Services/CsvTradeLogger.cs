@@ -27,13 +27,13 @@ public class CsvTradeLogger
         "Symbol,Contract,Direction,Strike,Expiration," +
         "Contracts,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %," +
         "Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %," +
-        "Status,Result,UserName,P&L,P&L %";
+        "Status,Result,UserName,XScore,P&L,P&L %";
 
     private static readonly string StocksHeader =
         "Date Opened,Time Opened,Date Closed,Time Closed," +
         "Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %," +
         "Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %," +
-        "Status,Result,UserName,P&L,P&L %";
+        "Status,Result,UserName,XScore,P&L,P&L %";
 
     public CsvTradeLogger(
         IConfiguration config,
@@ -177,6 +177,7 @@ public class CsvTradeLogger
     // -- Helpers --
 
     // Reads all closed trades from a single CSV file for today and sums their P&L.
+    // Options pnlIdx=22, Stocks pnlIdx=18 — both shifted by 1 to account for XScore column.
     private static async Task<decimal> ReadTodayPnLFromFileAsync(
         string path,
         TradeType tradeType,
@@ -190,7 +191,7 @@ public class CsvTradeLogger
 
         var statusIdx     = tradeType == TradeType.Options ? 18 : 14;
         var closedDateIdx = 2;
-        var pnlIdx        = tradeType == TradeType.Options ? 21 : 17;
+        var pnlIdx        = tradeType == TradeType.Options ? 22 : 18;
 
         foreach (var line in lines.Skip(1))
         {
@@ -339,7 +340,8 @@ public class CsvTradeLogger
 
     private string BuildOpenRow(TradeRecord t)
     {
-        var et = TimeZoneInfo.ConvertTime(t.OpenedAt, EasternTime);
+        var et     = TimeZoneInfo.ConvertTime(t.OpenedAt, EasternTime);
+        var xScore = t.XScore.ToString("F0");
 
         if (t.TradeType == TradeType.Options)
         {
@@ -361,6 +363,7 @@ public class CsvTradeLogger
                 t.Status.ToString(),
                 t.Result.ToString(),
                 t.UserName ?? "",
+                xScore,
                 "", "");
         }
         else
@@ -379,6 +382,7 @@ public class CsvTradeLogger
                 t.Status.ToString(),
                 t.Result.ToString(),
                 t.UserName ?? "",
+                xScore,
                 "", "");
         }
     }
@@ -390,6 +394,7 @@ public class CsvTradeLogger
             ? TimeZoneInfo.ConvertTime(t.ClosedAt.Value, EasternTime)
             : (DateTimeOffset?)null;
         var pnlSign = t.PnL >= 0 ? "+" : "";
+        var xScore = t.XScore.ToString("F0");
 
         if (t.TradeType == TradeType.Options)
         {
@@ -415,6 +420,7 @@ public class CsvTradeLogger
                 t.Status.ToString(),
                 t.Result.ToString(),
                 t.UserName ?? "",
+                xScore,
                 $"{pnlSign}{t.PnL:F2}",
                 $"{pnlSign}{t.PnLPercent:F2}%");
         }
@@ -438,6 +444,7 @@ public class CsvTradeLogger
                 t.Status.ToString(),
                 t.Result.ToString(),
                 t.UserName ?? "",
+                xScore,
                 $"{pnlSign}{t.PnL:F2}",
                 $"{pnlSign}{t.PnLPercent:F2}%");
         }

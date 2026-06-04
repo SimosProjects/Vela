@@ -229,6 +229,12 @@ public class MarketConditionsLogger
 
             var quote  = quoteArr[0];
             var closes = ExtractDecimals(quote, "close");
+
+            // regularMarketPreviousClose is unavailable pre-market on Yahoo Finance.
+            // Fall back to the last completed daily close in the OHLCV array (yesterday's close).
+            if (prevClose == 0m && closes.Count > 0)
+                prevClose = closes[^1];
+
             var ma50   = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
             var ma200  = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Count > 0 ? closes.Average() : 0m;
 

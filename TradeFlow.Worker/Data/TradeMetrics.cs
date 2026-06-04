@@ -85,4 +85,7 @@ public class TradeMetric
     // Positive = filled higher than alerted (better for seller)
     // Negative = filled lower than alerted (worse for seller)
     public decimal? ExitSlippagePct { get; set; }
+
+    // xScore of the trader at time of alert, enables performance analysis by score band
+    public decimal? XScore { get; set; }
 }

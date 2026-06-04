@@ -330,8 +330,8 @@ public class IbkrEWrapper : EWrapper
     public void error(int id, int errorCode, string errorMsg)
     {
         // 2000-2999 are IBKR system informational codes; 10349 (market data farm notice)
-        // and 202 (cancel confirmation) are benign and expected during normal operation.
-        if (errorCode >= 2000 && errorCode < 3000 || errorCode is 10349 or 202)
+        // are benign and expected during normal operation.
+        if (errorCode >= 2000 && errorCode < 3000 || errorCode is 10349)
         {
             _logger.LogDebug("IBKR Info [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
         }
@@ -346,6 +346,16 @@ public class IbkrEWrapper : EWrapper
                 "IBKR Order rejected [201] Id {Id} — order will not execute. " +
                 "If this is a target or stop order, the position may be unprotected. Reason: {Message}",
                 id, errorMsg);
+        }
+        else if (errorCode == 202)
+        {
+            // 202 with a reason string means IBKR cancelled an order for a specific cause.
+            // Surface as Warning so it's visible at Info log level.
+            if (errorMsg.Contains("reason:", StringComparison.OrdinalIgnoreCase))
+                _logger.LogWarning(
+                    "IBKR Order cancelled [202] Id {Id}: {Message}", id, errorMsg);
+            else
+                _logger.LogDebug("IBKR Order cancelled [202] Id {Id}", id);
         }
         else if (errorCode == 404)
         {
