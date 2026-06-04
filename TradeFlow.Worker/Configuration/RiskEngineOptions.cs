@@ -119,4 +119,10 @@ public class RiskEngineOptions
     // Daily loss limit applied when the session is classified as choppy.
     // Must be negative to activate. Set to 0 to disable.
     public decimal ChopDailyLossLimit { get; init; } = 0m;
+
+    // Minimum difference between -DI and +DI to flag as a strong bearish trend
+    public double ChopBearishDiDiff { get; init; } = 5.0;
+
+    // Minimum % below 50MA to trigger the bearish structure signal (0 = any amount below)
+    public double ChopSpyBelowMaPct { get; init; } = 0.0;
 }

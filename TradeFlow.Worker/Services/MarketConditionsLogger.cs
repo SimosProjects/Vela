@@ -26,7 +26,7 @@ public class MarketConditionsLogger
         "Date," +
         "SPY Price,SPY Prev Close,SPY Gap %,SPY 50MA,SPY vs 50MA %,SPY 200MA,SPY vs 200MA %," +
         "QQQ Price,QQQ Prev Close,QQQ Gap %,QQQ 50MA,QQQ vs 50MA %,QQQ 200MA,QQQ vs 200MA %," +
-        "VIX,VIX Prev,VIX Delta %,SPY ADX,Chop Score,Market Bias";
+        "VIX,VIX Prev,VIX Delta %,SPY ADX,SPY PDI,SPY NDI,Chop Score,Market Bias";
 
     public MarketConditionsLogger(
         IConfiguration config,
@@ -84,7 +84,15 @@ public class MarketConditionsLogger
                 ? (vix.Price - vix.PrevClose) / vix.PrevClose * 100
                 : 0;
 
-            // -- Chop score: 1 point per signal, max 4 --
+            // Strong downtrend: ADX is trending but -DI leads +DI, indicating bearish direction.
+            // Differs from the no-trend signal — a strong bear trend is just as bad for calls as chop.
+            var spyBearishTrend = spy.Adx >= (decimal)_riskOptions.ChopAdxThreshold &&
+                                  spy.NDi  > spy.PDi + (decimal)_riskOptions.ChopBearishDiDiff;
+
+            // SPY below its 50MA signals bearish market structure at open.
+            var spyBelowMa = spy50MaPct < -(decimal)_riskOptions.ChopSpyBelowMaPct;
+
+            // -- Chop score: 1 point per signal, max 6 --
             var chopScore = 0;
 
             if (Math.Abs(vixDeltaPct) >= (decimal)_riskOptions.ChopVixSpikePct)
@@ -99,9 +107,15 @@ public class MarketConditionsLogger
             if (vix.Price >= (decimal)_riskOptions.ChopVixLevel)
                 chopScore++; // Elevated fear environment
 
+            if (spyBearishTrend)
+                chopScore++; // Strong downtrend detected via -DI > +DI
+
+            if (spyBelowMa)
+                chopScore++; // Bearish market structure — SPY below 50MA
+
             _regime.SetRegime(chopScore, _riskOptions.ChopMinSignals);
 
-            var bias = DetermineMarketBias(spy.Price, spy.Ma50, spy.Ma200, vix.Price);
+            var bias = DetermineMarketBias(spy.Price, spy.Ma50, spy.Ma200, vix.Price, spy.PDi, spy.NDi);
 
             var today = DateOnly.FromDateTime(
                 TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
@@ -115,7 +129,7 @@ public class MarketConditionsLogger
                 F(qqq.Ma50),      Pct(qqq50MaPct),
                 F(qqq.Ma200),     Pct(qqq200MaPct),
                 F(vix.Price),     F(vix.PrevClose), Pct(vixDeltaPct),
-                F(spy.Adx),
+                F(spy.Adx),       F(spy.PDi),       F(spy.NDi),
                 chopScore,
                 bias);
 
@@ -123,10 +137,12 @@ public class MarketConditionsLogger
 
             _logger.LogInformation(
                 "Market conditions logged — SPY ${Spy:F2} ({SpyGap:+0.00;-0.00}% gap) vs 50MA {Spy50:+0.00;-0.00}% | " +
-                "VIX {Vix:F2} ({VixDelta:+0.00;-0.00}%) | SPY ADX {Adx:F1} | ChopScore: {Chop}/4 | Bias: {Bias}",
+                "VIX {Vix:F2} ({VixDelta:+0.00;-0.00}%) | SPY ADX {Adx:F1} (+DI {PDi:F1} / -DI {NDi:F1}) | " +
+                "ChopScore: {Chop}/6 | Bias: {Bias}",
                 spy.Price, spyGapPct, spy50MaPct,
                 vix.Price, vixDeltaPct,
-                spy.Adx, chopScore, bias);
+                spy.Adx, spy.PDi, spy.NDi,
+                chopScore, bias);
         }
         catch (Exception ex)
         {
@@ -154,11 +170,11 @@ public class MarketConditionsLogger
         File.WriteAllLines(_csvPath, allLines);
 
         _logger.LogInformation(
-            "Market conditions: CSV header updated to include chop score and regime columns.");
+            "Market conditions: CSV header updated to include PDI/NDI and directional regime columns.");
     }
 
     // Fetches daily OHLCV data for the last 200 days from Yahoo Finance.
-    // Returns current price, previous close, 50MA, 200MA, and optionally ADX(14).
+    // Returns current price, previous close, 50MA, 200MA, and optionally ADX(14) with PDI/NDI.
     private async Task<SymbolData?> FetchYahooDataAsync(
         string symbol, bool includeAdx, CancellationToken ct)
     {
@@ -179,7 +195,6 @@ public class MarketConditionsLogger
             var json = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(json);
 
-            // Guard against Yahoo Finance returning null or empty result array
             if (!doc.RootElement.TryGetProperty("chart", out var chartEl))
             {
                 _logger.LogWarning("Market conditions: no 'chart' key in response for {Symbol}", symbol);
@@ -202,7 +217,6 @@ public class MarketConditionsLogger
                 return null;
             }
 
-            // regularMarketPrice falls back to chartPreviousClose if not present pre-market
             var price = meta.TryGetProperty("regularMarketPrice", out var priceEl)
                 ? priceEl.GetDecimal()
                 : meta.TryGetProperty("chartPreviousClose", out var fallbackEl)
@@ -224,7 +238,7 @@ public class MarketConditionsLogger
                 quoteArr.GetArrayLength() == 0)
             {
                 _logger.LogWarning("Market conditions: no quote data for {Symbol}", symbol);
-                return new SymbolData(price, prevClose, 0m, 0m, 0m);
+                return new SymbolData(price, prevClose, 0m, 0m);
             }
 
             var quote  = quoteArr[0];
@@ -235,18 +249,21 @@ public class MarketConditionsLogger
             if (prevClose == 0m && closes.Count > 0)
                 prevClose = closes[^1];
 
-            var ma50   = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
-            var ma200  = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Count > 0 ? closes.Average() : 0m;
+            var ma50  = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
+            var ma200 = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Count > 0 ? closes.Average() : 0m;
 
             var adx = 0m;
+            var pdi = 0m;
+            var ndi = 0m;
+
             if (includeAdx)
             {
                 var highs = ExtractDecimals(quote, "high");
                 var lows  = ExtractDecimals(quote, "low");
-                adx = CalculateAdx(highs, lows, closes);
+                (adx, pdi, ndi) = CalculateAdx(highs, lows, closes);
             }
 
-            return new SymbolData(price, prevClose, ma50, ma200, adx);
+            return new SymbolData(price, prevClose, ma50, ma200, adx, pdi, ndi);
         }
         catch (Exception ex)
         {
@@ -266,14 +283,16 @@ public class MarketConditionsLogger
     }
 
     // Calculates ADX(14) using Wilder's smoothing from OHLCV data.
-    // ADX below 20 = choppy/non-trending. ADX above 25 = trending. Returns 0 if insufficient data.
-    private static decimal CalculateAdx(
+    // Returns ADX strength plus the final +DI and -DI values for trend direction.
+    // +DI > -DI = bullish trend. -DI > +DI = bearish trend.
+    // ADX below 20 = choppy/non-trending. ADX above 25 = trending.
+    private static (decimal Adx, decimal PDi, decimal NDi) CalculateAdx(
         IList<decimal> highs,
         IList<decimal> lows,
         IList<decimal> closes,
         int period = 14)
     {
-        if (highs.Count < period * 2 + 1) return 0m;
+        if (highs.Count < period * 2 + 1) return (0m, 0m, 0m);
 
         var trs  = new List<decimal>();
         var pdms = new List<decimal>();
@@ -299,7 +318,9 @@ public class MarketConditionsLogger
         var apdm = pdms.Take(period).Sum();
         var andm = ndms.Take(period).Sum();
 
-        var dxValues = new List<decimal>();
+        var dxValues  = new List<decimal>();
+        var finalPdi  = 0m;
+        var finalNdi  = 0m;
 
         for (var i = period; i < trs.Count; i++)
         {
@@ -313,35 +334,51 @@ public class MarketConditionsLogger
             var ndi = 100m * andm / atr;
             var sum = pdi + ndi;
 
+            finalPdi = pdi;
+            finalNdi = ndi;
+
             if (sum == 0) continue;
 
             dxValues.Add(100m * Math.Abs(pdi - ndi) / sum);
         }
 
-        if (dxValues.Count < period) return 0m;
+        if (dxValues.Count < period) return (0m, 0m, 0m);
 
         var adx = dxValues.Take(period).Average();
         for (var i = period; i < dxValues.Count; i++)
             adx = (adx * (period - 1) + dxValues[i]) / period;
 
-        return Math.Round(adx, 2);
+        return (Math.Round(adx, 2), Math.Round(finalPdi, 2), Math.Round(finalNdi, 2));
     }
 
-    // Determines overall market bias from SPY position relative to moving averages and VIX level.
-    private static string DetermineMarketBias(decimal spyPrice, decimal ma50, decimal ma200, decimal vix)
+    // Determines overall market bias from SPY position relative to moving averages,
+    // VIX level, and ADX trend direction (+DI vs -DI).
+    private static string DetermineMarketBias(
+        decimal spyPrice, decimal ma50, decimal ma200, decimal vix,
+        decimal pdi, decimal ndi)
     {
-        var aboveBoth = spyPrice > ma50 && spyPrice > ma200;
-        var belowBoth = spyPrice < ma50 && spyPrice < ma200;
+        var aboveBoth    = spyPrice > ma50 && spyPrice > ma200;
+        var belowBoth    = spyPrice < ma50 && spyPrice < ma200;
+        var bullishTrend = pdi > ndi;
+        var bearishTrend = ndi > pdi;
 
-        if (aboveBoth && vix < 20) return "Bullish";
-        if (belowBoth && vix > 25) return "Bearish";
-        if (aboveBoth)             return "Cautiously Bullish";
-        if (belowBoth)             return "Cautiously Bearish";
+        if (aboveBoth && bullishTrend && vix < 20) return "Bullish";
+        if (belowBoth && bearishTrend && vix > 25) return "Bearish";
+        if (aboveBoth && bullishTrend)             return "Cautiously Bullish";
+        if (aboveBoth && bearishTrend)             return "Caution — Trend Reversal";
+        if (belowBoth)                             return "Cautiously Bearish";
         return "Neutral";
     }
 
     private static string F(decimal value)   => value.ToString("F2", CultureInfo.InvariantCulture);
     private static string Pct(decimal value) => $"{(value >= 0 ? "+" : "")}{value:F2}%";
 
-    private record SymbolData(decimal Price, decimal PrevClose, decimal Ma50, decimal Ma200, decimal Adx = 0m);
+    private record SymbolData(
+        decimal Price,
+        decimal PrevClose,
+        decimal Ma50,
+        decimal Ma200,
+        decimal Adx  = 0m,
+        decimal PDi  = 0m,
+        decimal NDi  = 0m);
 }
