@@ -22,7 +22,7 @@ public record TradeOrder(
     // From alert pricePaid. Actual fill may differ.
     decimal EstimatedEntryPrice,
 
-    // Options: $1,000 initial / $500 average. Stocks: $3,000 / $1,500.
+    // Options: $3,000 initial / $1,500 average. Stocks: $3,000 / $1,500.
     decimal BudgetUsed,
 
     // StopPrice is the initial trail reference price, not a fixed level.
@@ -34,5 +34,8 @@ public record TradeOrder(
     // Trailing stop percentage sent to IBKR. Risk-tiered by PositionSizer.
     double TrailPercent,
 
-    bool IsAverage = false
+    bool IsAverage = false,
+
+    // xScore of the trader at time of alert, threaded through for TradeRecord and CSV.
+    decimal XScore = 0m
 );

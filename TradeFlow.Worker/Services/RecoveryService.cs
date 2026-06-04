@@ -74,7 +74,6 @@ public class RecoveryService : IHostedService
             "Recovery: found {Count} open position(s) in CSV. Reconciling.",
             openTrades.Count);
 
-        // Fetch recent Xtrades alerts once, used to check for missed exit signals
         var recentAlerts = await FetchRecentAlertsAsync(ct);
 
         foreach (var trade in openTrades)
@@ -91,75 +90,67 @@ public class RecoveryService : IHostedService
         _logger.LogInformation(
             "Recovery: reconciling {Symbol} opened at {OpenedAt}",
             trade.Symbol, trade.OpenedAt);
- 
-        // Step 1: Close expired options contracts immediately at $0, no broker call needed
+
         if (trade.TradeType == TradeType.Options && IsExpired(trade))
         {
             _logger.LogWarning(
                 "Recovery: {Symbol} contract expired on {Expiration}. Closing at $0.",
                 trade.Symbol, trade.Expiration);
- 
+
             await CloseAndLogAsync(trade, 0m, TradeOutcome.Expired, ct);
             return;
         }
- 
-        // Step 2: Check if IBKR already closed the position (stop or target hit while down)
+
         var ibkrPrice = await _broker.GetCurrentPositionPriceAsync(trade, ct);
         if (ibkrPrice <= 0)
         {
             _logger.LogWarning(
                 "Recovery: {Symbol} not found in IBKR positions. May have been closed while offline.",
                 trade.Symbol);
- 
+
             return;
         }
- 
-        // Step 3: Check if price has already passed stop or target
+
         if (ibkrPrice <= trade.StopPrice)
         {
             _logger.LogInformation(
                 "Recovery: {Symbol} current price ${Price:F2} is at or below stop ${Stop:F2}. Closing.",
                 trade.Symbol, ibkrPrice, trade.StopPrice);
- 
+
             await CloseAndLogAsync(trade, ibkrPrice, TradeOutcome.StoppedOut, ct);
             return;
         }
- 
+
         if (ibkrPrice >= trade.TargetPrice)
         {
             _logger.LogInformation(
                 "Recovery: {Symbol} current price ${Price:F2} is at or above target ${Target:F2}. Closing.",
                 trade.Symbol, ibkrPrice, trade.TargetPrice);
- 
+
             await CloseAndLogAsync(trade, ibkrPrice, TradeOutcome.TargetHit, ct);
             return;
         }
- 
-        // Step 4: Check Xtrades for a missed exit signal
+
         var missedExit = FindMissedExitSignal(trade, recentAlerts);
         if (missedExit is not null)
         {
             var exitPrice = missedExit.PriceAtExit ?? ibkrPrice;
- 
+
             _logger.LogInformation(
                 "Recovery: found missed exit signal for {Symbol} at ${Price:F2}. Closing.",
                 trade.Symbol, exitPrice);
- 
+
             await CloseAndLogAsync(trade, exitPrice, TradeOutcome.XtradesExit, ct);
             return;
         }
- 
-        // Step 5: Price is between stop and target, no missed exit signal
-        // Re-register in TradeGuard so the position is monitored going forward
+
         _logger.LogInformation(
             "Recovery: {Symbol} is healthy at ${Price:F2}. Re-registering in TradeGuard.",
             trade.Symbol, ibkrPrice);
- 
+
         ReRegisterTrade(trade);
     }
 
-    // Looks for a side:stc or side:btc alert from the same trader on the same contract
-    // that arrived after the position was opened
     private static Alert? FindMissedExitSignal(TradeRecord trade, List<Alert> recentAlerts)
     {
         return recentAlerts.FirstOrDefault(a =>
@@ -204,7 +195,6 @@ public class RecoveryService : IHostedService
         await _discord.NotifyPositionClosedAsync(closedTrade, ct);
     }
 
-    // Re-registers an open trade back into TradeGuard after a restart
     private void ReRegisterTrade(TradeRecord trade)
     {
         var order = new TradeOrder(
@@ -221,7 +211,8 @@ public class RecoveryService : IHostedService
             BudgetUsed:            trade.EntryAmount,
             StopPrice:             trade.StopPrice,
             TargetPrice:           trade.TargetPrice,
-            TrailPercent:          trade.TradeType == TradeType.Options ? 50.0 : 15.0);
+            TrailPercent:          trade.TradeType == TradeType.Options ? 50.0 : 15.0,
+            XScore:                trade.XScore);
 
         var result = new BrokerOrderResult(
             OrderId:       trade.OrderId,
@@ -239,7 +230,6 @@ public class RecoveryService : IHostedService
             "Recovery: {Symbol} re-registered in TradeGuard.", trade.Symbol);
     }
 
-    // Fetches up to 100 recent alerts from Xtrades to check for missed exit signals
     private async Task<List<Alert>> FetchRecentAlertsAsync(CancellationToken ct)
     {
         try
@@ -257,7 +247,6 @@ public class RecoveryService : IHostedService
         }
     }
 
-    // Reads all open trade rows from both CSV files
     private List<TradeRecord> ReadOpenTradesFromCsv()
     {
         var tradesDir = _config["Trades:Directory"]
@@ -286,7 +275,6 @@ public class RecoveryService : IHostedService
 
         foreach (var line in lines.Skip(1))
         {
-            // Skip summary lines and empty lines
             if (string.IsNullOrWhiteSpace(line) || line.StartsWith(",,"))
                 continue;
 
@@ -306,23 +294,84 @@ public class RecoveryService : IHostedService
 
             if (tradeType == TradeType.Options)
             {
-                // Options CSV column order:
-                // Date Opened, Time Opened, Date Closed, Time Closed,
-                // Symbol, Contract, Direction, Strike, Expiration,
-                // Contracts, Entry Price, Entry Amount,
-                // Exit Price, Exit Amount, Status, Result, UserName, P&L, P&L %
+                // Options column layout (0-indexed):
+                // 0  Date Opened        1  Time Opened
+                // 2  Date Closed        3  Time Closed
+                // 4  Symbol             5  Contract
+                // 6  Direction          7  Strike
+                // 8  Expiration         9  Contracts
+                // 10 Entry Price        11 Entry Amount
+                // 12 Entry Latency      13 Entry Slippage %
+                // 14 Exit Price         15 Exit Amount
+                // 16 Exit Latency       17 Exit Slippage %
+                // 18 Status             19 Result
+                // 20 UserName           21 XScore
+                // 22 P&L               23 P&L %
 
-                if (cols.Length < 19) return null;
+                if (cols.Length < 22) return null;
 
-                var status = Enum.TryParse<TradeStatus>(cols[14], out var s)
-                    ? s : TradeStatus.Open;
-
-                if (status != TradeStatus.Open) return null;
+                if (!Enum.TryParse<TradeStatus>(cols[18], out var status) ||
+                    status != TradeStatus.Open)
+                    return null;
 
                 decimal.TryParse(cols[10], NumberStyles.Any,
-                    CultureInfo.InvariantCulture, out var optEp);
+                    CultureInfo.InvariantCulture, out var entryPrice);
                 decimal.TryParse(cols[11], NumberStyles.Any,
-                    CultureInfo.InvariantCulture, out var optEa);
+                    CultureInfo.InvariantCulture, out var entryAmount);
+                decimal.TryParse(cols[21], NumberStyles.Any,
+                    CultureInfo.InvariantCulture, out var xScore);
+
+                return new TradeRecord
+                {
+                    AlertId         = string.Empty,
+                    OrderId         = string.Empty,
+                    StopOrderId     = null,
+                    TargetOrderId   = null,
+                    UserName        = cols[20],
+                    XScore          = xScore,
+                    Symbol          = cols[4],
+                    TradeType       = TradeType.Options,
+                    OptionsContract = cols[5],
+                    Direction       = cols[6],
+                    Strike          = decimal.TryParse(cols[7], out var strike) ? strike : null,
+                    Expiration      = cols[8],
+                    Quantity        = int.TryParse(cols[9], out var qty) ? qty : 0,
+                    EntryPrice      = entryPrice,
+                    EntryAmount     = entryAmount,
+                    StopPrice       = entryPrice * 0.50m,
+                    TargetPrice     = entryPrice * 3.00m,
+                    OpenedAt        = DateTimeOffset.TryParse(
+                                         $"{cols[0]} {cols[1]}",
+                                         out var opened) ? opened : DateTimeOffset.UtcNow,
+                    Status          = TradeStatus.Open,
+                };
+            }
+            else
+            {
+                // Stocks column layout (0-indexed):
+                // 0  Date Opened        1  Time Opened
+                // 2  Date Closed        3  Time Closed
+                // 4  Symbol             5  Shares
+                // 6  Entry Price        7  Entry Amount
+                // 8  Entry Latency      9  Entry Slippage %
+                // 10 Exit Price         11 Exit Amount
+                // 12 Exit Latency       13 Exit Slippage %
+                // 14 Status             15 Result
+                // 16 UserName           17 XScore
+                // 18 P&L               19 P&L %
+
+                if (cols.Length < 18) return null;
+
+                if (!Enum.TryParse<TradeStatus>(cols[14], out var status) ||
+                    status != TradeStatus.Open)
+                    return null;
+
+                var entryPrice = decimal.TryParse(cols[6], NumberStyles.Any,
+                    CultureInfo.InvariantCulture, out var ep) ? ep : 0m;
+                decimal.TryParse(cols[7], NumberStyles.Any,
+                    CultureInfo.InvariantCulture, out var entryAmount);
+                decimal.TryParse(cols[17], NumberStyles.Any,
+                    CultureInfo.InvariantCulture, out var xScore);
 
                 return new TradeRecord
                 {
@@ -331,63 +380,21 @@ public class RecoveryService : IHostedService
                     StopOrderId     = null,
                     TargetOrderId   = null,
                     UserName        = cols[16],
-                    Symbol          = cols[4],
-                    TradeType       = TradeType.Options,
-                    OptionsContract = cols[5],
-                    Direction       = cols[6],
-                    Strike          = decimal.TryParse(cols[7], out var strike) ? strike : null,
-                    Expiration      = cols[8],
-                    Quantity        = int.TryParse(cols[9], out var qty) ? qty : 0,
-                    EntryPrice      = optEp,
-                    EntryAmount     = optEa,
-                    StopPrice       = optEp * 0.50m,
-                    TargetPrice     = optEp * 3.00m,
-                    OpenedAt        = DateTimeOffset.TryParse(
-                                         $"{cols[0]} {cols[1]}",
-                                         out var optOpened) ? optOpened : DateTimeOffset.UtcNow,
-                    Status          = TradeStatus.Open,
-                };
-            }
-            else
-            {
-                // Stocks CSV column order:
-                // Date Opened, Time Opened, Date Closed, Time Closed,
-                // Symbol, Shares, Entry Price, Entry Amount,
-                // Exit Price, Exit Amount, Status, Result, UserName, P&L, P&L %
-
-                if (cols.Length < 15) return null;
-
-                var status = Enum.TryParse<TradeStatus>(cols[10], out var s)
-                    ? s : TradeStatus.Open;
-
-                if (status != TradeStatus.Open) return null;
-
-                var entryPrice = decimal.TryParse(cols[6], NumberStyles.Any,
-                    CultureInfo.InvariantCulture, out var stkEp) ? stkEp : 0m;
-                decimal.TryParse(cols[7], NumberStyles.Any,
-                    CultureInfo.InvariantCulture, out var stkEa);
-
-                return new TradeRecord
-                {
-                    AlertId         = string.Empty,
-                    OrderId         = string.Empty,
-                    StopOrderId     = null,
-                    TargetOrderId   = null,
-                    UserName        = cols[12],
+                    XScore          = xScore,
                     Symbol          = cols[4],
                     TradeType       = TradeType.Stock,
                     OptionsContract = null,
                     Direction       = null,
                     Strike          = null,
                     Expiration      = null,
-                    Quantity        = int.TryParse(cols[5], out var stkQty) ? stkQty : 0,
+                    Quantity        = int.TryParse(cols[5], out var qty) ? qty : 0,
                     EntryPrice      = entryPrice,
-                    EntryAmount     = stkEa,
+                    EntryAmount     = entryAmount,
                     StopPrice       = entryPrice * 0.85m,
                     TargetPrice     = entryPrice * 1.30m,
                     OpenedAt        = DateTimeOffset.TryParse(
                                          $"{cols[0]} {cols[1]}",
-                                         out var stkOpened) ? stkOpened : DateTimeOffset.UtcNow,
+                                         out var opened) ? opened : DateTimeOffset.UtcNow,
                     Status          = TradeStatus.Open,
                 };
             }
@@ -398,12 +405,10 @@ public class RecoveryService : IHostedService
         }
     }
 
-    // Returns true if the options contract expiration date has passed in ET.
-    // The expiration string is formatted as "Jun 19 2026" by CsvTradeLogger.
     private static bool IsExpired(TradeRecord trade)
     {
         if (trade.Expiration is null) return false;
- 
+
         if (!DateTimeOffset.TryParseExact(
                 trade.Expiration,
                 "MMM dd yyyy",
@@ -411,11 +416,11 @@ public class RecoveryService : IHostedService
                 DateTimeStyles.None,
                 out var expiration))
             return false;
- 
+
         var todayEt = TimeZoneInfo.ConvertTime(
             DateTimeOffset.UtcNow,
             TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).Date;
- 
+
         return expiration.Date < todayEt;
     }
 }

@@ -608,8 +608,9 @@ public class MarketSchedulerService : BackgroundService
 
             var entryPriceIndex = tradeType == TradeType.Options ? 10 : 6;
             var exitPriceIndex  = tradeType == TradeType.Options ? 14 : 10;
-            var pnlIndex        = tradeType == TradeType.Options ? 21 : 17;
-            var pnlPctIndex     = tradeType == TradeType.Options ? 22 : 18;
+            var xScoreIndex     = tradeType == TradeType.Options ? 21 : 17;
+            var pnlIndex        = tradeType == TradeType.Options ? 22 : 18;
+            var pnlPctIndex     = tradeType == TradeType.Options ? 23 : 19;
             var resultIndex     = tradeType == TradeType.Options ? 19 : 15;
             var qtyIndex        = tradeType == TradeType.Options ? 9  : 5;
 
@@ -617,6 +618,9 @@ public class MarketSchedulerService : BackgroundService
                 System.Globalization.CultureInfo.InvariantCulture, out var entryPrice);
             decimal.TryParse(cols[exitPriceIndex], System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var exitPrice);
+            decimal.TryParse(cols.Length > xScoreIndex ? cols[xScoreIndex] : "0",
+                System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var xScore);
             decimal.TryParse(cols[pnlIndex].TrimStart('+'), System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var pnl);
             decimal.TryParse(cols[pnlPctIndex].TrimStart('+').TrimEnd('%'),
@@ -632,6 +636,7 @@ public class MarketSchedulerService : BackgroundService
                 StopOrderId     = null,
                 TargetOrderId   = null,
                 UserName        = cols[0],
+                XScore          = xScore,
                 Symbol          = cols[4],
                 TradeType       = tradeType,
                 OptionsContract = null,

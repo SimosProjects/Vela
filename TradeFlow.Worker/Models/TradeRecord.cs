@@ -11,8 +11,8 @@ public record TradeRecord
     public required string OrderId { get; init; }
     public required string? StopOrderId { get; set; }
     public required string? TargetOrderId { get; init; }
-
     public required string UserName { get; init; }
+    public required decimal XScore { get; init; }
 
     // Instrument
     public required string Symbol { get; init; }
