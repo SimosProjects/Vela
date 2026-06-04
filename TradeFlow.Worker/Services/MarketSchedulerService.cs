@@ -663,9 +663,9 @@ public class MarketSchedulerService : BackgroundService
 
         return
         [
-            (8,           30,           "HealthCheck"),
-            (9,            0,           "MarketConditions"),
+            (9,           0,           "HealthCheck"),
             (9,           15,           "PositionSummary"),
+            (9,           20,           "MarketConditions"),
             (11,          23,           "HealthCheck"),
             (13,          17,           "HealthCheck"),
             (cutoff.Hour, cutoff.Minute,"SameDayExpiryClose"),

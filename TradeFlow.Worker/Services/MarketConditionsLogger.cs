@@ -179,15 +179,58 @@ public class MarketConditionsLogger
             var json = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(json);
 
-            var result    = doc.RootElement.GetProperty("chart").GetProperty("result")[0];
-            var meta      = result.GetProperty("meta");
-            var price     = meta.GetProperty("regularMarketPrice").GetDecimal();
-            var prevClose = meta.GetProperty("regularMarketPreviousClose").GetDecimal();
-            var quote     = result.GetProperty("indicators").GetProperty("quote")[0];
+            // Guard against Yahoo Finance returning null or empty result array
+            if (!doc.RootElement.TryGetProperty("chart", out var chartEl))
+            {
+                _logger.LogWarning("Market conditions: no 'chart' key in response for {Symbol}", symbol);
+                return null;
+            }
 
+            if (!chartEl.TryGetProperty("result", out var resultsEl) ||
+                resultsEl.ValueKind == JsonValueKind.Null ||
+                resultsEl.GetArrayLength() == 0)
+            {
+                _logger.LogWarning("Market conditions: empty result array for {Symbol}", symbol);
+                return null;
+            }
+
+            var result = resultsEl[0];
+
+            if (!result.TryGetProperty("meta", out var meta))
+            {
+                _logger.LogWarning("Market conditions: no 'meta' in result for {Symbol}", symbol);
+                return null;
+            }
+
+            // regularMarketPrice falls back to chartPreviousClose if not present pre-market
+            var price = meta.TryGetProperty("regularMarketPrice", out var priceEl)
+                ? priceEl.GetDecimal()
+                : meta.TryGetProperty("chartPreviousClose", out var fallbackEl)
+                    ? fallbackEl.GetDecimal()
+                    : 0m;
+
+            var prevClose = meta.TryGetProperty("regularMarketPreviousClose", out var prevEl)
+                ? prevEl.GetDecimal()
+                : 0m;
+
+            if (price == 0m)
+            {
+                _logger.LogWarning("Market conditions: could not determine price for {Symbol}", symbol);
+                return null;
+            }
+
+            if (!result.TryGetProperty("indicators", out var indicators) ||
+                !indicators.TryGetProperty("quote", out var quoteArr) ||
+                quoteArr.GetArrayLength() == 0)
+            {
+                _logger.LogWarning("Market conditions: no quote data for {Symbol}", symbol);
+                return new SymbolData(price, prevClose, 0m, 0m, 0m);
+            }
+
+            var quote  = quoteArr[0];
             var closes = ExtractDecimals(quote, "close");
             var ma50   = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
-            var ma200  = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Average();
+            var ma200  = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Count > 0 ? closes.Average() : 0m;
 
             var adx = 0m;
             if (includeAdx)

@@ -278,9 +278,8 @@ public class IbkrBrokerService : IBrokerService
 
     /// <summary>
     /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
-    /// an OCA group containing a TRAIL stop and optional LMT target. For same-day expiry
-    /// options (0DTE), the target order is skipped — trail stop only — to avoid margin
-    /// rejection on large quantities and to let winners run without a fixed ceiling.
+    /// an OCA group containing a TRAIL stop. The LMT target order is omitted until IBKR Level 3
+    /// options approval is granted — Level 2 rejects LMT sell orders in OCA groups.
     /// On timeout, waits an additional 10 seconds for a late ExecDetails callback before
     /// giving up — prevents ghost trades when the fill arrives after the timeout fires.
     /// </summary>
@@ -325,43 +324,32 @@ public class IbkrBrokerService : IBrokerService
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
             _logger.LogInformation(
-                "IBKR entry filled. OrderId: {OrderId} Status: {Status} — replacing stop with OCA trail+target",
+                "IBKR entry filled. OrderId: {OrderId} Status: {Status} — replacing stop with OCA trail",
                 orderId, state.Status);
 
             _connection.Client.cancelOrder(tempStopId);
             await Task.Delay(300, ct);
 
-            var ocaGroup      = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
-            var trailStopId   = orderId + 2;
-            var targetOrderId = orderId + 3;
+            var ocaGroup    = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+            var trailStopId = orderId + 2;
 
             var trailPercent = order.TrailPercent;
             var trailOrder   = BuildOcaTrailOrder(trailStopId, order.Quantity, trailPercent, ocaGroup);
 
-            var isZeroDte = order.TradeType == TradeType.Options &&
-                order.Expiration is not null &&
-                DateTimeOffset.TryParse(order.Expiration, out var expiry) &&
-                DateOnly.FromDateTime(expiry.DateTime) ==
-                DateOnly.FromDateTime(
-                    TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
-
             _connection.Client.placeOrder(trailStopId, contract, trailOrder);
 
-            if (!isZeroDte)
-            {
-                var targetOrder = BuildOcaLimitOrder(
-                    targetOrderId, order.Quantity,
-                    Math.Round((double)order.TargetPrice, 2), ocaGroup);
-                _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
-            }
+            // TODO: re-add LMT target order to OCA group once IBKR Level 3 options
+            // approval is granted (~July 2026). Removed due to Level 2 restriction.
+            // var targetOrderId = orderId + 3;
+            // var targetOrder   = BuildOcaLimitOrder(targetOrderId, order.Quantity,
+            //                         Math.Round((double)order.TargetPrice, 2), ocaGroup);
+            // _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
 
             _logger.LogInformation(
-                "IBKR OCA group placed — Trail: {TrailPct}% | Target: {Target} | OCA: {Oca}",
-                trailPercent,
-                isZeroDte ? "none (0DTE)" : $"${order.TargetPrice:F2}",
-                ocaGroup);
+                "IBKR OCA group placed — Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
+                trailPercent, ocaGroup);
 
-            RegisterStopOrderCallbacks(orderId, trailStopId, isZeroDte ? null : targetOrderId);
+            RegisterStopOrderCallbacks(orderId, trailStopId, null);
 
             var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
             var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
@@ -369,7 +357,7 @@ public class IbkrBrokerService : IBrokerService
             return new BrokerOrderResult(
                 OrderId:       orderId.ToString(),
                 StopOrderId:   trailStopId.ToString(),
-                TargetOrderId: isZeroDte ? null : targetOrderId.ToString(),
+                TargetOrderId: null, // TODO: restore targetOrderId.ToString() when Level 3 approved
                 FillPrice:     fillPrice,
                 FillQuantity:  order.Quantity,
                 FillAmount:    fillPrice * order.Quantity * multiplier,
@@ -401,43 +389,31 @@ public class IbkrBrokerService : IBrokerService
 
                 await Task.Delay(300, ct);
 
-                var ocaGroup      = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
-                var trailStopId   = orderId + 2;
-                var targetOrderId = orderId + 3;
+                var ocaGroup    = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+                var trailStopId = orderId + 2;
 
                 var trailOrder = BuildOcaTrailOrder(trailStopId, order.Quantity, order.TrailPercent, ocaGroup);
-
-                var isZeroDte = order.TradeType == TradeType.Options &&
-                    order.Expiration is not null &&
-                    DateTimeOffset.TryParse(order.Expiration, out var expiry) &&
-                    DateOnly.FromDateTime(expiry.DateTime) ==
-                    DateOnly.FromDateTime(
-                        TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
-
                 _connection.Client.placeOrder(trailStopId, contract, trailOrder);
 
-                if (!isZeroDte)
-                {
-                    var targetOrder = BuildOcaLimitOrder(
-                        targetOrderId, order.Quantity,
-                        Math.Round((double)order.TargetPrice, 2), ocaGroup);
-                    _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
-                }
+                // TODO: re-add LMT target order to OCA group once IBKR Level 3 options
+                // approval is granted (~July 2026). Removed due to Level 2 restriction.
+                // var targetOrderId = orderId + 3;
+                // var targetOrder   = BuildOcaLimitOrder(targetOrderId, order.Quantity,
+                //                         Math.Round((double)order.TargetPrice, 2), ocaGroup);
+                // _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
 
                 _logger.LogInformation(
-                    "IBKR OCA group placed for late fill — Trail: {TrailPct}% | Target: {Target} | OCA: {Oca}",
-                    order.TrailPercent,
-                    isZeroDte ? "none (0DTE)" : $"${order.TargetPrice:F2}",
-                    ocaGroup);
+                    "IBKR OCA group placed for late fill — Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
+                    order.TrailPercent, ocaGroup);
 
-                RegisterStopOrderCallbacks(orderId, trailStopId, isZeroDte ? null : targetOrderId);
+                RegisterStopOrderCallbacks(orderId, trailStopId, null);
 
                 var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
 
                 return new BrokerOrderResult(
                     OrderId:       orderId.ToString(),
                     StopOrderId:   trailStopId.ToString(),
-                    TargetOrderId: isZeroDte ? null : targetOrderId.ToString(),
+                    TargetOrderId: null, // TODO: restore targetOrderId.ToString() when Level 3 approved
                     FillPrice:     lateFillPrice,
                     FillQuantity:  order.Quantity,
                     FillAmount:    lateFillPrice * order.Quantity * multiplier,
@@ -744,9 +720,9 @@ public class IbkrBrokerService : IBrokerService
 
     // -- Helpers --
 
-    // Registers exec detail callbacks for trail and optionally target OCA orders.
+    // Registers exec detail callbacks for the trail stop and optionally the target OCA order.
     // When either fires, routes the fill to PositionMonitorService via the broker fill handler.
-    // targetOrderId is null for 0DTE positions where no target order is placed.
+    // targetOrderId is null when no target was placed (Level 2 restriction or 0DTE).
     private void RegisterStopOrderCallbacks(int entryOrderId, int trailStopId, int? targetOrderId)
     {
         var entryIdStr = entryOrderId.ToString();
@@ -884,7 +860,7 @@ public class IbkrBrokerService : IBrokerService
         };
 
     // Temporary bracket stop — placed atomically with the entry to ensure immediate protection.
-    // Cancelled and replaced with OCA trail+target once the entry fill is confirmed.
+    // Cancelled and replaced with OCA trail stop once the entry fill is confirmed.
     private static Order BuildStopOrder(int orderId, int parentId, int quantity, double stopPrice) =>
         new()
         {
@@ -912,20 +888,20 @@ public class IbkrBrokerService : IBrokerService
             Transmit        = true,
         };
 
-    // Limit target in the same OCA group as the trail stop.
-    private static Order BuildOcaLimitOrder(int orderId, int quantity, double limitPrice, string ocaGroup) =>
-        new()
-        {
-            OrderId       = orderId,
-            Action        = "SELL",
-            OrderType     = "LMT",
-            LmtPrice      = limitPrice,
-            TotalQuantity = quantity,
-            OcaGroup      = ocaGroup,
-            OcaType       = 1,
-            Tif           = "GTC",
-            Transmit      = true,
-        };
+    // TODO: restore when IBKR Level 3 options approval is granted (~July 2026)
+    // private static Order BuildOcaLimitOrder(int orderId, int quantity, double limitPrice, string ocaGroup) =>
+    //     new()
+    //     {
+    //         OrderId       = orderId,
+    //         Action        = "SELL",
+    //         OrderType     = "LMT",
+    //         LmtPrice      = limitPrice,
+    //         TotalQuantity = quantity,
+    //         OcaGroup      = ocaGroup,
+    //         OcaType       = 1,
+    //         Tif           = "GTC",
+    //         Transmit      = true,
+    //     };
 
     private static Order BuildCloseOrder(int orderId, TradeRecord trade) =>
         new()
