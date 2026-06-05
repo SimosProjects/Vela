@@ -125,4 +125,8 @@ public class RiskEngineOptions
 
     // Minimum % below 50MA to trigger the bearish structure signal (0 = any amount below)
     public double ChopSpyBelowMaPct { get; init; } = 0.0;
+
+    // Allowed Discord rank prefixes. Empty list disables the check.
+    // Prefix-matched: "Top Analyst" covers "Top Analyst 1", "Top Analyst 2", etc.
+    public List<string> AllowedDiscordRanks { get; init; } = [];
 }

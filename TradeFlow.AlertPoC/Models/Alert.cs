@@ -10,6 +10,11 @@ public record AlertsResponse(
     [property: JsonPropertyName("totalCount")] int          TotalCount
 );
 
+// Nested userMeta object, carries the Discord rank display name.
+public record AlertUserMeta(
+    [property: JsonPropertyName("discordRankDisplayName")] string? DiscordRankDisplayName
+);
+
 // Immutable DTO representing a single Xtrades alert off the wire.
 // Modelled as a record so value-based equality works for deduplication
 // without needing to override Equals/GetHashCode manually.
@@ -76,5 +81,9 @@ public record Alert(
 
     // Messages
     [property: JsonPropertyName("originalMessage")]                  string?  OriginalMessage,
-    [property: JsonPropertyName("originalExitMessage")]              string?  OriginalExitMessage
+    [property: JsonPropertyName("originalExitMessage")]              string?  OriginalExitMessage,
+
+    // Nested user metadata, source for DiscordRank after normalization
+    [property: JsonPropertyName("userMeta")]                         AlertUserMeta? UserMeta = null,
+    string? DiscordRank = null
 );

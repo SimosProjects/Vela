@@ -144,7 +144,8 @@ public class PositionSizer
             StopPrice:             stopPrice,
             TargetPrice:           targetPrice,
             TrailPercent:          trailPercent,
-            IsAverage:             isAverage);
+            IsAverage:             isAverage,
+            XScore:                (decimal)(alert.XScore ?? 0));
     }
 
     // -- Helpers --

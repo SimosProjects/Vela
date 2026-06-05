@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations.Schema;
+
 namespace TradeFlow.Worker.Data;
 
 /// <summary>
@@ -87,5 +89,6 @@ public class TradeMetric
     public decimal? ExitSlippagePct { get; set; }
 
     // xScore of the trader at time of alert, enables performance analysis by score band
+    [Column("x_score")]
     public decimal? XScore { get; set; }
 }
