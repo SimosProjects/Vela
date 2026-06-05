@@ -11,6 +11,15 @@ if (string.IsNullOrWhiteSpace(token))
 
 Console.WriteLine($"[INFO] Token loaded ({token.Length} chars)");
 
+var allowedRanks = new List<string>
+{
+    "Top Analyst",
+    "Analyst",
+    "Junior Analyst",
+    "Top Trader"
+};
+var approvedTraders = new List<string> { "Fibonaccizer", "Theo", "Avalace" };
+
 var client = new AlertApiClient(token);
 var normalizer = new AlertNormalizer();
 
@@ -18,7 +27,8 @@ var riskEngine = new RiskEngineService([
     new EntryOnlyRule(),
     new NoLottoRule(configDisabled: false, isChoppy: () => false, chopScore: () => 0),
     new MinXScoreRule(minimumScore: 60.0),
-    new ApprovedTraderRule([ "Fibonaccizer", "Theo", "Avalace" ])
+    new ApprovedTraderRule(approvedTraders),
+    new MinDiscordRankRule(allowedRanks, approvedTraders)
 ]);
     
 using var cts = new CancellationTokenSource();
@@ -92,7 +102,7 @@ foreach (var (alert, classification, riskResult) in processed.Take(10))
     }
 
     Console.WriteLine($"  ID          : {alert.Id}");
-    Console.WriteLine($"  Trader      : {alert.UserName}  (xScore: {alert.XScore})");
+    Console.WriteLine($"  Trader      : {alert.UserName}  (xScore: {alert.XScore})  |  Rank: {alert.DiscordRank ?? "Unranked"}");
     Console.WriteLine($"  Symbol      : {alert.Symbol}");
     Console.WriteLine($"  Side        : {alert.Side}  |  Risk: {alert.Risk}");
     Console.WriteLine($"  Direction   : {alert.Direction}");

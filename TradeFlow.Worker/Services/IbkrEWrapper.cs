@@ -349,11 +349,11 @@ public class IbkrEWrapper : EWrapper
         }
         else if (errorCode == 202)
         {
-            // 202 with a reason string means IBKR cancelled an order for a specific cause.
-            // Surface as Warning so it's visible at Info log level.
-            if (errorMsg.Contains("reason:", StringComparison.OrdinalIgnoreCase))
-                _logger.LogWarning(
-                    "IBKR Order cancelled [202] Id {Id}: {Message}", id, errorMsg);
+            var idx    = errorMsg.IndexOf("reason:", StringComparison.OrdinalIgnoreCase);
+            var reason = idx >= 0 ? errorMsg[(idx + 7)..].Trim() : "";
+
+            if (!string.IsNullOrEmpty(reason))
+                _logger.LogWarning("IBKR Order cancelled [202] Id {Id}: {Message}", id, errorMsg);
             else
                 _logger.LogDebug("IBKR Order cancelled [202] Id {Id}", id);
         }
