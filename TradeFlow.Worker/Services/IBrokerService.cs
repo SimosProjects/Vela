@@ -79,4 +79,14 @@ public interface IBrokerService
     /// The handler receives the entry order ID, fill price, and trade outcome.
     /// </summary>
     void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler);
+
+    /// <summary>
+    /// Fetches daily OHLCV bars for a stock symbol from the broker's historical data feed.
+    /// Used by MarketConditionsLogger to compute moving averages and ADX without Yahoo Finance.
+    /// Returns an empty list if the broker is unavailable or data cannot be retrieved.
+    /// </summary>
+    Task<List<HistoricalBar>> GetHistoricalBarsAsync(
+        string symbol,
+        int barCount,
+        CancellationToken ct = default);
 }

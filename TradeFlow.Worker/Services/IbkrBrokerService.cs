@@ -718,6 +718,69 @@ public class IbkrBrokerService : IBrokerService
             gatewayId, maxDbOrderId, target + 10);
     }
 
+    /// <summary>
+    /// Fetches daily OHLCV bars for a stock symbol via Gateway's reqHistoricalData.
+    /// Used by MarketConditionsLogger to compute moving averages and ADX.
+    /// Requests barCount + 14 extra bars so ADX(14) has enough warmup data.
+    /// Returns an empty list if Gateway is unavailable or the request times out.
+    /// </summary>
+    public async Task<List<HistoricalBar>> GetHistoricalBarsAsync(
+        string symbol,
+        int barCount,
+        CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return [];
+
+        var reqId    = NextReqId();
+        var tcs      = _connection.Wrapper.RegisterHistoricalDataCallback(reqId);
+        var contract = new Contract
+        {
+            Symbol   = symbol,
+            SecType  = "STK",
+            Exchange = "SMART",
+            Currency = "USD",
+        };
+
+        // Request extra bars for ADX(14) warmup — ADX needs 2*period bars minimum
+        var durationDays = barCount + 28;
+        var endDateTime  = string.Empty; // empty = now
+        var durationStr  = $"{durationDays} D";
+
+        _connection.Client.reqHistoricalData(
+            reqId,
+            contract,
+            endDateTime,
+            durationStr,
+            "1 day",
+            "TRADES",
+            1,    // useRTH=1, regular trading hours only
+            1,    // formatDate=1, returns yyyyMMdd string
+            false,
+            null);
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(30));
+
+            var bars = await tcs.Task.WaitAsync(cts.Token);
+
+            _logger.LogDebug(
+                "IBKR historical data received — {Symbol} {Count} bars",
+                symbol, bars.Count);
+
+            return bars;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning(
+                "IBKR GetHistoricalBars timed out for {Symbol} — falling back to Yahoo Finance.",
+                symbol);
+            _connection.Wrapper.UnregisterHistoricalDataCallback(reqId);
+            return [];
+        }
+    }
+
     // -- Helpers --
 
     // Registers exec detail callbacks for the trail stop and optionally the target OCA order.

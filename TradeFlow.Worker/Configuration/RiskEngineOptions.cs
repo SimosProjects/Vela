@@ -129,4 +129,33 @@ public class RiskEngineOptions
     // Allowed Discord rank prefixes. Empty list disables the check.
     // Prefix-matched: "Top Analyst" covers "Top Analyst 1", "Top Analyst 2", etc.
     public List<string> AllowedDiscordRanks { get; init; } = [];
+
+    // Position sizing multiplier when regime is Bullish (SPY above 20MA, VIX calm).
+    // 1.0 = full budget. Applied to both options and stock initial/average budgets.
+    [Range(0.1, 1.0)]
+    public double RegimeBullishSizingPct { get; init; } = 1.0;
+
+    // Position sizing multiplier when regime is Choppy (SPY near 20MA or VIX elevated).
+    [Range(0.1, 1.0)]
+    public double RegimeChoppySizingPct { get; init; } = 0.5;
+
+    // Position sizing multiplier when regime is Bearish (SPY below 20MA, VIX high).
+    [Range(0.1, 1.0)]
+    public double RegimeBearishSizingPct { get; init; } = 0.25;
+
+    // When true and regime is Bearish, call option entries are blocked for the session.
+    public bool RegimeBearishBlockCalls { get; init; } = true;
+
+    // VIX level that, combined with SPY below 20MA, triggers the Bearish regime.
+    [Range(0, 100)]
+    public double RegimeVixBearishThreshold { get; init; } = 20.0;
+
+    // VIX level that triggers Choppy when SPY is above 20MA but fear is elevated.
+    [Range(0, 100)]
+    public double RegimeVixChoppyThreshold { get; init; } = 18.0;
+
+    // % deviation below 50MA that triggers the Bearish regime master cap
+    // regardless of 20MA position. 0 = disabled.
+    [Range(0, 10)]
+    public double RegimeSpyBelow50MaPct { get; init; } = 0.0;
 }

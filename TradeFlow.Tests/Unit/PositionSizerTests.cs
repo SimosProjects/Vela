@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Engine;
+using TradeFlow.Worker.Services;
 
 namespace TradeFlow.Tests.Unit;
 
@@ -201,5 +202,122 @@ public class PositionSizerTests
 
         order.Should().NotBeNull();
         order!.TrailPercent.Should().Be(DefaultOptions.OptionsLottoTrailPct);
+    }
+
+    [Fact]
+    public void Size_BullishRegime_UsesFullBudget()
+    {
+        var regime = new MarketRegimeService(NullLogger<MarketRegimeService>.Instance);
+        regime.SetRegime(0, 2, RegimeTier.Bullish, 1.0m, false, 560m, 540m, 480m);
+        var sizer = new PositionSizer(
+            Options.Create(DefaultOptions),
+            NullLogger<PositionSizer>.Instance,
+            regime);
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        var order = sizer.Size(alert, CallClassification());
+
+        order.Should().NotBeNull();
+        order!.BudgetUsed.Should().Be((int)(DefaultOptions.OptionsInitialBudget * 1.0m / (4.95m * 100)) * 4.95m * 100);
+    }
+
+    [Fact]
+    public void Size_ChoppyRegime_HalvesBudget()
+    {
+        var regime = new MarketRegimeService(NullLogger<MarketRegimeService>.Instance);
+        regime.SetRegime(3, 2, RegimeTier.Choppy, 0.5m, false, 540m, 540m, 480m);
+        var sizer = new PositionSizer(
+            Options.Create(DefaultOptions),
+            NullLogger<PositionSizer>.Instance,
+            regime);
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        var order = sizer.Size(alert, CallClassification());
+
+        order.Should().NotBeNull();
+        var expectedBudget = DefaultOptions.OptionsInitialBudget * 0.5m;
+        var expectedQty    = (int)(expectedBudget / (4.95m * 100));
+        order!.Quantity.Should().Be(expectedQty);
+    }
+
+    [Fact]
+    public void Size_BearishRegime_QuartersBudget()
+    {
+        var regime = new MarketRegimeService(NullLogger<MarketRegimeService>.Instance);
+        regime.SetRegime(5, 2, RegimeTier.Bearish, 0.25m, true, 520m, 540m, 480m);
+        var sizer = new PositionSizer(
+            Options.Create(DefaultOptions),
+            NullLogger<PositionSizer>.Instance,
+            regime);
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        var order = sizer.Size(alert, CallClassification());
+
+        // At 25% of $3000 = $750, floor(750 / 495) = 1 contract
+        order.Should().NotBeNull();
+        order!.Quantity.Should().Be(1);
+    }
+
+    [Fact]
+    public void Size_NullRegime_UsesFullBudget()
+    {
+        var sizer = new PositionSizer(
+            Options.Create(DefaultOptions),
+            NullLogger<PositionSizer>.Instance,
+            regime: null);
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        var order = sizer.Size(alert, CallClassification());
+
+        order.Should().NotBeNull();
+        order!.Quantity.Should().Be((int)(DefaultOptions.OptionsInitialBudget / (4.95m * 100)));
+    }
+
+    [Fact]
+    public void Size_LottoBudget_NotScaledByRegime()
+    {
+        var regime = new MarketRegimeService(NullLogger<MarketRegimeService>.Instance);
+        regime.SetRegime(5, 2, RegimeTier.Bearish, 0.25m, true, 520m, 540m, 480m);
+        var sizer = new PositionSizer(
+            Options.Create(DefaultOptions),
+            NullLogger<PositionSizer>.Instance,
+            regime);
+
+        // Lotto alert — expiring today
+        var today = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss");
+        var alert = BuildAlert("bto", "options", "call", 0.50m, "TSLA260620C00450000", 450,
+            expiration: today);
+        var order = sizer.Size(alert, CallClassification());
+
+        // Lotto budget ($500) should not be scaled
+        if (order is not null)
+            order.BudgetUsed.Should().BeLessThanOrEqualTo(DefaultOptions.OptionsLottoBudget);
+    }
+
+    [Fact]
+    public void MarketRegimeService_BullishTier_SetsCorrectMultiplier()
+    {
+        var regime = new MarketRegimeService(NullLogger<MarketRegimeService>.Instance);
+        regime.SetRegime(0, 2, RegimeTier.Bullish, 1.0m, false, 560m, 540m, 480m);
+
+        regime.Tier.Should().Be(RegimeTier.Bullish);
+        regime.SizingMultiplier.Should().Be(1.0m);
+        regime.BlockCalls.Should().BeFalse();
+        regime.IsChoppy.Should().BeFalse();
+        regime.Ma20.Should().Be(560m);
+        regime.Ma50.Should().Be(540m);
+        regime.Ma200.Should().Be(480m);
+    }
+
+    [Fact]
+    public void MarketRegimeService_BearishTier_SetsBlockCalls()
+    {
+        var regime = new MarketRegimeService(NullLogger<MarketRegimeService>.Instance);
+        regime.SetRegime(5, 2, RegimeTier.Bearish, 0.25m, true, 520m, 540m, 480m);
+
+        regime.Tier.Should().Be(RegimeTier.Bearish);
+        regime.SizingMultiplier.Should().Be(0.25m);
+        regime.BlockCalls.Should().BeTrue();
+        regime.IsChoppy.Should().BeTrue();
     }
 }

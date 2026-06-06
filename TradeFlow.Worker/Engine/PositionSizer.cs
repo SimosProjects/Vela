@@ -19,16 +19,18 @@ namespace TradeFlow.Worker.Engine;
 public class PositionSizer
 {
     private readonly RiskEngineOptions _options;
+    private readonly MarketRegimeService? _regime;
     private readonly ILogger<PositionSizer> _logger;
 
     private const decimal OptionsStopMultiplier = 0.50m;
     private const decimal StockStopMultiplier   = 0.85m;
     private const int     MinQuantity           = 1;
 
-    public PositionSizer(IOptions<RiskEngineOptions> options, ILogger<PositionSizer> logger)
+    public PositionSizer(IOptions<RiskEngineOptions> options, ILogger<PositionSizer> logger, MarketRegimeService? regime = null)
     {
         _options = options.Value;
-        _logger  = logger;
+        _regime = regime;
+        _logger = logger;
     }
 
     public TradeOrder? Size(Alert alert, AlertClassification classification, bool isAverage = false)
@@ -69,6 +71,12 @@ public class PositionSizer
                 ? (isAverage ? _options.OptionsLottoAverageBudget : _options.OptionsLottoBudget)
                 : (isAverage ? _options.OptionsAverageBudget : _options.OptionsInitialBudget)
             : (isAverage ? _options.StockAverageBudget : _options.StockInitialBudget);
+
+        // Apply regime-aware sizing multiplier — set once at market open by MarketConditionsLogger.
+        // Multiplier is 1.0 (Bullish), 0.5 (Choppy), or 0.25 (Bearish) by default.
+        // Lotto budget is not scaled — it is already sized for maximum risk tolerance.
+        if (effectiveRisk != "lotto" && _regime is not null)
+            budget = budget * _regime.SizingMultiplier;
 
         // Apply trader restriction if configured to scale budget by allocation percentage.
         var userName = alert.UserName ?? string.Empty;
