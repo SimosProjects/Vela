@@ -244,9 +244,7 @@ public class MarketConditionsLogger
             var quote  = quoteArr[0];
             var closes = ExtractDecimals(quote, "close");
 
-            // Falls back when API returns 0 OR when it returns the current price unchanged
-            // (stale pre-market behaviour where prevClose == price)
-            if ((prevClose == 0m || prevClose == price) && closes.Count > 0)
+            if (closes.Count > 0)
                 prevClose = closes[^1];
 
             var ma50  = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
