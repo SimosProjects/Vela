@@ -13,7 +13,7 @@ public class IbkrEWrapper : EWrapper
 
     private readonly Dictionary<int, TaskCompletionSource<OrderFill>> _orderCallbacks = new();
     private readonly Dictionary<int, TaskCompletionSource<string>> _accountCallbacks = new();
-    private readonly Dictionary<string, TaskCompletionSource<decimal>> _positionCallbacks = new();
+    private readonly Dictionary<string, TaskCompletionSource<(decimal Price, int Quantity)>> _positionCallbacks = new();
     private readonly Dictionary<int, string> _rejectionReasons = new();
     private readonly Dictionary<int, Action<decimal>> _execDetailsCallbacks = new();
     private readonly Dictionary<int, TaskCompletionSource<decimal>> _execDetailsTcsCallbacks = new();
@@ -121,7 +121,7 @@ public class IbkrEWrapper : EWrapper
         {
             if (_positionCallbacks.TryGetValue(key, out var tcs))
             {
-                tcs.TrySetResult((decimal)avgCost);
+                tcs.TrySetResult(((decimal)avgCost, (int)pos));
                 _positionCallbacks.Remove(key);
             }
         }
@@ -265,10 +265,12 @@ public class IbkrEWrapper : EWrapper
 
     /// <summary>
     /// Registers a callback that resolves when IBKR returns position data for the given symbol key.
+    /// Resolves with both the average cost and the actual held quantity.
+    /// A negative quantity indicates a short position, the caller must guard against this.
     /// </summary>
-    public TaskCompletionSource<decimal> RegisterPositionCallback(string key)
+    public TaskCompletionSource<(decimal Price, int Quantity)> RegisterPositionCallback(string key)
     {
-        var tcs = new TaskCompletionSource<decimal>();
+        var tcs = new TaskCompletionSource<(decimal Price, int Quantity)>();
         lock (_lock) { _positionCallbacks[key] = tcs; }
         return tcs;
     }

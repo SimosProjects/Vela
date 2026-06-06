@@ -136,12 +136,15 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
-    /// Returns the current average cost of an open position from IBKR position data.
-    /// Used by PositionMonitorService to check stop and target thresholds.
+    /// Returns the current average cost and actual held quantity of an open position from IBKR.
+    /// Quantity will be negative for short positions — BrokerExecutionService guards against this.
+    /// Returns (0, 0) if the position is not found or the request times out.
     /// </summary>
-    public async Task<decimal> GetCurrentPositionPriceAsync(TradeRecord trade, CancellationToken ct = default)
+    public async Task<(decimal Price, int Quantity)> GetCurrentPositionPriceAsync(
+        TradeRecord trade,
+        CancellationToken ct = default)
     {
-        if (!EnsureConnected()) return 0m;
+        if (!EnsureConnected()) return (0m, 0);
 
         var key = trade.TradeType == TradeType.Options
             ? $"{trade.Symbol}::{trade.OptionsContract}"
@@ -154,15 +157,18 @@ public class IbkrBrokerService : IBrokerService
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
-            var price = await tcs.Task.WaitAsync(cts.Token);
-            _logger.LogDebug("IBKR current price for {Symbol}: ${Price:F2}", trade.Symbol, price);
-            return price;
+            var (price, qty) = await tcs.Task.WaitAsync(cts.Token);
+            _logger.LogDebug(
+                "IBKR position for {Symbol}: avgCost ${Price:F2} qty {Qty}",
+                trade.Symbol, price, qty);
+            return (price, qty);
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("IBKR GetCurrentPositionPrice timed out for {Symbol}.", trade.Symbol);
+            _logger.LogWarning(
+                "IBKR GetCurrentPositionPrice timed out for {Symbol}.", trade.Symbol);
             _connection.Wrapper.UnregisterPositionCallback(key);
-            return 0m;
+            return (0m, 0);
         }
         finally
         {

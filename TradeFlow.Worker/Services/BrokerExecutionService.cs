@@ -126,8 +126,7 @@ public class BrokerExecutionService
             }
             else
             {
-                var slippage = Math.Abs(currentPrice - alertedPrice)
-                    / alertedPrice * 100;
+                var slippage = Math.Abs(currentPrice - alertedPrice) / alertedPrice * 100;
 
                 if (slippage > _riskOptions.MaxEntrySlippagePct)
                 {
@@ -199,28 +198,38 @@ public class BrokerExecutionService
                 OpenedAt        = DateTimeOffset.UtcNow,
             };
 
-            var positionPrice = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
-            if (positionPrice <= 0)
+            var (positionPrice, positionQty) = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
+
+            if (positionPrice <= 0 || positionQty <= 0)
             {
                 _logger.LogWarning(
-                    "Gateway shows no position for {Symbol} after timeout — order not recorded. " +
-                    "The order was likely rejected or unfilled.",
-                    alert.Symbol);
+                    "Gateway shows no long position for {Symbol} after timeout (price={Price} qty={Qty}) — " +
+                    "order not recorded.",
+                    alert.Symbol, positionPrice, positionQty);
                 return;
             }
 
-            _logger.LogInformation(
-                "Gateway confirmed position for {Symbol} at ${Price:F2} after timeout — recording trade.",
-                alert.Symbol, positionPrice);
+            if (positionQty != order.Quantity)
+            {
+                _logger.LogWarning(
+                    "Gateway qty mismatch for {Symbol} — ordered {Ordered} but IBKR holds {Actual}. " +
+                    "Recording actual qty to prevent ghost short on close.",
+                    alert.Symbol, order.Quantity, positionQty);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Gateway confirmed position for {Symbol} — qty {Qty} @ ${Price:F2}.",
+                    alert.Symbol, positionQty, positionPrice);
+            }
 
-            // Use the confirmed position price so CSV and metrics reflect the actual
-            // entry rather than a zero or estimated value from the timed-out result.
             var pendingMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
             result = result with
             {
-                FillPrice  = positionPrice,
-                FillAmount = positionPrice * order.Quantity * pendingMultiplier,
-                Status     = OrderStatus.Filled,
+                FillPrice    = positionPrice,
+                FillQuantity = positionQty,
+                FillAmount   = positionPrice * positionQty * pendingMultiplier,
+                Status       = OrderStatus.Filled,
             };
         }
 

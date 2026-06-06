@@ -17,10 +17,13 @@ public interface IBrokerService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Returns the current market price of an open position from IBKR position data.
-    /// Used by PositionMonitorService to evaluate stop and target thresholds.
+    /// Returns the current average cost and actual held quantity of an open position from IBKR.
+    /// Used by BrokerExecutionService to verify a position exists after an entry timeout,
+    /// and by PositionMonitorService to check stop and target thresholds.
+    /// A quantity of zero or negative means no valid long position — caller must not record the trade.
+    /// Returns (0, 0) if the broker is unavailable or times out.
     /// </summary>
-    Task<decimal> GetCurrentPositionPriceAsync(
+    Task<(decimal Price, int Quantity)> GetCurrentPositionPriceAsync(
         TradeRecord trade,
         CancellationToken ct = default);
 

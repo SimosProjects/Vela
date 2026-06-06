@@ -247,4 +247,90 @@ public class BrokerExecutionServiceTests
         _brokerMock.Verify(b => b.ClosePositionAsync(
             It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), default), Times.Never);
     }
+
+    [Fact]
+    public async Task HandleEntryAsync_Pending_ZeroQty_DoesNotRecordTrade()
+    {
+        _brokerMock
+            .Setup(b => b.GetCurrentMarketPriceAsync(
+                It.IsAny<string>(), It.IsAny<TradeType>(),
+                It.IsAny<string?>(), It.IsAny<decimal?>(),
+                It.IsAny<string?>(), default))
+            .ReturnsAsync(4.95m);
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "1", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 0m, FillQuantity: 0, FillAmount: 0m,
+                Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default))
+            .ReturnsAsync((0m, 0));
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        _guard.GetOpenTrades().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_Pending_NegativeQty_DoesNotRecordTrade()
+    {
+        _brokerMock
+            .Setup(b => b.GetCurrentMarketPriceAsync(
+                It.IsAny<string>(), It.IsAny<TradeType>(),
+                It.IsAny<string?>(), It.IsAny<decimal?>(),
+                It.IsAny<string?>(), default))
+            .ReturnsAsync(4.95m);
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "1", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 0m, FillQuantity: 0, FillAmount: 0m,
+                Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default))
+            .ReturnsAsync((4.95m, -2));
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        _guard.GetOpenTrades().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_Pending_PartialFill_RecordsActualQty()
+    {
+        _brokerMock
+            .Setup(b => b.GetCurrentMarketPriceAsync(
+                It.IsAny<string>(), It.IsAny<TradeType>(),
+                It.IsAny<string?>(), It.IsAny<decimal?>(),
+                It.IsAny<string?>(), default))
+            .ReturnsAsync(4.95m);
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "1", StopOrderId: "2", TargetOrderId: null,
+                FillPrice: 0m, FillQuantity: 0, FillAmount: 0m,
+                Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default))
+            .ReturnsAsync((4.95m, 3));
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        var trade = _guard.GetOpenTrades().FirstOrDefault();
+        trade.Should().NotBeNull();
+        trade!.Quantity.Should().Be(3);
+    }
 }

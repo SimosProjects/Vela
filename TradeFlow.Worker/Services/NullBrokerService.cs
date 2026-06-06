@@ -50,17 +50,17 @@ public class NullBrokerService : IBrokerService
     }
 
     /// <summary>
-    /// Returns a simulated current price at 10% above entry for testing position monitoring.
+    /// Returns a simulated position at 10% above entry with the full recorded quantity.
     /// </summary>
-    public Task<decimal> GetCurrentPositionPriceAsync(
+    public Task<(decimal Price, int Quantity)> GetCurrentPositionPriceAsync(
         TradeRecord trade,
         CancellationToken ct = default)
     {
         var simulatedPrice = trade.EntryPrice * 1.10m;
         _logger.LogDebug(
-            "[NullBroker] GetCurrentPositionPrice {Symbol} → ${Price:F2} simulated",
-            trade.Symbol, simulatedPrice);
-        return Task.FromResult(simulatedPrice);
+            "[NullBroker] GetCurrentPositionPrice {Symbol} → ${Price:F2} x{Qty} simulated",
+            trade.Symbol, simulatedPrice, trade.Quantity);
+        return Task.FromResult((simulatedPrice, trade.Quantity));
     }
 
     /// <summary>
