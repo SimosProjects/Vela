@@ -1,15 +1,15 @@
-Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,P&L,P&L %
-2026-06-02,10:05:51,,,MSFT,3,445.22,1335.66,2270,+0.05%,,,,,Open,Open,Theo,81,,
-2026-06-03,09:38:31,,,NFLX,18,82.32,1481.76,2242,-0.22%,,,,,Open,Open,mikeb018,79,,
-2026-06-03,10:17:13,,,DDOG,5,250.38,1251.90,2541,+0.13%,,,,,Open,Open,SLAM,78,,
-2026-06-05,09:31:25,,,FITB,57,51.89,2957.73,2940,+0.17%,,,,,Open,Open,Skep,82,,
-2026-06-05,09:59:51,,,TSLA,7,410.05,2870.35,2185,+0.01%,,,,,Open,Open,Theo,81,,
-2026-06-05,10:14:17,,,ULTA,6,473.00,2838.00,2990,+0.47%,,,,,Open,Open,Buzo,78,,
-2026-06-05,10:14:54,,,APLD,74,40.48,2995.52,3657,+0.10%,,,,,Open,Open,SLAM,78,,
-2026-06-05,10:19:36,,,FN,4,684.00,2736.00,2301,+0.44%,,,,,Open,Open,Buzo,78,,
-2026-06-05,10:37:36,,,NIO,550,5.45,2997.50,2107,+0.00%,,,,,Open,Open,mikeb018,79,,
-2026-06-05,10:39:09,,,AVGO,7,402.38,2816.66,2182,-1.45%,,,,,Open,Open,SLAM,78,,
-2026-06-05,13:21:56,,,SOFI,189,15.86,2997.54,2652,+0.06%,,,,,Open,Open,KrazyA - [$TSLA 👶 🐐],77,,
+Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %
+2026-06-02,10:05:51,,,MSFT,3,445.22,1335.66,2270,+0.05%,,,,,Open,Open,Theo,81,Top Analyst,,
+2026-06-03,09:38:31,,,NFLX,18,82.32,1481.76,2242,-0.22%,,,,,Open,Open,mikeb018,79,,,
+2026-06-03,10:17:13,,,DDOG,5,250.38,1251.90,2541,+0.13%,,,,,Open,Open,SLAM,78,,,
+2026-06-05,09:31:25,,,FITB,57,51.89,2957.73,2940,+0.17%,,,,,Open,Open,Skep,82,Top Trader,,
+2026-06-05,09:59:51,,,TSLA,7,410.05,2870.35,2185,+0.01%,,,,,Open,Open,Theo,81,Top Analyst,,
+2026-06-05,10:14:17,,,ULTA,6,473.00,2838.00,2990,+0.47%,,,,,Open,Open,Buzo,78,,,
+2026-06-05,10:14:54,,,APLD,74,40.48,2995.52,3657,+0.10%,,,,,Open,Open,SLAM,78,,,
+2026-06-05,10:19:36,,,FN,4,684.00,2736.00,2301,+0.44%,,,,,Open,Open,Buzo,78,,,
+2026-06-05,10:37:36,,,NIO,550,5.45,2997.50,2107,+0.00%,,,,,Open,Open,mikeb018,79,,,
+2026-06-05,10:39:09,,,AVGO,7,402.38,2816.66,2182,-1.45%,,,,,Open,Open,SLAM,78,,,
+2026-06-05,13:21:56,,,SOFI,189,15.86,2997.54,2652,+0.06%,,,,,Open,Open,KrazyA - [$TSLA 👶 🐐],77,Top Analyst,,
 
 ,,SUMMARY
 ,,Total Trades,11

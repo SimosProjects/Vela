@@ -212,7 +212,8 @@ public class RecoveryService : IHostedService
             StopPrice:             trade.StopPrice,
             TargetPrice:           trade.TargetPrice,
             TrailPercent:          trade.TradeType == TradeType.Options ? 50.0 : 15.0,
-            XScore:                trade.XScore);
+            XScore:                trade.XScore,
+            DiscordRank:           trade.DiscordRank);
 
         var result = new BrokerOrderResult(
             OrderId:       trade.OrderId,
@@ -306,9 +307,10 @@ public class RecoveryService : IHostedService
                 // 16 Exit Latency       17 Exit Slippage %
                 // 18 Status             19 Result
                 // 20 UserName           21 XScore
-                // 22 P&L               23 P&L %
+                // 22 DiscordRank        23 P&L
+                // 24 P&L %
 
-                if (cols.Length < 22) return null;
+                if (cols.Length < 23) return null;
 
                 if (!Enum.TryParse<TradeStatus>(cols[18], out var status) ||
                     status != TradeStatus.Open)
@@ -321,6 +323,10 @@ public class RecoveryService : IHostedService
                 decimal.TryParse(cols[21], NumberStyles.Any,
                     CultureInfo.InvariantCulture, out var xScore);
 
+                var discordRank = cols.Length > 22
+                    ? cols[22].Trim()
+                    : string.Empty;
+
                 return new TradeRecord
                 {
                     AlertId         = string.Empty,
@@ -329,6 +335,7 @@ public class RecoveryService : IHostedService
                     TargetOrderId   = null,
                     UserName        = cols[20],
                     XScore          = xScore,
+                    DiscordRank     = string.IsNullOrEmpty(discordRank) ? null : discordRank,
                     Symbol          = cols[4],
                     TradeType       = TradeType.Options,
                     OptionsContract = cols[5],
@@ -358,9 +365,10 @@ public class RecoveryService : IHostedService
                 // 12 Exit Latency       13 Exit Slippage %
                 // 14 Status             15 Result
                 // 16 UserName           17 XScore
-                // 18 P&L               19 P&L %
+                // 18 DiscordRank        19 P&L
+                // 20 P&L %
 
-                if (cols.Length < 18) return null;
+                if (cols.Length < 19) return null;
 
                 if (!Enum.TryParse<TradeStatus>(cols[14], out var status) ||
                     status != TradeStatus.Open)
@@ -373,6 +381,10 @@ public class RecoveryService : IHostedService
                 decimal.TryParse(cols[17], NumberStyles.Any,
                     CultureInfo.InvariantCulture, out var xScore);
 
+                var discordRank = cols.Length > 18
+                    ? cols[18].Trim()
+                    : string.Empty;
+
                 return new TradeRecord
                 {
                     AlertId         = string.Empty,
@@ -381,6 +393,7 @@ public class RecoveryService : IHostedService
                     TargetOrderId   = null,
                     UserName        = cols[16],
                     XScore          = xScore,
+                    DiscordRank     = string.IsNullOrEmpty(discordRank) ? null : discordRank,
                     Symbol          = cols[4],
                     TradeType       = TradeType.Stock,
                     OptionsContract = null,
@@ -391,7 +404,7 @@ public class RecoveryService : IHostedService
                     EntryPrice      = entryPrice,
                     EntryAmount     = entryAmount,
                     StopPrice       = entryPrice * 0.85m,
-                    TargetPrice     = entryPrice * 1.30m,
+                    TargetPrice     = entryPrice * 2.00m,
                     OpenedAt        = DateTimeOffset.TryParse(
                                          $"{cols[0]} {cols[1]}",
                                          out var opened) ? opened : DateTimeOffset.UtcNow,

@@ -606,13 +606,14 @@ public class MarketSchedulerService : BackgroundService
             if (!DateOnly.TryParse(cols[closedDateIndex], out var closedDate)) continue;
             if (closedDate != today) continue;
 
-            var entryPriceIndex = tradeType == TradeType.Options ? 10 : 6;
-            var exitPriceIndex  = tradeType == TradeType.Options ? 14 : 10;
-            var xScoreIndex     = tradeType == TradeType.Options ? 21 : 17;
-            var pnlIndex        = tradeType == TradeType.Options ? 22 : 18;
-            var pnlPctIndex     = tradeType == TradeType.Options ? 23 : 19;
-            var resultIndex     = tradeType == TradeType.Options ? 19 : 15;
-            var qtyIndex        = tradeType == TradeType.Options ? 9  : 5;
+            var entryPriceIndex  = tradeType == TradeType.Options ? 10 : 6;
+            var exitPriceIndex   = tradeType == TradeType.Options ? 14 : 10;
+            var xScoreIndex      = tradeType == TradeType.Options ? 21 : 17;
+            var discordRankIndex = tradeType == TradeType.Options ? 22 : 18;
+            var pnlIndex         = tradeType == TradeType.Options ? 23 : 19;
+            var pnlPctIndex      = tradeType == TradeType.Options ? 24 : 20;
+            var resultIndex      = tradeType == TradeType.Options ? 19 : 15;
+            var qtyIndex         = tradeType == TradeType.Options ? 9  : 5;
 
             decimal.TryParse(cols[entryPriceIndex], System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var entryPrice);
@@ -621,9 +622,13 @@ public class MarketSchedulerService : BackgroundService
             decimal.TryParse(cols.Length > xScoreIndex ? cols[xScoreIndex] : "0",
                 System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var xScore);
-            decimal.TryParse(cols[pnlIndex].TrimStart('+'), System.Globalization.NumberStyles.Any,
+            var discordRank = cols.Length > discordRankIndex
+                ? cols[discordRankIndex].Trim()
+                : string.Empty;
+            decimal.TryParse(cols.Length > pnlIndex ? cols[pnlIndex].TrimStart('+') : "0",
+                System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var pnl);
-            decimal.TryParse(cols[pnlPctIndex].TrimStart('+').TrimEnd('%'),
+            decimal.TryParse(cols.Length > pnlPctIndex ? cols[pnlPctIndex].TrimStart('+').TrimEnd('%') : "0",
                 System.Globalization.NumberStyles.Any,
                 System.Globalization.CultureInfo.InvariantCulture, out var pnlPct);
             int.TryParse(cols[qtyIndex], out var qty);
@@ -637,6 +642,7 @@ public class MarketSchedulerService : BackgroundService
                 TargetOrderId   = null,
                 UserName        = cols[0],
                 XScore          = xScore,
+                DiscordRank     = string.IsNullOrEmpty(discordRank) ? null : discordRank,
                 Symbol          = cols[4],
                 TradeType       = tradeType,
                 OptionsContract = null,

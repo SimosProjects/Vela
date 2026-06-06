@@ -4,9 +4,9 @@ namespace TradeFlow.Worker.Models;
 /// Built by PositionSizer from an approved Alert.
 /// </summary>
 public record TradeOrder(
-    string    AlertId,
-    string    UserName,
-    string    Symbol,
+    string AlertId,
+    string UserName,
+    string Symbol,
     TradeType TradeType,
 
     // OCC symbol e.g. TSLA260620C00450000. Primary key for exit matching.
@@ -37,5 +37,8 @@ public record TradeOrder(
     bool IsAverage = false,
 
     // xScore of the trader at time of alert, threaded through for TradeRecord and CSV.
-    decimal XScore = 0m
+    decimal XScore = 0m,
+
+    // Discord rank of the trader at time of alert, persisted for post-trade analysis.
+    string? DiscordRank = null
 );
