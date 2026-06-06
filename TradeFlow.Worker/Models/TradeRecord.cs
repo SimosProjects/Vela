@@ -13,6 +13,7 @@ public record TradeRecord
     public required string? TargetOrderId { get; init; }
     public required string UserName { get; init; }
     public required decimal XScore { get; init; }
+    public required string? DiscordRank { get; init; }
 
     // Instrument
     public required string Symbol { get; init; }

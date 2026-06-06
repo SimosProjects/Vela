@@ -27,13 +27,13 @@ public class CsvTradeLogger
         "Symbol,Contract,Direction,Strike,Expiration," +
         "Contracts,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %," +
         "Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %," +
-        "Status,Result,UserName,XScore,P&L,P&L %";
+        "Status,Result,UserName,XScore,DiscordRank,P&L,P&L %";
 
     private static readonly string StocksHeader =
         "Date Opened,Time Opened,Date Closed,Time Closed," +
         "Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %," +
         "Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %," +
-        "Status,Result,UserName,XScore,P&L,P&L %";
+        "Status,Result,UserName,XScore,DiscordRank,P&L,P&L %";
 
     public CsvTradeLogger(
         IConfiguration config,
@@ -342,6 +342,7 @@ public class CsvTradeLogger
     {
         var et     = TimeZoneInfo.ConvertTime(t.OpenedAt, EasternTime);
         var xScore = t.XScore.ToString("F0");
+        var rank = t.DiscordRank ?? "";
 
         if (t.TradeType == TradeType.Options)
         {
@@ -364,6 +365,7 @@ public class CsvTradeLogger
                 t.Result.ToString(),
                 t.UserName ?? "",
                 xScore,
+                rank,
                 "", "");
         }
         else
@@ -383,6 +385,7 @@ public class CsvTradeLogger
                 t.Result.ToString(),
                 t.UserName ?? "",
                 xScore,
+                rank,
                 "", "");
         }
     }
@@ -395,6 +398,7 @@ public class CsvTradeLogger
             : (DateTimeOffset?)null;
         var pnlSign = t.PnL >= 0 ? "+" : "";
         var xScore = t.XScore.ToString("F0");
+        var rank = t.DiscordRank ?? "";
 
         if (t.TradeType == TradeType.Options)
         {
@@ -421,6 +425,7 @@ public class CsvTradeLogger
                 t.Result.ToString(),
                 t.UserName ?? "",
                 xScore,
+                rank,
                 $"{pnlSign}{t.PnL:F2}",
                 $"{pnlSign}{t.PnLPercent:F2}%");
         }
@@ -445,6 +450,7 @@ public class CsvTradeLogger
                 t.Result.ToString(),
                 t.UserName ?? "",
                 xScore,
+                rank,
                 $"{pnlSign}{t.PnL:F2}",
                 $"{pnlSign}{t.PnLPercent:F2}%");
         }

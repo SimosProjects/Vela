@@ -145,7 +145,8 @@ public class PositionSizer
             TargetPrice:           targetPrice,
             TrailPercent:          trailPercent,
             IsAverage:             isAverage,
-            XScore:                (decimal)(alert.XScore ?? 0));
+            XScore:                (decimal)(alert.XScore ?? 0),
+            DiscordRank:           alert.DiscordRank);
     }
 
     // -- Helpers --

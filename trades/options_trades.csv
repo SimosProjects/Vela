@@ -1,10 +1,10 @@
-Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike,Expiration,Contracts,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,P&L,P&L %
-2026-06-01,10:17:20,,,BALL,BALL270115C00070000,call,70,Jan 15 2027,7,1.55,1085.00,7194,+10.71%,,,,,Open,Open,Theo,81,,
-2026-06-02,10:22:13,,,KWEB,KWEB261218C00030000,call,30,Dec 18 2026,4,2.48,992.00,12210,+2.06%,,,,,Open,Open,Shinobi,75,,
-2026-06-03,09:50:48,,,UPS,UPS270319C00110000,call,110,Mar 19 2027,1,13.00,1300.00,18999,+6.56%,,,,,Open,Open,Mthorseman,75,,
-2026-06-04,14:28:12,,,UBER,UBER270115C00100000,call,100,Jan 15 2027,12,2.53,3036.00,21703,+1.20%,,,,,Open,Open,Theo,81,,
-2026-06-05,11:36:17,,,PLTR,PLTR260702C00139000,call,139,Jul 02 2026,4,7.05,2820.00,24678,-4.08%,,,,,Open,Open,Tim,87,,
-2026-06-05,12:25:50,,,PAAS,PAAS270115C00070000,call,70,Jan 15 2027,9,3.30,2970.00,17483,+3.13%,,,,,Open,Open,Theo,81,,
+Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike,Expiration,Contracts,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %
+2026-06-01,10:17:20,,,BALL,BALL270115C00070000,call,70,Jan 15 2027,7,1.55,1085.00,7194,+10.71%,,,,,Open,Open,Theo,81,Top Analyst,,
+2026-06-02,10:22:13,,,KWEB,KWEB261218C00030000,call,30,Dec 18 2026,4,2.48,992.00,12210,+2.06%,,,,,Open,Open,Shinobi,75,,,
+2026-06-03,09:50:48,,,UPS,UPS270319C00110000,call,110,Mar 19 2027,1,13.00,1300.00,18999,+6.56%,,,,,Open,Open,Mthorseman,75,Contributor,,
+2026-06-04,14:28:12,,,UBER,UBER270115C00100000,call,100,Jan 15 2027,12,2.53,3036.00,21703,+1.20%,,,,,Open,Open,Theo,81,Top Analyst,,
+2026-06-05,11:36:17,,,PLTR,PLTR260702C00139000,call,139,Jul 02 2026,4,7.05,2820.00,24678,-4.08%,,,,,Open,Open,Tim,87,,,
+2026-06-05,12:25:50,,,PAAS,PAAS270115C00070000,call,70,Jan 15 2027,9,3.30,2970.00,17483,+3.13%,,,,,Open,Open,Theo,81,Top Analyst,,
 
 ,,SUMMARY
 ,,Total Trades,6
