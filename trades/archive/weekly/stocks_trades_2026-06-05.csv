@@ -1,0 +1,12 @@
+Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,P&L,P&L %
+2026-06-01,10:44:10,2026-06-05,12:30:14,PG,3,139.87,419.61,,,146.14,438.42,1606,-0.06%,Closed,XtradesExit,Sean@BearishBull,0,+18.81,+4.48%
+2026-06-02,10:32:18,2026-06-05,09:30:38,MSTR,11,135.67,1492.37,,,123.72,1360.92,,,Closed,StoppedOut,SLAM,0,-131.45,-8.81%
+2026-06-03,09:53:57,2026-06-05,10:28:55,OPEN,300,5.00,1500.00,,,4.63,1389.00,,,Closed,StoppedOut,slicedbreadth,0,-111.00,-7.40%
+2026-06-03,10:19:21,2026-06-05,10:14:35,UPST,49,30.22,1480.78,,,30.39,1489.11,1377,-0.07%,Closed,XtradesExit,SLAM,0,+8.33,+0.56%
+2026-06-04,10:43:02,2026-06-05,12:11:02,LEU,16,181.17,2898.72,,,168.27,2692.32,,,Closed,StoppedOut,Gizmo,0,-206.40,-7.12%
+
+,,SUMMARY
+,,Total Trades,5
+,,Open,0,Closed,5
+,,Wins,2,Losses,3,Win Rate,40.0%
+,,Total P&L,-421.71
