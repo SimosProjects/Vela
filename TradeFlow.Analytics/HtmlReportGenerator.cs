@@ -81,7 +81,7 @@ public class HtmlReportGenerator
         };
 
         var etNow    = TimeZoneInfo.ConvertTime(data.GeneratedAt, Et);
-        var filename = $"tradeflow_{periodLabel}_{etNow:yyyy-MM-dd}.html";
+        var filename = $"{periodLabel}_{etNow:yyyy-MM-dd}.html";
         var path     = Path.Combine(outputDirectory, filename);
 
         var html = BuildHtml(data);

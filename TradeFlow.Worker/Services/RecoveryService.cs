@@ -101,14 +101,24 @@ public class RecoveryService : IHostedService
             return;
         }
 
-        var ibkrPrice = await _broker.GetCurrentPositionPriceAsync(trade, ct);
-        if (ibkrPrice <= 0)
+        var (ibkrPrice, ibkrQty) = await _broker.GetCurrentPositionPriceAsync(trade, ct);
+
+        if (ibkrPrice <= 0 || ibkrQty <= 0)
         {
             _logger.LogWarning(
-                "Recovery: {Symbol} not found in IBKR positions. May have been closed while offline.",
-                trade.Symbol);
-
+                "Recovery: {Symbol} not found in IBKR positions (price={Price} qty={Qty}). " +
+                "May have been closed while offline or is a ghost short — skipping.",
+                trade.Symbol, ibkrPrice, ibkrQty);
             return;
+        }
+
+        if (ibkrQty != trade.Quantity)
+        {
+            _logger.LogWarning(
+                "Recovery: {Symbol} qty mismatch — CSV has {CsvQty} but IBKR reports {IbkrQty}. " +
+                "Using IBKR qty.",
+                trade.Symbol, trade.Quantity, ibkrQty);
+            trade = trade with { Quantity = ibkrQty };
         }
 
         if (ibkrPrice <= trade.StopPrice)
@@ -145,8 +155,8 @@ public class RecoveryService : IHostedService
         }
 
         _logger.LogInformation(
-            "Recovery: {Symbol} is healthy at ${Price:F2}. Re-registering in TradeGuard.",
-            trade.Symbol, ibkrPrice);
+            "Recovery: {Symbol} is healthy at ${Price:F2} x{Qty}. Re-registering in TradeGuard.",
+            trade.Symbol, ibkrPrice, ibkrQty);
 
         ReRegisterTrade(trade);
     }

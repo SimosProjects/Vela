@@ -1,20 +1,23 @@
 using System.Globalization;
 using System.Text.Json;
-using TradeFlow.Worker.Configuration;
+using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Services;
 
 /// <summary>
-/// Fetches daily market conditions from Yahoo Finance and writes a row to market_conditions.csv.
-/// Called at 9:00am ET on each market day before the open, providing context for daily performance review.
-/// Also calculates the morning chop score and sets the MarketRegimeService for the session —
-/// a choppy regime automatically blocks high risk and lotto trades regardless of config flags.
-/// All data sourced from Yahoo Finance free API.
+/// Fetches daily market conditions and writes a row to market_conditions.csv.
+/// SPY and VIX data is sourced from IB Gateway via reqHistoricalData for reliability.
+/// QQQ is fetched from Yahoo Finance (CSV logging only, not used for regime calculation).
+/// Falls back to Yahoo Finance for SPY/VIX if Gateway returns no data.
+/// Called at 9:20am ET on each market day by MarketSchedulerService.
+/// Sets the MarketRegimeService tier (Bullish/Choppy/Bearish) and sizing multiplier
+/// for the session based on SPY MA cascade, VIX level, and ADX trend direction.
 /// </summary>
 public class MarketConditionsLogger
 {
     private readonly string _csvPath;
     private readonly HttpClient _httpClient;
+    private readonly IBrokerService _broker;
     private readonly ILogger<MarketConditionsLogger> _logger;
     private readonly RiskEngineOptions _riskOptions;
     private readonly MarketRegimeService _regime;
@@ -24,16 +27,20 @@ public class MarketConditionsLogger
 
     private static readonly string CsvHeader =
         "Date," +
-        "SPY Price,SPY Prev Close,SPY Gap %,SPY 50MA,SPY vs 50MA %,SPY 200MA,SPY vs 200MA %," +
+        "SPY Price,SPY Prev Close,SPY Gap %," +
+        "SPY 20MA,SPY vs 20MA %,SPY 50MA,SPY vs 50MA %,SPY 200MA,SPY vs 200MA %," +
         "QQQ Price,QQQ Prev Close,QQQ Gap %,QQQ 50MA,QQQ vs 50MA %,QQQ 200MA,QQQ vs 200MA %," +
-        "VIX,VIX Prev,VIX Delta %,SPY ADX,SPY PDI,SPY NDI,Chop Score,Market Bias";
+        "VIX,VIX Prev,VIX Delta %,SPY ADX,SPY PDI,SPY NDI," +
+        "Regime Tier,Sizing Multiplier,Block Calls,Chop Score,Market Bias";
 
     public MarketConditionsLogger(
         IConfiguration config,
+        IBrokerService broker,
         ILogger<MarketConditionsLogger> logger,
         IOptions<RiskEngineOptions> riskOptions,
         MarketRegimeService regime)
     {
+        _broker      = broker;
         _logger      = logger;
         _riskOptions = riskOptions.Value;
         _regime      = regime;
@@ -52,70 +59,103 @@ public class MarketConditionsLogger
     }
 
     /// <summary>
-    /// Fetches market data from Yahoo Finance, appends a row to market_conditions.csv,
-    /// and sets the MarketRegimeService for the trading session.
-    /// Called at 9:00am ET by MarketSchedulerService.
+    /// Fetches market data, appends a row to market_conditions.csv, and sets the
+    /// MarketRegimeService tier and sizing multiplier for the trading session.
+    /// SPY and VIX are fetched from Gateway first, Yahoo Finance as fallback.
+    /// Called at 9:20am ET by MarketSchedulerService.
     /// </summary>
     public async Task LogMarketConditionsAsync(CancellationToken ct = default)
     {
-        _logger.LogInformation("Market conditions: fetching SPY, QQQ, VIX data from Yahoo Finance.");
+        _logger.LogInformation("Market conditions: fetching SPY and VIX data from Gateway.");
 
         try
         {
-            var spy = await FetchYahooDataAsync("SPY", includeAdx: true, ct);
-            var qqq = await FetchYahooDataAsync("QQQ", includeAdx: false, ct);
-            var vix = await FetchYahooDataAsync("^VIX", includeAdx: false, ct);
+            var spyBars = await _broker.GetHistoricalBarsAsync("SPY", 200, ct);
+            var vixBars = await _broker.GetHistoricalBarsAsync("VIX", 5, ct);
 
-            if (spy is null || qqq is null || vix is null)
+            SymbolData? spy = null;
+            SymbolData? vix = null;
+
+            if (spyBars.Count >= 50)
             {
-                _logger.LogWarning("Market conditions: could not fetch all data — skipping log.");
+                spy = BuildSymbolDataFromBars(spyBars, includeAdx: true);
+                _logger.LogInformation(
+                    "Market conditions: SPY data from Gateway — {Count} bars, price ${Price:F2}",
+                    spyBars.Count, spy.Price);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Market conditions: Gateway returned {Count} SPY bars — falling back to Yahoo.",
+                    spyBars.Count);
+                spy = await FetchYahooDataAsync("SPY", includeAdx: true, ct);
+            }
+
+            if (vixBars.Count >= 2)
+            {
+                vix = BuildSymbolDataFromBars(vixBars, includeAdx: false);
+                _logger.LogInformation(
+                    "Market conditions: VIX data from Gateway — price ${Price:F2}", vix.Price);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Market conditions: Gateway returned {Count} VIX bars — falling back to Yahoo.",
+                    vixBars.Count);
+                vix = await FetchYahooDataAsync("^VIX", includeAdx: false, ct);
+            }
+
+            // QQQ is CSV logging only, not part of regime calculation
+            var qqq = await FetchYahooDataAsync("QQQ", includeAdx: false, ct);
+
+            if (spy is null || vix is null)
+            {
+                _logger.LogWarning("Market conditions: could not fetch SPY or VIX — skipping.");
                 return;
             }
 
             var spyGapPct   = spy.PrevClose > 0 ? (spy.Price - spy.PrevClose) / spy.PrevClose * 100 : 0;
+            var spy20MaPct  = spy.Ma20  > 0 ? (spy.Price - spy.Ma20)  / spy.Ma20  * 100 : 0;
             var spy50MaPct  = spy.Ma50  > 0 ? (spy.Price - spy.Ma50)  / spy.Ma50  * 100 : 0;
             var spy200MaPct = spy.Ma200 > 0 ? (spy.Price - spy.Ma200) / spy.Ma200 * 100 : 0;
 
-            var qqqGapPct   = qqq.PrevClose > 0 ? (qqq.Price - qqq.PrevClose) / qqq.PrevClose * 100 : 0;
-            var qqq50MaPct  = qqq.Ma50  > 0 ? (qqq.Price - qqq.Ma50)  / qqq.Ma50  * 100 : 0;
-            var qqq200MaPct = qqq.Ma200 > 0 ? (qqq.Price - qqq.Ma200) / qqq.Ma200 * 100 : 0;
+            var qqqGapPct   = qqq is not null && qqq.PrevClose > 0
+                ? (qqq.Price - qqq.PrevClose) / qqq.PrevClose * 100 : 0;
+            var qqq50MaPct  = qqq is not null && qqq.Ma50  > 0
+                ? (qqq.Price - qqq.Ma50)  / qqq.Ma50  * 100 : 0;
+            var qqq200MaPct = qqq is not null && qqq.Ma200 > 0
+                ? (qqq.Price - qqq.Ma200) / qqq.Ma200 * 100 : 0;
 
             var vixDeltaPct = vix.PrevClose > 0
-                ? (vix.Price - vix.PrevClose) / vix.PrevClose * 100
-                : 0;
+                ? (vix.Price - vix.PrevClose) / vix.PrevClose * 100 : 0;
 
-            // Strong downtrend: ADX is trending but -DI leads +DI, indicating bearish direction.
-            // Differs from the no-trend signal — a strong bear trend is just as bad for calls as chop.
+            // -- Chop score signals (0-6) --
             var spyBearishTrend = spy.Adx >= (decimal)_riskOptions.ChopAdxThreshold &&
                                   spy.NDi  > spy.PDi + (decimal)_riskOptions.ChopBearishDiDiff;
 
-            // SPY below its 50MA signals bearish market structure at open.
-            var spyBelowMa = spy50MaPct < -(decimal)_riskOptions.ChopSpyBelowMaPct;
+            var spyBelowMa50 = spy50MaPct < -(decimal)_riskOptions.ChopSpyBelowMaPct;
 
-            // -- Chop score: 1 point per signal, max 6 --
             var chopScore = 0;
+            if (Math.Abs(vixDeltaPct) >= (decimal)_riskOptions.ChopVixSpikePct) chopScore++;
+            if (spy.Adx > 0 && spy.Adx < (decimal)_riskOptions.ChopAdxThreshold)  chopScore++;
+            if (spy50MaPct >= (decimal)_riskOptions.ChopSpyExtendedPct)             chopScore++;
+            if (vix.Price >= (decimal)_riskOptions.ChopVixLevel)                    chopScore++;
+            if (spyBearishTrend)                                                     chopScore++;
+            if (spyBelowMa50)                                                        chopScore++;
 
-            if (Math.Abs(vixDeltaPct) >= (decimal)_riskOptions.ChopVixSpikePct)
-                chopScore++; // VIX spiking vs yesterday
+            // -- Regime tier cascade --
+            // 200MA = master switch. 50MA = weekly ceiling. 20MA = daily trigger.
+            var (tier, sizingMultiplier, blockCalls) = DetermineRegimeTier(
+                spy.Price, spy.Ma20, spy.Ma50, spy.Ma200, vix.Price);
 
-            if (spy.Adx > 0 && spy.Adx < (decimal)_riskOptions.ChopAdxThreshold)
-                chopScore++; // No clear trend (low ADX)
+            _regime.SetRegime(
+                chopScore, _riskOptions.ChopMinSignals,
+                tier, sizingMultiplier, blockCalls,
+                spy.Ma20, spy.Ma50, spy.Ma200);
 
-            if (spy50MaPct >= (decimal)_riskOptions.ChopSpyExtendedPct)
-                chopScore++; // SPY extended above 50MA, pullback risk
-
-            if (vix.Price >= (decimal)_riskOptions.ChopVixLevel)
-                chopScore++; // Elevated fear environment
-
-            if (spyBearishTrend)
-                chopScore++; // Strong downtrend detected via -DI > +DI
-
-            if (spyBelowMa)
-                chopScore++; // Bearish market structure — SPY below 50MA
-
-            _regime.SetRegime(chopScore, _riskOptions.ChopMinSignals);
-
-            var bias = DetermineMarketBias(spy.Price, spy.Ma50, spy.Ma200, vix.Price, spy.PDi, spy.NDi);
+            var bias = DetermineMarketBias(
+                spy.Price, spy.Ma20, spy.Ma50, spy.Ma200,
+                vix.Price, spy.PDi, spy.NDi);
 
             var today = DateOnly.FromDateTime(
                 TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
@@ -123,26 +163,34 @@ public class MarketConditionsLogger
             var row = string.Join(",",
                 today.ToString("yyyy-MM-dd"),
                 F(spy.Price),     F(spy.PrevClose), Pct(spyGapPct),
+                F(spy.Ma20),      Pct(spy20MaPct),
                 F(spy.Ma50),      Pct(spy50MaPct),
                 F(spy.Ma200),     Pct(spy200MaPct),
-                F(qqq.Price),     F(qqq.PrevClose), Pct(qqqGapPct),
-                F(qqq.Ma50),      Pct(qqq50MaPct),
-                F(qqq.Ma200),     Pct(qqq200MaPct),
+                qqq is not null ? F(qqq.Price)     : "",
+                qqq is not null ? F(qqq.PrevClose) : "",
+                qqq is not null ? Pct(qqqGapPct)   : "",
+                qqq is not null ? F(qqq.Ma50)      : "",
+                qqq is not null ? Pct(qqq50MaPct)  : "",
+                qqq is not null ? F(qqq.Ma200)     : "",
+                qqq is not null ? Pct(qqq200MaPct) : "",
                 F(vix.Price),     F(vix.PrevClose), Pct(vixDeltaPct),
                 F(spy.Adx),       F(spy.PDi),       F(spy.NDi),
+                tier.ToString(),  Pct((decimal)((sizingMultiplier - 1) * 100 + 100) - 100),
+                blockCalls.ToString(),
                 chopScore,
                 bias);
 
             await File.AppendAllTextAsync(_csvPath, row + Environment.NewLine, ct);
 
             _logger.LogInformation(
-                "Market conditions logged — SPY ${Spy:F2} ({SpyGap:+0.00;-0.00}% gap) vs 50MA {Spy50:+0.00;-0.00}% | " +
-                "VIX {Vix:F2} ({VixDelta:+0.00;-0.00}%) | SPY ADX {Adx:F1} (+DI {PDi:F1} / -DI {NDi:F1}) | " +
-                "ChopScore: {Chop}/6 | Bias: {Bias}",
-                spy.Price, spyGapPct, spy50MaPct,
+                "Market conditions logged — SPY ${Spy:F2} | 20MA {Spy20:+0.00;-0.00}% | " +
+                "50MA {Spy50:+0.00;-0.00}% | 200MA {Spy200:+0.00;-0.00}% | " +
+                "VIX {Vix:F2} ({VixDelta:+0.00;-0.00}%) | ADX {Adx:F1} (+DI {PDi:F1} -DI {NDi:F1}) | " +
+                "Regime: {Tier} ({Multiplier:P0}) | BlockCalls: {Block} | ChopScore: {Chop}/6 | Bias: {Bias}",
+                spy.Price, spy20MaPct, spy50MaPct, spy200MaPct,
                 vix.Price, vixDeltaPct,
                 spy.Adx, spy.PDi, spy.NDi,
-                chopScore, bias);
+                tier, sizingMultiplier, blockCalls, chopScore, bias);
         }
         catch (Exception ex)
         {
@@ -152,8 +200,78 @@ public class MarketConditionsLogger
 
     // -- Helpers --
 
-    // Creates or updates the CSV header. Rewrites the header row if it does not match
-    // the current schema, preserving all existing data rows below it.
+    // Determines the three-tier regime using the MA cascade:
+    //   200MA = master switch (below = cap at Choppy minimum)
+    //   50MA  = weekly ceiling (below = no Bullish sizing even on up days)
+    //   20MA  = daily trigger (primary sizing and call gate)
+    //   VIX   = confirmation layer
+    private (RegimeTier Tier, decimal SizingMultiplier, bool BlockCalls) DetermineRegimeTier(
+        decimal spyPrice, decimal ma20, decimal ma50, decimal ma200, decimal vix)
+    {
+        var bullishMultiplier = (decimal)_riskOptions.RegimeBullishSizingPct;
+        var choppyMultiplier  = (decimal)_riskOptions.RegimeChoppySizingPct;
+        var bearishMultiplier = (decimal)_riskOptions.RegimeBearishSizingPct;
+        var blockCallsInBearish = _riskOptions.RegimeBearishBlockCalls;
+        var vixBearish  = (decimal)_riskOptions.RegimeVixBearishThreshold;
+        var vixChoppy   = (decimal)_riskOptions.RegimeVixChoppyThreshold;
+        var below50Pct  = (decimal)_riskOptions.RegimeSpyBelow50MaPct;
+
+        // Master switch: SPY below 200MA = never full size regardless of daily signals
+        var belowMa200 = ma200 > 0 && spyPrice < ma200;
+
+        // Weekly ceiling: SPY below 50MA = maximum Choppy sizing
+        var belowMa50 = ma50 > 0 && spyPrice < ma50;
+
+        // Below configurable % threshold of 50MA triggers Bearish tier
+        var wellBelowMa50 = below50Pct > 0 && ma50 > 0 &&
+                            (ma50 - spyPrice) / ma50 * 100 >= below50Pct;
+
+        // Daily trigger: SPY below 20MA
+        var belowMa20 = ma20 > 0 && spyPrice < ma20;
+
+        if (belowMa200 || wellBelowMa50 || (belowMa50 && belowMa20 && vix >= vixBearish))
+            return (RegimeTier.Bearish, bearishMultiplier, blockCallsInBearish);
+
+        if (belowMa20 && vix >= vixBearish)
+            return (RegimeTier.Bearish, bearishMultiplier, blockCallsInBearish);
+
+        if (belowMa50 || (belowMa20 && vix >= vixChoppy) || vix >= vixChoppy)
+            return (RegimeTier.Choppy, choppyMultiplier, false);
+
+        if (belowMa200)
+            return (RegimeTier.Choppy, choppyMultiplier, false);
+
+        return (RegimeTier.Bullish, bullishMultiplier, false);
+    }
+
+    // Builds a SymbolData from a list of historical bars.
+    // Computes 20MA, 50MA, 200MA from closes, and optionally ADX(14).
+    // Price = last bar close, PrevClose = second to last bar close.
+    private static SymbolData BuildSymbolDataFromBars(
+        IList<HistoricalBar> bars, bool includeAdx)
+    {
+        var closes = bars.Select(b => b.Close).ToList();
+        var price     = closes[^1];
+        var prevClose = closes.Count >= 2 ? closes[^2] : price;
+
+        var ma20  = closes.Count >= 20  ? closes.TakeLast(20).Average()  : 0m;
+        var ma50  = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
+        var ma200 = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Average();
+
+        var adx = 0m;
+        var pdi = 0m;
+        var ndi = 0m;
+
+        if (includeAdx)
+        {
+            var highs = bars.Select(b => b.High).ToList();
+            var lows  = bars.Select(b => b.Low).ToList();
+            (adx, pdi, ndi) = CalculateAdx(highs, lows, closes);
+        }
+
+        return new SymbolData(price, prevClose, ma20, ma50, ma200, adx, pdi, ndi);
+    }
+
     private void EnsureHeader()
     {
         if (!File.Exists(_csvPath))
@@ -169,12 +287,11 @@ public class MarketConditionsLogger
         allLines[0]  = CsvHeader;
         File.WriteAllLines(_csvPath, allLines);
 
-        _logger.LogInformation(
-            "Market conditions: CSV header updated to include PDI/NDI and directional regime columns.");
+        _logger.LogInformation("Market conditions: CSV header updated.");
     }
 
-    // Fetches daily OHLCV data for the last 200 days from Yahoo Finance.
-    // Returns current price, previous close, 50MA, 200MA, and optionally ADX(14) with PDI/NDI.
+    // Fetches daily OHLCV data from Yahoo Finance.
+    // Used as fallback when Gateway returns insufficient bars, and for QQQ (CSV logging only).
     private async Task<SymbolData?> FetchYahooDataAsync(
         string symbol, bool includeAdx, CancellationToken ct)
     {
@@ -195,65 +312,44 @@ public class MarketConditionsLogger
             var json = await response.Content.ReadAsStringAsync(ct);
             using var doc = JsonDocument.Parse(json);
 
-            if (!doc.RootElement.TryGetProperty("chart", out var chartEl))
-            {
-                _logger.LogWarning("Market conditions: no 'chart' key in response for {Symbol}", symbol);
-                return null;
-            }
-
-            if (!chartEl.TryGetProperty("result", out var resultsEl) ||
+            if (!doc.RootElement.TryGetProperty("chart", out var chartEl) ||
+                !chartEl.TryGetProperty("result", out var resultsEl) ||
                 resultsEl.ValueKind == JsonValueKind.Null ||
                 resultsEl.GetArrayLength() == 0)
             {
-                _logger.LogWarning("Market conditions: empty result array for {Symbol}", symbol);
+                _logger.LogWarning("Market conditions: unexpected Yahoo response for {Symbol}", symbol);
                 return null;
             }
 
             var result = resultsEl[0];
-
-            if (!result.TryGetProperty("meta", out var meta))
-            {
-                _logger.LogWarning("Market conditions: no 'meta' in result for {Symbol}", symbol);
-                return null;
-            }
+            if (!result.TryGetProperty("meta", out var meta)) return null;
 
             var price = meta.TryGetProperty("regularMarketPrice", out var priceEl)
                 ? priceEl.GetDecimal()
                 : meta.TryGetProperty("chartPreviousClose", out var fallbackEl)
-                    ? fallbackEl.GetDecimal()
-                    : 0m;
+                    ? fallbackEl.GetDecimal() : 0m;
 
             var prevClose = meta.TryGetProperty("regularMarketPreviousClose", out var prevEl)
-                ? prevEl.GetDecimal()
-                : 0m;
+                ? prevEl.GetDecimal() : 0m;
 
-            if (price == 0m)
-            {
-                _logger.LogWarning("Market conditions: could not determine price for {Symbol}", symbol);
-                return null;
-            }
+            if (price == 0m) return null;
 
             if (!result.TryGetProperty("indicators", out var indicators) ||
                 !indicators.TryGetProperty("quote", out var quoteArr) ||
                 quoteArr.GetArrayLength() == 0)
-            {
-                _logger.LogWarning("Market conditions: no quote data for {Symbol}", symbol);
-                return new SymbolData(price, prevClose, 0m, 0m);
-            }
+                return new SymbolData(price, prevClose, 0m, 0m, 0m);
 
             var quote  = quoteArr[0];
             var closes = ExtractDecimals(quote, "close");
 
-            if (closes.Count > 0)
-                prevClose = closes[^1];
+            if (closes.Count > 0) prevClose = closes[^1];
 
+            var ma20  = closes.Count >= 20  ? closes.TakeLast(20).Average()  : 0m;
             var ma50  = closes.Count >= 50  ? closes.TakeLast(50).Average()  : 0m;
-            var ma200 = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Count > 0 ? closes.Average() : 0m;
+            var ma200 = closes.Count >= 200 ? closes.TakeLast(200).Average() : closes.Count > 0
+                ? closes.Average() : 0m;
 
-            var adx = 0m;
-            var pdi = 0m;
-            var ndi = 0m;
-
+            var adx = 0m; var pdi = 0m; var ndi = 0m;
             if (includeAdx)
             {
                 var highs = ExtractDecimals(quote, "high");
@@ -261,16 +357,15 @@ public class MarketConditionsLogger
                 (adx, pdi, ndi) = CalculateAdx(highs, lows, closes);
             }
 
-            return new SymbolData(price, prevClose, ma50, ma200, adx, pdi, ndi);
+            return new SymbolData(price, prevClose, ma20, ma50, ma200, adx, pdi, ndi);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Market conditions: failed to fetch data for {Symbol}", symbol);
+            _logger.LogWarning(ex, "Market conditions: Yahoo Finance failed for {Symbol}", symbol);
             return null;
         }
     }
 
-    // Extracts a numeric array field from a Yahoo Finance quote element, skipping nulls.
     private static List<decimal> ExtractDecimals(JsonElement quote, string field)
     {
         return quote.GetProperty(field)
@@ -280,10 +375,6 @@ public class MarketConditionsLogger
             .ToList();
     }
 
-    // Calculates ADX(14) using Wilder's smoothing from OHLCV data.
-    // Returns ADX strength plus the final +DI and -DI values for trend direction.
-    // +DI > -DI = bullish trend. -DI > +DI = bearish trend.
-    // ADX below 20 = choppy/non-trending. ADX above 25 = trending.
     private static (decimal Adx, decimal PDi, decimal NDi) CalculateAdx(
         IList<decimal> highs,
         IList<decimal> lows,
@@ -316,9 +407,9 @@ public class MarketConditionsLogger
         var apdm = pdms.Take(period).Sum();
         var andm = ndms.Take(period).Sum();
 
-        var dxValues  = new List<decimal>();
-        var finalPdi  = 0m;
-        var finalNdi  = 0m;
+        var dxValues = new List<decimal>();
+        var finalPdi = 0m;
+        var finalNdi = 0m;
 
         for (var i = period; i < trs.Count; i++)
         {
@@ -336,7 +427,6 @@ public class MarketConditionsLogger
             finalNdi = ndi;
 
             if (sum == 0) continue;
-
             dxValues.Add(100m * Math.Abs(pdi - ndi) / sum);
         }
 
@@ -349,22 +439,21 @@ public class MarketConditionsLogger
         return (Math.Round(adx, 2), Math.Round(finalPdi, 2), Math.Round(finalNdi, 2));
     }
 
-    // Determines overall market bias from SPY position relative to moving averages,
-    // VIX level, and ADX trend direction (+DI vs -DI).
     private static string DetermineMarketBias(
-        decimal spyPrice, decimal ma50, decimal ma200, decimal vix,
-        decimal pdi, decimal ndi)
+        decimal spyPrice, decimal ma20, decimal ma50, decimal ma200,
+        decimal vix, decimal pdi, decimal ndi)
     {
-        var aboveBoth    = spyPrice > ma50 && spyPrice > ma200;
-        var belowBoth    = spyPrice < ma50 && spyPrice < ma200;
+        var aboveAll     = spyPrice > ma20 && spyPrice > ma50 && spyPrice > ma200;
+        var belowAll     = spyPrice < ma20 && spyPrice < ma50 && spyPrice < ma200;
         var bullishTrend = pdi > ndi;
         var bearishTrend = ndi > pdi;
 
-        if (aboveBoth && bullishTrend && vix < 20) return "Bullish";
-        if (belowBoth && bearishTrend && vix > 25) return "Bearish";
-        if (aboveBoth && bullishTrend)             return "Cautiously Bullish";
-        if (aboveBoth && bearishTrend)             return "Caution — Trend Reversal";
-        if (belowBoth)                             return "Cautiously Bearish";
+        if (aboveAll && bullishTrend && vix < 18)  return "Bullish";
+        if (belowAll && bearishTrend && vix > 25)  return "Bearish";
+        if (aboveAll && bullishTrend)              return "Cautiously Bullish";
+        if (spyPrice > ma50 && spyPrice < ma20)    return "Caution — Below 20MA";
+        if (spyPrice < ma50 && spyPrice > ma200)   return "Cautiously Bearish";
+        if (belowAll)                              return "Bearish";
         return "Neutral";
     }
 
@@ -374,9 +463,10 @@ public class MarketConditionsLogger
     private record SymbolData(
         decimal Price,
         decimal PrevClose,
+        decimal Ma20,
         decimal Ma50,
         decimal Ma200,
-        decimal Adx  = 0m,
-        decimal PDi  = 0m,
-        decimal NDi  = 0m);
+        decimal Adx = 0m,
+        decimal PDi = 0m,
+        decimal NDi = 0m);
 }

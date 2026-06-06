@@ -674,7 +674,7 @@ public class MarketSchedulerService : BackgroundService
 
         return
         [
-            (9,           0,           "HealthCheck"),
+            (9,           0,            "HealthCheck"),
             (9,           15,           "PositionSummary"),
             (9,           20,           "MarketConditions"),
             (11,          23,           "HealthCheck"),

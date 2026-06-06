@@ -13,7 +13,7 @@ public class IbkrEWrapper : EWrapper
 
     private readonly Dictionary<int, TaskCompletionSource<OrderFill>> _orderCallbacks = new();
     private readonly Dictionary<int, TaskCompletionSource<string>> _accountCallbacks = new();
-    private readonly Dictionary<string, TaskCompletionSource<decimal>> _positionCallbacks = new();
+    private readonly Dictionary<string, TaskCompletionSource<(decimal Price, int Quantity)>> _positionCallbacks = new();
     private readonly Dictionary<int, string> _rejectionReasons = new();
     private readonly Dictionary<int, Action<decimal>> _execDetailsCallbacks = new();
     private readonly Dictionary<int, TaskCompletionSource<decimal>> _execDetailsTcsCallbacks = new();
@@ -22,6 +22,8 @@ public class IbkrEWrapper : EWrapper
     private readonly Dictionary<int, TaskCompletionSource<decimal>> _marketDataCallbacks = new();
     private readonly Dictionary<int, decimal> _marketDataBids = new();
     private readonly Dictionary<int, decimal> _marketDataAsks = new();
+    // Historical data callbacks keyed by reqId, accumulates bars until historicalDataEnd fires
+    private readonly Dictionary<int, (List<HistoricalBar> Bars, TaskCompletionSource<List<HistoricalBar>> Tcs)> _historicalDataCallbacks = new();
 
     private Action? _onConnectionClosed;
     private readonly Lock _lock = new();
@@ -119,7 +121,7 @@ public class IbkrEWrapper : EWrapper
         {
             if (_positionCallbacks.TryGetValue(key, out var tcs))
             {
-                tcs.TrySetResult((decimal)avgCost);
+                tcs.TrySetResult(((decimal)avgCost, (int)pos));
                 _positionCallbacks.Remove(key);
             }
         }
@@ -205,6 +207,28 @@ public class IbkrEWrapper : EWrapper
     }
 
     /// <summary>
+    /// Registers a callback that resolves when Gateway finishes delivering historical bars.
+    /// </summary>
+    public TaskCompletionSource<List<HistoricalBar>> RegisterHistoricalDataCallback(int reqId)
+    {
+        var tcs = new TaskCompletionSource<List<HistoricalBar>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_lock)
+        {
+            _historicalDataCallbacks[reqId] = (new List<HistoricalBar>(), tcs);
+        }
+        return tcs;
+    }
+
+    /// <summary>
+    /// Removes a historical data callback on timeout before all bars arrive.
+    /// </summary>
+    public void UnregisterHistoricalDataCallback(int reqId)
+    {
+        lock (_lock) { _historicalDataCallbacks.Remove(reqId); }
+    }
+
+    /// <summary>
     /// Registers a callback that fires when IBKR reports an execution for the given order ID.
     /// </summary>
     public void RegisterExecDetailsCallback(int orderId, Action<decimal> handler)
@@ -241,10 +265,12 @@ public class IbkrEWrapper : EWrapper
 
     /// <summary>
     /// Registers a callback that resolves when IBKR returns position data for the given symbol key.
+    /// Resolves with both the average cost and the actual held quantity.
+    /// A negative quantity indicates a short position, the caller must guard against this.
     /// </summary>
-    public TaskCompletionSource<decimal> RegisterPositionCallback(string key)
+    public TaskCompletionSource<(decimal Price, int Quantity)> RegisterPositionCallback(string key)
     {
-        var tcs = new TaskCompletionSource<decimal>();
+        var tcs = new TaskCompletionSource<(decimal Price, int Quantity)>();
         lock (_lock) { _positionCallbacks[key] = tcs; }
         return tcs;
     }
@@ -387,6 +413,44 @@ public class IbkrEWrapper : EWrapper
         }
     }
 
+    public void historicalData(int reqId, Bar bar)
+    {
+        if (bar.Close <= 0) return;
+
+        var date = DateOnly.TryParseExact(bar.Time[..8], "yyyyMMdd",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out var d) ? d : DateOnly.MinValue;
+
+        if (date == DateOnly.MinValue) return;
+
+        var hBar = new HistoricalBar(
+            Date:   date,
+            Open:   (decimal)bar.Open,
+            High:   (decimal)bar.High,
+            Low:    (decimal)bar.Low,
+            Close:  (decimal)bar.Close,
+            Volume: (long)bar.Volume);
+
+        lock (_lock)
+        {
+            if (_historicalDataCallbacks.TryGetValue(reqId, out var entry))
+                entry.Bars.Add(hBar);
+        }
+    }
+
+    public void historicalDataEnd(int reqId, string start, string end)
+    {
+        _logger.LogDebug("IBKR historical data complete — reqId {ReqId}", reqId);
+        lock (_lock)
+        {
+            if (_historicalDataCallbacks.TryGetValue(reqId, out var entry))
+            {
+                entry.Tcs.TrySetResult(entry.Bars);
+                _historicalDataCallbacks.Remove(reqId);
+            }
+        }
+    }
+
     // Required interface stubs
     public void tickSize(int tickerId, int field, int size) { }
     public void tickString(int tickerId, int field, string value) { }
@@ -409,9 +473,7 @@ public class IbkrEWrapper : EWrapper
     public void execDetailsEnd(int reqId) { }
     public void commissionReport(CommissionReport commissionReport) { }
     public void fundamentalData(int reqId, string data) { }
-    public void historicalData(int reqId, Bar bar) { }
     public void historicalDataUpdate(int reqId, Bar bar) { }
-    public void historicalDataEnd(int reqId, string start, string end) { }
     public void marketDataType(int reqId, int marketDataType) { }
     public void updateMktDepth(int tickerId, int position, int operation, int side, double price, int size) { }
     public void updateMktDepthL2(int tickerId, int position, string marketMaker, int operation, int side, double price, int size, bool isSmartDepth) { }

@@ -78,7 +78,7 @@ builder.Services.AddSingleton<AlertMetrics>();
 builder.Services.AddSingleton<MarketRegimeService>();
 
 // Risk engine rules composed from options at startup.
-builder.Services.AddSingleton<RiskEngineService>(sp =>
+builder.Services.AddSingleton(sp =>
 {
     var riskOptions = sp.GetRequiredService<IOptions<RiskEngineOptions>>().Value;
     var regime = sp.GetRequiredService<MarketRegimeService>();
@@ -87,6 +87,7 @@ builder.Services.AddSingleton<RiskEngineService>(sp =>
     {
         new EntryOnlyRule(),
         new ApprovedOrHighScoreRule(riskOptions.ApprovedTraders, riskOptions.MinXScore),
+        new MinDiscordRankRule(riskOptions.AllowedDiscordRanks, riskOptions.ApprovedTraders),
         new NoHighRiskRule(!riskOptions.AllowHigh, () => regime.IsChoppy, () => regime.ChopScore),
         new NoLottoRule(!riskOptions.AllowLotto,   () => regime.IsChoppy, () => regime.ChopScore),
     };
@@ -106,7 +107,11 @@ builder.Services.AddSingleton<DiscordNotificationService>();
 builder.Services.AddScoped<IAlertRepository, AlertRepository>();
 builder.Services.AddScoped<IOpenPositionRepository, OpenPositionRepository>();
 builder.Services.AddScoped<ITradeMetricsRepository, TradeMetricsRepository>();
-builder.Services.AddSingleton<PositionSizer>();
+builder.Services.AddSingleton(sp =>
+    new PositionSizer(
+        sp.GetRequiredService<IOptions<RiskEngineOptions>>(),
+        sp.GetRequiredService<ILogger<PositionSizer>>(),
+        sp.GetRequiredService<MarketRegimeService>()));
 builder.Services.AddSingleton<TradeGuard>();
 builder.Services.AddSingleton<CsvTradeLogger>();
 builder.Services.AddSingleton<BrokerExecutionService>();
