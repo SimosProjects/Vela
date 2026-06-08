@@ -34,7 +34,7 @@ export const pnlColor = v => v >= 0 ? B.gr : B.rd;
 export const dirColor = d => d === 'call' ? B.gr : B.rd;
 
 export const fmtDollar = v =>
-  '$' + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  v == null ? '$0' : '$' + Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
 export const fmtDollarCents = v =>
   '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });

@@ -116,7 +116,9 @@ public class SystemStateService : BackgroundService
             using var scope = _scopeFactory.CreateScope();
             var db = scope.ServiceProvider.GetRequiredService<TradeFlowDbContext>();
 
-            var row = await db.SystemState.FindAsync(new object[] { 1 }, ct);
+            var row = await db.SystemState
+                .AsTracking()
+                .FirstOrDefaultAsync(s => s.Id == 1, ct);
 
             if (row is null)
             {
