@@ -6,9 +6,10 @@ Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike
 2026-06-05,11:36:17,,,PLTR,PLTR260702C00139000,call,139,Jul 02 2026,4,7.05,2820.00,24678,-4.08%,,,,,Open,Open,Tim,87,,,
 2026-06-05,12:25:50,,,PAAS,PAAS270115C00070000,call,70,Jan 15 2027,9,3.30,2970.00,17483,+3.13%,,,,,Open,Open,Theo,81,Top Analyst,,
 2026-06-06,03:31:10,2026-06-06,03:31:10,TSLA,TSLA260620C00450000,call,450,Jun 20 2026,2,4.95,990.00,-2,+0.00%,9.90,1980.00,-1,+0.00%,Closed,XtradesExit,TestTrader,0,,+990.00,+100.00%
+2026-06-08,02:16:59,2026-06-08,02:16:59,TSLA,TSLA260620C00450000,call,450,Jun 20 2026,2,4.95,990.00,-2,+0.00%,9.90,1980.00,-3,+0.00%,Closed,XtradesExit,TestTrader,0,,+990.00,+100.00%
 
 ,,SUMMARY
-,,Total Trades,7
-,,Open,6,Closed,1
-,,Wins,1,Losses,0,Win Rate,100.0%
-,,Total P&L,+990.00
+,,Total Trades,8
+,,Open,6,Closed,2
+,,Wins,2,Losses,0,Win Rate,100.0%
+,,Total P&L,+1980.00

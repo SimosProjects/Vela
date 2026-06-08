@@ -21,6 +21,7 @@ public class MarketConditionsLogger
     private readonly ILogger<MarketConditionsLogger> _logger;
     private readonly RiskEngineOptions _riskOptions;
     private readonly MarketRegimeService _regime;
+    private readonly SystemStateService _systemState;
 
     private static readonly TimeZoneInfo EasternTime =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
@@ -38,12 +39,14 @@ public class MarketConditionsLogger
         IBrokerService broker,
         ILogger<MarketConditionsLogger> logger,
         IOptions<RiskEngineOptions> riskOptions,
-        MarketRegimeService regime)
+        MarketRegimeService regime,
+        SystemStateService systemState)
     {
         _broker      = broker;
         _logger      = logger;
         _riskOptions = riskOptions.Value;
         _regime      = regime;
+        _systemState = systemState;
         _httpClient  = new HttpClient();
         _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
 
@@ -137,11 +140,11 @@ public class MarketConditionsLogger
 
             var chopScore = 0;
             if (Math.Abs(vixDeltaPct) >= (decimal)_riskOptions.ChopVixSpikePct) chopScore++;
-            if (spy.Adx > 0 && spy.Adx < (decimal)_riskOptions.ChopAdxThreshold)  chopScore++;
-            if (spy50MaPct >= (decimal)_riskOptions.ChopSpyExtendedPct)             chopScore++;
-            if (vix.Price >= (decimal)_riskOptions.ChopVixLevel)                    chopScore++;
-            if (spyBearishTrend)                                                     chopScore++;
-            if (spyBelowMa50)                                                        chopScore++;
+            if (spy.Adx > 0 && spy.Adx < (decimal)_riskOptions.ChopAdxThreshold) chopScore++;
+            if (spy50MaPct >= (decimal)_riskOptions.ChopSpyExtendedPct) chopScore++;
+            if (vix.Price >= (decimal)_riskOptions.ChopVixLevel) chopScore++;
+            if (spyBearishTrend) chopScore++;
+            if (spyBelowMa50) chopScore++;
 
             // -- Regime tier cascade --
             // 200MA = master switch. 50MA = weekly ceiling. 20MA = daily trigger.
@@ -152,6 +155,11 @@ public class MarketConditionsLogger
                 chopScore, _riskOptions.ChopMinSignals,
                 tier, sizingMultiplier, blockCalls,
                 spy.Ma20, spy.Ma50, spy.Ma200);
+
+            _systemState.UpdateRegime(
+                tier.ToString(), sizingMultiplier, blockCalls,
+                spy.Price, spy.Ma20, spy.Ma50, spy.Ma200,
+                vix.Price, (decimal)vixDeltaPct, chopScore);
 
             var bias = DetermineMarketBias(
                 spy.Price, spy.Ma20, spy.Ma50, spy.Ma200,

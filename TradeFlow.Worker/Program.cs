@@ -121,6 +121,9 @@ builder.Services.AddHostedService<MarketSchedulerService>();
 builder.Services.AddSingleton<IbkrConnectionService>();
 builder.Services.AddSingleton<IbkrBrokerService>();
 
+builder.Services.AddSingleton<SystemStateService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SystemStateService>());
+
 // Switch between paper/live trading and simulation via environment variable.
 // Set IBKR_ENABLED=true in .env to activate IbkrBrokerService.
 // Defaults to NullBrokerService when not set or set to anything else.
