@@ -1,0 +1,247 @@
+using TradeFlow.Api.Models;
+
+namespace TradeFlow.Api;
+
+/// <summary>
+/// Registers all dashboard endpoints. Follows the same extension method
+/// pattern as AlertEndpoints so Program.cs stays uniform.
+/// </summary>
+public static class DashboardEndpoints
+{
+    private static readonly TimeZoneInfo Et =
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
+    public static void MapDashboardEndpoints(this WebApplication app)
+    {
+        var group = app.MapGroup("/api/dashboard").WithTags("Dashboard");
+
+        group.MapGet("/state",        GetState)       .WithName("GetDashboardState")
+             .WithSummary("Returns regime, account snapshot, and system health.");
+
+        group.MapGet("/positions",    GetPositions)   .WithName("GetOpenPositions")
+             .WithSummary("Returns all currently open positions.");
+
+        group.MapGet("/closed-today", GetClosedToday) .WithName("GetClosedToday")
+             .WithSummary("Returns trades closed today in Eastern Time.");
+
+        group.MapPost("/pause",       TogglePause)    .WithName("TogglePause")
+             .WithSummary("Flips is_paused in system_state. Worker reads this at each poll cycle.");
+    }
+
+    // -- Handlers --
+
+    private static async Task<IResult> GetState(TradeFlowDbContext db, CancellationToken ct)
+    {
+        var state = await db.SystemState.FirstOrDefaultAsync(s => s.Id == 1, ct);
+
+        var todayStart  = TodayStartUtc();
+        var dailyPnl    = await db.TradeMetrics
+            .Where(t => t.ClosedAt >= todayStart)
+            .SumAsync(t => t.PnL ?? 0m, ct);
+
+        var lastAlertAt = await db.Alerts
+            .MaxAsync(a => (DateTimeOffset?)a.IngestedAt, ct);
+
+        var now        = DateTimeOffset.UtcNow;
+        var marketOpen = IsMarketOpen();
+
+        var workerRunning = state?.WorkerHeartbeat.HasValue == true
+            && (now - state.WorkerHeartbeat!.Value).TotalSeconds < 60;
+
+        // Xtrades feed is only expected to be active during market hours.
+        // Outside market hours, treat it as connected when the Worker is running.
+        var xtradesConnected = marketOpen
+            ? lastAlertAt.HasValue && (now - lastAlertAt.Value).TotalMinutes < 2
+            : workerRunning;
+
+        var balance      = state?.AccountBalance ?? 0m;
+        var openValue    = state?.OpenValue ?? 0m;
+        var exposurePct  = balance > 0 ? Math.Round(openValue / balance * 100, 1) : 0m;
+        var sizingPct    = (int)Math.Round((state?.SizingMultiplier ?? 1.0m) * 100);
+
+        var regime = new RegimeResponse(
+            Tier:       state?.RegimeTier ?? "Unknown",
+            SpyPrice:   state?.SpyPrice,
+            Ma20:       state?.Ma20,
+            Ma20pct:    CalcMaPct(state?.SpyPrice, state?.Ma20),
+            Ma50:       state?.Ma50,
+            Ma50pct:    CalcMaPct(state?.SpyPrice, state?.Ma50),
+            Ma200:      state?.Ma200,
+            Ma200pct:   CalcMaPct(state?.SpyPrice, state?.Ma200),
+            Vix:        state?.Vix,
+            VixDelta:   state?.VixDelta,
+            SizingPct:  sizingPct,
+            BlockCalls: state?.BlockCalls ?? false,
+            ChopScore:  state?.ChopScore,
+            Bias:       DetermineMarketBias(state?.RegimeTier, state?.Vix)
+        );
+
+        var account = new AccountResponse(
+            Balance:     balance,
+            OpenValue:   openValue,
+            ExposurePct: exposurePct,
+            DailyPnl:    dailyPnl
+        );
+
+        var system = new SystemStatusResponse(
+            IbkrConnected:    state?.IbkrConnected ?? false,
+            XtradesConnected: xtradesConnected,
+            WorkerRunning:    workerRunning,
+            MarketOpen:       marketOpen,
+            IsPaused:         state?.IsPaused ?? false,
+            WorkerHeartbeat:  state?.WorkerHeartbeat,
+            LastAlertAt:      lastAlertAt
+        );
+
+        return Results.Ok(new DashboardStateResponse(regime, account, system));
+    }
+
+    private static async Task<IResult> GetPositions(TradeFlowDbContext db, CancellationToken ct)
+    {
+        // Materialise first, FormatContract is a C# method EF cannot translate to SQL
+        var raw = await (
+            from p in db.OpenPositions
+            join a in db.Alerts on p.AlertId equals a.Id into alertJoin
+            from a in alertJoin.DefaultIfEmpty()
+            select new
+            {
+                p.OrderId,
+                p.Symbol,
+                p.OptionsContract,
+                p.Direction,
+                p.Quantity,
+                p.EntryPrice,
+                p.EntryAmount,
+                p.StopPrice,
+                p.TargetPrice,
+                p.OpenedAt,
+                p.UserName,
+                XScore = a != null ? (double?)a.XScore : null,
+            }
+        ).ToListAsync(ct);
+
+        var positions = raw.Select(x => new PositionResponse(
+            Id:          x.OrderId,
+            Contract:    FormatContract(x.OptionsContract, x.Symbol),
+            Direction:   x.Direction,
+            Quantity:    x.Quantity,
+            EntryPrice:  x.EntryPrice,
+            CostBasis:   x.EntryAmount,
+            StopPrice:   x.StopPrice,
+            TargetPrice: x.TargetPrice,
+            OpenedAt:    x.OpenedAt,
+            Trader:      x.UserName,
+            XScore:      x.XScore
+        )).ToList();
+
+        return Results.Ok(positions);
+    }
+
+    private static async Task<IResult> GetClosedToday(TradeFlowDbContext db, CancellationToken ct)
+    {
+        var todayStart = TodayStartUtc();
+
+        // Materialise first, FormatContract is not SQL-translatable
+        var raw = await db.TradeMetrics
+            .Where(t => t.ClosedAt >= todayStart)
+            .OrderByDescending(t => t.ClosedAt)
+            .ToListAsync(ct);
+
+        var trades = raw.Select(t => new ClosedTradeResponse(
+            Id:          t.Id,
+            Contract:    FormatContract(t.OptionsContract, t.Symbol),
+            Direction:   t.Direction,
+            Trader:      t.TraderName,
+            XScore:      t.XScore.HasValue ? (double)t.XScore.Value : null,
+            DiscordRank: t.DiscordRank,
+            Quantity:    t.Quantity,
+            EntryPrice:  t.FillPrice,
+            ExitPrice:   t.ExitPrice,
+            Pnl:         t.PnL,
+            PnlPct:      t.PnLPct,
+            Outcome:     t.Outcome,
+            ClosedAt:    t.ClosedAt
+        )).ToList();
+
+        return Results.Ok(trades);
+    }
+
+    private static async Task<IResult> TogglePause(TradeFlowDbContext db, CancellationToken ct)
+    {
+        var state = await db.SystemState.FirstOrDefaultAsync(s => s.Id == 1, ct);
+        if (state is null)
+            return Results.NotFound("system_state row not yet initialised — is the Worker running?");
+
+        var newPaused = !state.IsPaused;
+
+        // ExecuteUpdateAsync avoids the need for change tracking on a NoTracking context
+        await db.SystemState
+            .Where(s => s.Id == 1)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.IsPaused, newPaused), ct);
+
+        return Results.Ok(new { isPaused = newPaused });
+    }
+
+    // -- Helpers --
+
+    private static DateTimeOffset TodayStartUtc()
+    {
+        var todayEt = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, Et).Date;
+        return TimeZoneInfo.ConvertTimeToUtc(
+            DateTime.SpecifyKind(todayEt, DateTimeKind.Unspecified), Et);
+    }
+
+    private static bool IsMarketOpen()
+    {
+        var now = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, Et);
+        return now.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday)
+            && now.TimeOfDay >= new TimeSpan(9, 30, 0)
+            && now.TimeOfDay < new TimeSpan(16, 0, 0);
+    }
+
+    private static decimal CalcMaPct(decimal? price, decimal? ma) =>
+        price > 0 && ma > 0
+            ? Math.Round((price!.Value - ma!.Value) / ma.Value * 100, 2)
+            : 0m;
+
+    private static string DetermineMarketBias(string? tier, decimal? vix) => tier switch
+    {
+        "Bullish" => vix >= 20 ? "Cautiously Bullish" : "Bullish",
+        "Choppy"  => "Choppy",
+        "Bearish" => vix >= 25 ? "Bearish — Elevated Volatility" : "Bearish",
+        _         => "Unknown"
+    };
+
+    // Parses an OCC-format options contract symbol into a human-readable display string.
+    // Example: TSLA260620C00250000 → TSLA 250C 6/20
+    // Falls back to the underlying symbol for stocks or unparseable contracts.
+    private static string FormatContract(string? occ, string? symbol)
+    {
+        if (string.IsNullOrEmpty(occ) || occ.Length < 15)
+            return symbol ?? string.Empty;
+
+        try
+        {
+            // OCC format: ROOT(1-6) + YYMMDD(6) + C/P(1) + STRIKE(8 digits, x1000)
+            var strike   = decimal.Parse(occ[^8..]) / 1000m;
+            var type     = occ[^9..^8];
+            var datePart = occ[^15..^9];
+
+            var year  = 2000 + int.Parse(datePart[..2]);
+            var month = int.Parse(datePart[2..4]);
+            var day   = int.Parse(datePart[4..6]);
+            var date  = new DateOnly(year, month, day);
+
+            // Drop the decimal when the strike is a whole number (250 not 250.00)
+            var strikeStr = strike % 1 == 0
+                ? ((int)strike).ToString()
+                : strike.ToString("0.##");
+
+            return $"{symbol} {strikeStr}{type} {date:M/d}";
+        }
+        catch
+        {
+            return occ;
+        }
+    }
+}
