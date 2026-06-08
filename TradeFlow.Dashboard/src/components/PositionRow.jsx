@@ -10,7 +10,7 @@ export function PositionRow({ position, onClose, isLast }) {
     <div
       className="pos-row"
       style={{
-        padding: '9px 14px',
+        padding: '6px 10px',
         borderBottom: isLast ? 'none' : `1px solid ${B.bd2}`,
         transition: 'background 0.1s',
       }}

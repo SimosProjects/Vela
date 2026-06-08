@@ -22,7 +22,7 @@ export function DesktopLayout({ data, paused, onTogglePause, onForceClose, lastU
       <StatBar account={account} />
 
       <div style={{ flex: 1, overflow: 'auto' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 276px', gap: 12, padding: 12, alignItems: 'start' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 360px', gap: 12, padding: 12, alignItems: 'start' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <OpenPositions positions={positions} lastUpdated={lastUpdated} onClose={onForceClose} />
             <ClosedTrades trades={closedToday} />
