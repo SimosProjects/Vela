@@ -39,7 +39,21 @@ export const fmtDollar = v =>
 export const fmtDollarCents = v =>
   '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-export const fmtPct = v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
+export const fmtPct = v => v == null ? '—' : (v >= 0 ? '+' : '') + v.toFixed(1) + '%';
 
 export const effectiveBudget = (sizingPct, budget) =>
   Math.round(budget * sizingPct / 100);
+
+export const fmtTime = iso => {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+      timeZone: 'America/New_York',
+    }) + ' ET';
+  } catch {
+    return String(iso);
+  }
+};

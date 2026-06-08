@@ -1,4 +1,4 @@
-import { B, pnlColor, dirColor, fmtDollar, fmtDollarCents, fmtPct, OUTCOME_COLORS } from '../styles/theme.js';
+import { B, pnlColor, dirColor, fmtDollar, fmtDollarCents, fmtPct, OUTCOME_COLORS, fmtTime } from '../styles/theme.js';
 import { Card, Pill } from './shared/index.js';
 
 export function ClosedTrades({ trades }) {
@@ -33,7 +33,7 @@ export function ClosedTrades({ trades }) {
               </div>
             </div>
             <div style={{ fontSize: 10, color: B.mu }}>
-              {t.trader} · xs{t.xScore} · {t.quantity}× ${t.entryPrice.toFixed(2)} → ${t.exitPrice.toFixed(2)} · {t.closedAt}
+              {t.trader} · xs{t.xScore} · {t.quantity}× ${t.entryPrice?.toFixed(2) ?? '—'} → ${t.exitPrice?.toFixed(2) ?? '—'} · {fmtTime(t.closedAt)}
             </div>
           </div>
         );

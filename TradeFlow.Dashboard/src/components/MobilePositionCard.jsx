@@ -1,4 +1,4 @@
-import { B, dirColor, fmtDollar } from '../styles/theme.js';
+import { B, dirColor, fmtDollar, fmtTime } from '../styles/theme.js';
 import { Pill } from './shared/index.js';
 
 export function MobilePositionCard({ position, onClose }) {
@@ -44,7 +44,7 @@ export function MobilePositionCard({ position, onClose }) {
             {trader} <span style={{ color: B.mu }}>xs{xScore}</span>
           </div>
           <div style={{ fontSize: 10, color: B.mu, marginTop: 1 }}>
-            {fmtDollar(costBasis)} cost · Trail {trailPct}% · {openedAt}
+            {fmtDollar(costBasis)} cost · Trail {trailPct}% · {fmtTime(openedAt)}
           </div>
         </div>
         <button

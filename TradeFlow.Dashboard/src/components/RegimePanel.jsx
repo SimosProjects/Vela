@@ -3,7 +3,7 @@ import { Card } from './shared/index.js';
 
 export function RegimePanel({ regime }) {
   const rc = REGIME_COLORS[regime.tier] ?? REGIME_COLORS.Bullish;
-  const budget = effectiveBudget(regime.sizingPct, regime.optionsBudget);
+  const budget = effectiveBudget(regime.sizingPct, regime.optionsBudget ?? 3000);
 
   const mas = [
     { label: '20MA',  value: regime.ma20,  pct: regime.ma20pct  },
@@ -30,19 +30,19 @@ export function RegimePanel({ regime }) {
       </div>
 
       <div style={{ fontSize: 13, fontWeight: 600, color: B.tx, marginBottom: 8 }}>
-        SPY ${regime.spyPrice.toFixed(2)}
+        SPY {regime.spyPrice != null ? `$${regime.spyPrice.toFixed(2)}` : '—'}
       </div>
 
       {mas.map(m => (
         <div key={m.label} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: 12, alignItems: 'center' }}>
           <span style={{ color: B.mu, minWidth: 38 }}>{m.label}</span>
-          <span style={{ color: B.mu2 }}>${m.value.toFixed(2)}</span>
+          <span style={{ color: B.mu2 }}>{m.value != null ? `$${m.value.toFixed(2)}` : '—'}</span>
           <span style={{
             padding: '1px 5px', borderRadius: 3, fontSize: 11,
             color: m.pct >= 0 ? B.gr : B.rd,
             background: m.pct >= 0 ? 'rgba(63,185,80,0.1)' : 'rgba(248,81,73,0.1)',
           }}>
-            {m.pct >= 0 ? '+' : ''}{m.pct.toFixed(2)}%
+            {m.pct != null ? `${m.pct >= 0 ? '+' : ''}${m.pct.toFixed(2)}%` : '—'}
           </span>
         </div>
       ))}
@@ -53,7 +53,7 @@ export function RegimePanel({ regime }) {
         <div>
           <div style={{ fontSize: 10, color: B.mu, marginBottom: 2 }}>VIX</div>
           <div style={{ fontSize: 18, fontWeight: 700, color: regime.vix > 20 ? B.rd : B.gr }}>
-            {regime.vix.toFixed(2)}
+            {regime.vix?.toFixed(2) ?? '—'}
           </div>
           <div style={{ fontSize: 11, color: regime.vixDelta <= 0 ? B.gr : B.rd }}>
             {fmtPct(regime.vixDelta)} today

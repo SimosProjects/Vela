@@ -1,4 +1,4 @@
-import { B, dirColor, fmtDollar } from '../styles/theme.js';
+import { B, dirColor, fmtDollar, fmtTime } from '../styles/theme.js';
 import { Pill } from './shared/index.js';
 
 export function PositionRow({ position, onClose, isLast }) {
@@ -63,7 +63,7 @@ export function PositionRow({ position, onClose, isLast }) {
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ color: B.mu2 }}>Opened</div>
-          <div style={{ color: B.mu }}>{openedAt}</div>
+          <div style={{ color: B.mu }}>{fmtTime(openedAt)}</div>
         </div>
       </div>
 
