@@ -1,0 +1,74 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: #0d1117;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  color: #e6edf3;
+}
+
+button {
+  font-family: inherit;
+  -webkit-appearance: none;
+  touch-action: manipulation;
+  cursor: pointer;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: #0d1117; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 2px; }
+
+/* Hover states defined in CSS so they survive innerHTML re-renders */
+.pos-row:hover        { background: #1c2128 !important; }
+.btn-close:hover      { background: rgba(248, 81, 73, 0.18) !important; }
+.pause-btn:hover      { border-color: #d29922 !important; color: #d29922 !important; }
+.tab-btn:hover        { color: #58a6ff !important; }
+.roster-toggle:hover  { background: #21262d !important; }
+.toolbar-btn:hover    { background: #161b22 !important; color: #e6edf3 !important; }
+
+/* Tab content fade */
+.tab-content {
+  animation: fadein 0.12s ease;
+}
+@keyframes fadein {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Modal — bottom sheet on mobile */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.78);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.modal-sheet {
+  background: #161b22;
+  border-radius: 16px 16px 0 0;
+  padding: 24px 20px max(28px, env(safe-area-inset-bottom));
+}
+
+/* Modal — centered dialog on desktop */
+.modal-overlay-desk {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.78);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
