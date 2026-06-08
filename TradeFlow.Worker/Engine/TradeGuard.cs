@@ -43,6 +43,12 @@ public class TradeGuard
     private decimal _cachedOpenValue = 0m;
     private readonly Lock _cacheLock = new();
 
+    /// <summary>Last IBKR-fetched account balance. Refreshed every 30 seconds.</summary>
+    public decimal CachedBalance   { get { lock (_cacheLock) return _cachedBalance;   } }
+
+    /// <summary>Last IBKR-fetched open positions value. Refreshed every 30 seconds.</summary>
+    public decimal CachedOpenValue { get { lock (_cacheLock) return _cachedOpenValue; } }
+
     private CancellationTokenSource? _refreshCts;
 
     public TradeGuard(

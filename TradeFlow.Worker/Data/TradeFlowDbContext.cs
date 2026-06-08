@@ -15,6 +15,7 @@ public class TradeFlowDbContext : DbContext
     public DbSet<AlertEntity> Alerts { get; set; }
     public DbSet<TradeMetric> TradeMetrics { get; set; }
     public DbSet<OpenPosition> OpenPositions { get; set; }
+    public DbSet<SystemState> SystemState { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -130,6 +131,30 @@ public class TradeFlowDbContext : DbContext
             entity.Property(p => p.OpenedAt).HasColumnName("opened_at");
             entity.Property(p => p.IsAverage).HasColumnName("is_average");
             entity.Property(p => p.HasAveraged).HasColumnName("has_averaged");
+        });
+
+        modelBuilder.Entity<SystemState>(entity =>
+        {
+            entity.ToTable("system_state");
+            entity.HasKey(s => s.Id);
+
+            entity.Property(s => s.Id).HasColumnName("id").ValueGeneratedNever();
+            entity.Property(s => s.RegimeTier).HasColumnName("regime_tier");
+            entity.Property(s => s.SizingMultiplier).HasColumnName("sizing_multiplier");
+            entity.Property(s => s.BlockCalls).HasColumnName("block_calls");
+            entity.Property(s => s.SpyPrice).HasColumnName("spy_price");
+            entity.Property(s => s.Ma20).HasColumnName("ma20");
+            entity.Property(s => s.Ma50).HasColumnName("ma50");
+            entity.Property(s => s.Ma200).HasColumnName("ma200");
+            entity.Property(s => s.Vix).HasColumnName("vix");
+            entity.Property(s => s.VixDelta).HasColumnName("vix_delta");
+            entity.Property(s => s.ChopScore).HasColumnName("chop_score");
+            entity.Property(s => s.IsPaused).HasColumnName("is_paused");
+            entity.Property(s => s.IbkrConnected).HasColumnName("ibkr_connected");
+            entity.Property(s => s.WorkerHeartbeat).HasColumnName("worker_heartbeat");
+            entity.Property(s => s.AccountBalance).HasColumnName("account_balance");
+            entity.Property(s => s.OpenValue).HasColumnName("open_value");
+            entity.Property(s => s.UpdatedAt).HasColumnName("updated_at");
         });
     }
 }

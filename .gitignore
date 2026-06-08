@@ -7,3 +7,8 @@ appsettings.Development.json
 logs/
 reports/
 TradeFlow.Analytics/reports/
+
+# Node / React dashboard
+TradeFlow.Dashboard/node_modules/
+TradeFlow.Api/wwwroot/
+.vite/

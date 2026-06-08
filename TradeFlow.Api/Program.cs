@@ -54,6 +54,7 @@ else
 if (!app.Environment.IsEnvironment("Testing"))
     app.UseHttpsRedirection();
 
+app.UseStaticFiles();
 app.UseOutputCache();
 
 app.MapHealthChecks("/health/live");
@@ -63,6 +64,8 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
 });
 
 app.MapAlertEndpoints();
+app.MapDashboardEndpoints();
+app.MapFallbackToFile("index.html");
 
 app.Run();
 
