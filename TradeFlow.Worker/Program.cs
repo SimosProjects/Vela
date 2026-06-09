@@ -87,7 +87,6 @@ builder.Services.AddSingleton(sp =>
     {
         new EntryOnlyRule(),
         new ApprovedOrHighScoreRule(riskOptions.ApprovedTraders, riskOptions.MinXScore),
-        new MinDiscordRankRule(riskOptions.AllowedDiscordRanks, riskOptions.ApprovedTraders),
         new NoHighRiskRule(!riskOptions.AllowHigh, () => regime.IsChoppy, () => regime.ChopScore),
         new NoLottoRule(!riskOptions.AllowLotto,   () => regime.IsChoppy, () => regime.ChopScore),
     };

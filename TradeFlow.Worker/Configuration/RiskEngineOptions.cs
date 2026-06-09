@@ -126,10 +126,6 @@ public class RiskEngineOptions
     // Minimum % below 50MA to trigger the bearish structure signal (0 = any amount below)
     public double ChopSpyBelowMaPct { get; init; } = 0.0;
 
-    // Allowed Discord rank prefixes. Empty list disables the check.
-    // Prefix-matched: "Top Analyst" covers "Top Analyst 1", "Top Analyst 2", etc.
-    public List<string> AllowedDiscordRanks { get; init; } = [];
-
     // Position sizing multiplier when regime is Bullish (SPY above 20MA, VIX calm).
     // 1.0 = full budget. Applied to both options and stock initial/average budgets.
     [Range(0.1, 1.0)]
