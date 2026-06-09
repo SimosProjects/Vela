@@ -23,7 +23,7 @@ public class MinDiscordRankRule : IRiskRule
         var rank = alert.DiscordRank;
 
         if (string.IsNullOrEmpty(rank))
-            return RuleResult.Fail("Trader has no Discord rank");
+            return RuleResult.Pass("No Discord rank — xScore gate applies");
 
         var allowed = _allowedRanks.Any(r =>
             rank.StartsWith(r, StringComparison.OrdinalIgnoreCase));

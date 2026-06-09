@@ -1,18 +1,14 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %
-2026-06-02,10:05:51,,,MSFT,3,445.22,1335.66,2270,+0.05%,,,,,Open,Open,Theo,81,Top Analyst,,
-2026-06-03,09:38:31,,,NFLX,18,82.32,1481.76,2242,-0.22%,,,,,Open,Open,mikeb018,79,,,
-2026-06-03,10:17:13,,,DDOG,5,250.38,1251.90,2541,+0.13%,,,,,Open,Open,SLAM,78,,,
-2026-06-05,09:31:25,,,FITB,57,51.89,2957.73,2940,+0.17%,,,,,Open,Open,Skep,82,Top Trader,,
-2026-06-05,09:59:51,,,TSLA,7,410.05,2870.35,2185,+0.01%,,,,,Open,Open,Theo,81,Top Analyst,,
-2026-06-05,10:14:17,,,ULTA,6,473.00,2838.00,2990,+0.47%,,,,,Open,Open,Buzo,78,,,
-2026-06-05,10:14:54,,,APLD,74,40.48,2995.52,3657,+0.10%,,,,,Open,Open,SLAM,78,,,
-2026-06-05,10:19:36,,,FN,4,684.00,2736.00,2301,+0.44%,,,,,Open,Open,Buzo,78,,,
-2026-06-05,10:37:36,,,NIO,550,5.45,2997.50,2107,+0.00%,,,,,Open,Open,mikeb018,79,,,
-2026-06-05,10:39:09,,,AVGO,7,402.38,2816.66,2182,-1.45%,,,,,Open,Open,SLAM,78,,,
-2026-06-05,13:21:56,,,SOFI,189,15.86,2997.54,2652,+0.06%,,,,,Open,Open,KrazyA - [$TSLA 👶 🐐],77,Top Analyst,,
+2026-06-08,11:36:52,2026-06-08,15:03:08,AMD,6,489.59,2937.54,2893,+0.08%,490.11,2940.66,2603,-0.04%,Closed,XtradesExit,Lukasz,65,,+3.12,+0.11%
+2026-06-08,15:03:41,2026-06-08,15:31:42,AMD,6,491.62,2949.72,2141,+0.26%,489.85,2939.10,2464,+0.00%,Closed,XtradesExit,Lukasz,65,,-10.62,-0.36%
+2026-06-08,14:25:48,,,SHAK,55,53.99,2969.45,2899,+0.04%,,,,,Open,Open,Kevin Izaguirrre,74,,,
+2026-06-08,14:32:21,,,META,5,588.48,2942.40,2579,0.00%,,,,,Open,Open,Theo,81,Top Analyst 8,,
+2026-06-08,15:03:41,,,AMD,6,491.62,2949.72,2141,+0.26%,,,,,Open,Open,Lukasz,65,,,
+2026-06-08,15:31:59,,,AMD,6,490.36,2942.16,1862,+0.09%,,,,,Open,Open,Lukasz,65,,,
+2026-06-08,15:52:43,,,LITE,3,889.96,2669.88,2038,+0.01%,,,,,Open,Open,ultra,72,,,
 
 ,,SUMMARY
-,,Total Trades,11
-,,Open,11,Closed,0
-,,Wins,0,Losses,0,Win Rate,0.0%
-,,Total P&L,+0.00
+,,Total Trades,7
+,,Open,5,Closed,2
+,,Wins,1,Losses,1,Win Rate,50.0%
+,,Total P&L,-7.50
