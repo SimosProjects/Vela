@@ -137,7 +137,7 @@ public class IbkrBrokerService : IBrokerService
 
     /// <summary>
     /// Returns the current average cost and actual held quantity of an open position from IBKR.
-    /// Quantity will be negative for short positions, BrokerExecutionService guards against this.
+    /// Quantity will be negative for short positions — BrokerExecutionService guards against this.
     /// Returns (0, 0) if the position is not found or the request times out.
     /// </summary>
     public async Task<(decimal Price, int Quantity)> GetCurrentPositionPriceAsync(
@@ -173,6 +173,64 @@ public class IbkrBrokerService : IBrokerService
         finally
         {
             _connection.Client.cancelPositions();
+        }
+    }
+
+public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return [];
+
+        var tcs = _connection.Wrapper.RegisterAllPositionsCallback();
+        _connection.Client.reqPositions();
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(30));
+            var positions = await tcs.Task.WaitAsync(cts.Token);
+            _logger.LogDebug(
+                "IBKR GetAllPositions — {Count} positions received", positions.Count);
+            return positions;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("IBKR GetAllPositions timed out.");
+            _connection.Wrapper.UnregisterAllPositionsCallback();
+            return [];
+        }
+        finally
+        {
+            _connection.Client.cancelPositions();
+        }
+    }
+
+    /// <summary>
+    /// Returns all open orders currently active in the IBKR account.
+    /// Calls reqAllOpenOrders() and waits for openOrderEnd() to signal completion.
+    /// Used by StartupReconciliationService to cancel orphan GTC orders.
+    /// Returns an empty list if the request times out.
+    /// </summary>
+    public async Task<List<IbkrOpenOrder>> GetAllOpenOrdersAsync(CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return [];
+
+        var tcs = _connection.Wrapper.RegisterAllOpenOrdersCallback();
+        _connection.Client.reqAllOpenOrders();
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(15));
+            var orders = await tcs.Task.WaitAsync(cts.Token);
+            _logger.LogDebug(
+                "IBKR GetAllOpenOrders — {Count} orders received", orders.Count);
+            return orders;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("IBKR GetAllOpenOrders timed out.");
+            _connection.Wrapper.UnregisterAllOpenOrdersCallback();
+            return [];
         }
     }
 
@@ -283,9 +341,9 @@ public class IbkrBrokerService : IBrokerService
     /// <summary>
     /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
     /// an OCA group containing a TRAIL stop. The LMT target order is omitted until IBKR Level 3
-    /// options approval is granted, Level 2 rejects LMT sell orders in OCA groups.
+    /// options approval is granted — Level 2 rejects LMT sell orders in OCA groups.
     /// On timeout, waits an additional 10 seconds for a late ExecDetails callback before
-    /// giving up, prevents ghost trades when the fill arrives after the timeout fires.
+    /// giving up — prevents ghost trades when the fill arrives after the timeout fires.
     /// Partial fills are handled by reading FilledQuantity from the orderStatus callback (normal
     /// path) or reqPositions (late fill path) so the trail stop always matches the actual position.
     /// </summary>
@@ -301,7 +359,7 @@ public class IbkrBrokerService : IBrokerService
         var contract   = BuildContract(order);
         var entryOrder = BuildMarketOrder(orderId, order.Quantity, "BUY");
 
-        // Register exec details TCS before placing, catches late fills that arrive
+        // Register exec details TCS before placing — catches late fills that arrive
         // after the 15s timeout fires and the order cancel is sent to IBKR.
         var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId);
 
@@ -323,10 +381,10 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(15));
 
-            // Only resolves when IBKR confirms status "Filled".
+            // Only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
             var state = await tcs.Task.WaitAsync(cts.Token);
 
-            // Normal fill
+            // Normal fill — exec details TCS no longer needed
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
             _logger.LogInformation(
@@ -336,7 +394,7 @@ public class IbkrBrokerService : IBrokerService
             _connection.Client.cancelOrder(tempStopId);
             await Task.Delay(300, ct);
 
-            // Use FilledQuantity from orderStatus, may be less than order.Quantity on a partial
+            // Use FilledQuantity from orderStatus — may be less than order.Quantity on a partial
             // fill. Trail stop must match actual position size to avoid overselling into a short.
             var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
             var fillQty    = state.FilledQuantity > 0 ? state.FilledQuantity : order.Quantity;
@@ -381,7 +439,7 @@ public class IbkrBrokerService : IBrokerService
             _connection.Client.cancelOrder(tempStopId);
             _connection.Wrapper.UnregisterOrderCallback(orderId);
 
-            // Wait up to 10 seconds for a late ExecDetails callback, the fill may have
+            // Wait up to 10 seconds for a late ExecDetails callback — the fill may have
             // already reached IBKR before the cancel arrived, creating a ghost trade.
             try
             {
@@ -396,7 +454,7 @@ public class IbkrBrokerService : IBrokerService
 
                 await Task.Delay(300, ct);
 
-                // ExecDetails only provides price, use reqPositions to verify actual filled
+                // ExecDetails only provides price — use reqPositions to verify actual filled
                 // quantity since late fills may be partial and trail stop must match position size.
                 var posKey = order.TradeType == TradeType.Options
                     ? $"{order.Symbol}::{order.OptionsContractSymbol}"

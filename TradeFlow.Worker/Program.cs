@@ -42,7 +42,6 @@ var connectionString = builder.Configuration.GetConnectionString("TradeFlow")
 builder.Services.AddDbContext<TradeFlowDbContext>(options =>
 {
     options.UseNpgsql(connectionString);
-    // NoTracking improves read performance, opt in with AsTracking() only when saving
     options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
 },
 ServiceLifetime.Scoped);
@@ -62,7 +61,6 @@ builder.Services.AddHttpClient<IAlertApiClient, TradeFlow.Worker.Services.AlertA
     options.Retry.MaxRetryAttempts = 3;
 });
 
-// Named HTTP client for SignalRListenerService negotiate calls
 builder.Services.AddHttpClient("SignalR", client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
@@ -81,8 +79,8 @@ builder.Services.AddSingleton<MarketRegimeService>();
 builder.Services.AddSingleton(sp =>
 {
     var riskOptions = sp.GetRequiredService<IOptions<RiskEngineOptions>>().Value;
-    var regime = sp.GetRequiredService<MarketRegimeService>();
- 
+    var regime      = sp.GetRequiredService<MarketRegimeService>();
+
     var rules = new List<IRiskRule>
     {
         new EntryOnlyRule(),
@@ -90,15 +88,15 @@ builder.Services.AddSingleton(sp =>
         new NoHighRiskRule(!riskOptions.AllowHigh, () => regime.IsChoppy, () => regime.ChopScore),
         new NoLottoRule(!riskOptions.AllowLotto,   () => regime.IsChoppy, () => regime.ChopScore),
     };
- 
+
     if (riskOptions.MinStockPriceDollars > 0)
         rules.Insert(1, new MinStockPriceRule(riskOptions.MinStockPriceDollars));
- 
+
     rules.Insert(1, new No0DTEAfterCutoffRule(riskOptions.ZeroDteEntryCutoffHour));
- 
+
     if (riskOptions.BlockedSymbols.Count > 0)
         rules.Insert(0, new BlockedSymbolsRule(riskOptions.BlockedSymbols));
- 
+
     return new RiskEngineService(rules);
 });
 
@@ -183,6 +181,30 @@ using (var scope = host.Services.CreateScope())
             broker.ReRegisterStopCallbacks(positions);
         }
     }
+}
+
+// Reconcile IBKR actual state against the database before any alerts are processed.
+// Cancels orphan orders, verifies DB positions against IBKR, and covers any shorts.
+// Only runs when IBKR is enabled — NullBrokerService returns empty lists and skips gracefully.
+if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+{
+    // Brief delay to let Gateway settle after connection and callback re-registration
+    await Task.Delay(TimeSpan.FromSeconds(3));
+
+    using var reconScope = host.Services.CreateScope();
+    var broker  = host.Services.GetRequiredService<IBrokerService>();
+    var repo    = reconScope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+    var guard   = host.Services.GetRequiredService<TradeGuard>();
+    var discord = host.Services.GetRequiredService<DiscordNotificationService>();
+
+    var reconciliation = new StartupReconciliationService(
+        broker,
+        repo,
+        guard,
+        discord,
+        host.Services.GetRequiredService<ILogger<StartupReconciliationService>>());
+
+    await reconciliation.RunAsync();
 }
 
 host.Run();

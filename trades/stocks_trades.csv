@@ -3,12 +3,11 @@ Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry 
 2026-06-08,15:03:41,2026-06-08,15:31:42,AMD,6,491.62,2949.72,2141,+0.26%,489.85,2939.10,2464,+0.00%,Closed,XtradesExit,Lukasz,65,,-10.62,-0.36%
 2026-06-08,14:25:48,,,SHAK,55,53.99,2969.45,2899,+0.04%,,,,,Open,Open,Kevin Izaguirrre,74,,,
 2026-06-08,14:32:21,,,META,5,588.48,2942.40,2579,0.00%,,,,,Open,Open,Theo,81,Top Analyst 8,,
-2026-06-08,15:03:41,,,AMD,6,491.62,2949.72,2141,+0.26%,,,,,Open,Open,Lukasz,65,,,
-2026-06-08,15:31:59,,,AMD,6,490.36,2942.16,1862,+0.09%,,,,,Open,Open,Lukasz,65,,,
 2026-06-08,15:52:43,,,LITE,3,889.96,2669.88,2038,+0.01%,,,,,Open,Open,ultra,72,,,
+2026-06-08,15:03:41,,,AMD,12,490.9900,5891.88,2141,+0.26%,,,,,Open,Open,Lukasz,65,,,
 
 ,,SUMMARY
-,,Total Trades,7
-,,Open,5,Closed,2
+,,Total Trades,6
+,,Open,4,Closed,2
 ,,Wins,1,Losses,1,Win Rate,50.0%
 ,,Total P&L,-7.50

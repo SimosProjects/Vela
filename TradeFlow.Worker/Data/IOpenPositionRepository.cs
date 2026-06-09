@@ -1,3 +1,5 @@
+using TradeFlow.Worker.Models;
+
 namespace TradeFlow.Worker.Data;
 
 /// <summary>
@@ -16,6 +18,22 @@ public interface IOpenPositionRepository
 
     /// <summary>Updates the quantity of an open position after a partial close.</summary>
     Task UpdateQuantityAsync(string orderId, int newQuantity, CancellationToken ct = default);
+
+    /// <summary>Finds an open position by symbol and trader username.</summary>
+    Task<OpenPosition?> GetBySymbolAndUserAsync(
+        string symbol, string userName, CancellationToken ct = default);
+
+    /// <summary>
+    /// Updates an averaged position, combines quantity, recalculates weighted entry price,
+    /// and updates the stop order ID to the new OCA trail stop.
+    /// </summary>
+    Task UpdateAverageAsync(
+        string orderId,
+        int newQuantity,
+        decimal newEntryPrice,
+        decimal newEntryAmount,
+        string? newStopOrderId,
+        CancellationToken ct = default);
 }
 
 /// <inheritdoc/>
@@ -26,7 +44,7 @@ public class OpenPositionRepository : IOpenPositionRepository
 
     public OpenPositionRepository(TradeFlowDbContext db, ILogger<OpenPositionRepository> logger)
     {
-        _db = db;
+        _db     = db;
         _logger = logger;
     }
 
@@ -95,6 +113,52 @@ public class OpenPositionRepository : IOpenPositionRepository
         {
             _logger.LogError(ex,
                 "Failed to update quantity for open position OrderId: {OrderId}", orderId);
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task<OpenPosition?> GetBySymbolAndUserAsync(
+        string symbol, string userName, CancellationToken ct = default)
+    {
+        try
+        {
+            return await _db.OpenPositions.AsTracking()
+                .FirstOrDefaultAsync(p =>
+                    p.Symbol   == symbol &&
+                    p.UserName == userName, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to find open position for {Symbol} / {UserName}", symbol, userName);
+            return null;
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task UpdateAverageAsync(
+        string orderId,
+        int newQuantity,
+        decimal newEntryPrice,
+        decimal newEntryAmount,
+        string? newStopOrderId,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            await _db.OpenPositions
+                .Where(p => p.OrderId == orderId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(p => p.Quantity,     newQuantity)
+                    .SetProperty(p => p.EntryPrice,   newEntryPrice)
+                    .SetProperty(p => p.EntryAmount,  newEntryAmount)
+                    .SetProperty(p => p.StopOrderId,  newStopOrderId)
+                    .SetProperty(p => p.HasAveraged,  true), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to update averaged position OrderId: {OrderId}", orderId);
         }
     }
 }

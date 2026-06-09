@@ -25,6 +25,14 @@ public class IbkrEWrapper : EWrapper
     // Historical data callbacks keyed by reqId, accumulates bars until historicalDataEnd fires
     private readonly Dictionary<int, (List<HistoricalBar> Bars, TaskCompletionSource<List<HistoricalBar>> Tcs)> _historicalDataCallbacks = new();
 
+    // Batch position snapshot, accumulates all positions until positionEnd fires
+    private readonly List<IbkrPosition> _allPositionsBuffer = new();
+    private TaskCompletionSource<List<IbkrPosition>>? _allPositionsTcs;
+
+    // Batch open orders snapshot, accumulates all orders until openOrderEnd fires
+    private readonly List<IbkrOpenOrder> _allOpenOrdersBuffer = new();
+    private TaskCompletionSource<List<IbkrOpenOrder>>? _allOpenOrdersTcs;
+
     private Action? _onConnectionClosed;
     private readonly Lock _lock = new();
 
@@ -78,14 +86,12 @@ public class IbkrEWrapper : EWrapper
 
         lock (_lock)
         {
-            // Fire action-based callback (used by stop/target order detection)
             if (_execDetailsCallbacks.TryGetValue(execution.OrderId, out var handler))
             {
                 handler((decimal)execution.AvgPrice);
                 _execDetailsCallbacks.Remove(execution.OrderId);
             }
 
-            // Resolve TCS-based callback (used by close order timeout recovery)
             if (_execDetailsTcsCallbacks.TryGetValue(execution.OrderId, out var tcs))
             {
                 tcs.TrySetResult((decimal)execution.AvgPrice);
@@ -119,10 +125,35 @@ public class IbkrEWrapper : EWrapper
 
         lock (_lock)
         {
+            // Resolve per-symbol callback (used by GetCurrentPositionPriceAsync)
             if (_positionCallbacks.TryGetValue(key, out var tcs))
             {
                 tcs.TrySetResult(((decimal)avgCost, (int)pos));
                 _positionCallbacks.Remove(key);
+            }
+
+            // Accumulate into batch buffer (used by GetAllPositionsAsync)
+            if (_allPositionsTcs is not null)
+            {
+                _allPositionsBuffer.Add(new IbkrPosition(
+                    Symbol:      contract.Symbol,
+                    SecType:     contract.SecType,
+                    LocalSymbol: contract.LocalSymbol,
+                    Quantity:    (int)pos,
+                    AvgCost:     (decimal)avgCost));
+            }
+        }
+    }
+
+    public void positionEnd()
+    {
+        lock (_lock)
+        {
+            if (_allPositionsTcs is not null)
+            {
+                _allPositionsTcs.TrySetResult(new List<IbkrPosition>(_allPositionsBuffer));
+                _allPositionsBuffer.Clear();
+                _allPositionsTcs = null;
             }
         }
     }
@@ -180,6 +211,41 @@ public class IbkrEWrapper : EWrapper
         _marketDataCallbacks.Remove(tickerId);
         _marketDataBids.Remove(tickerId);
         _marketDataAsks.Remove(tickerId);
+    }
+
+    public void openOrder(int orderId, Contract contract, Order order, OrderState orderState)
+    {
+        _logger.LogDebug(
+            "IBKR OpenOrder — OrderId: {OrderId} Symbol: {Symbol} Action: {Action} Type: {Type} Qty: {Qty}",
+            orderId, contract.Symbol, order.Action, order.OrderType, order.TotalQuantity);
+
+        lock (_lock)
+        {
+            if (_allOpenOrdersTcs is not null)
+            {
+                _allOpenOrdersBuffer.Add(new IbkrOpenOrder(
+                    OrderId:   orderId,
+                    Symbol:    contract.Symbol,
+                    Action:    order.Action,
+                    OrderType: order.OrderType,
+                    Quantity:  (int)order.TotalQuantity));
+            }
+        }
+    }
+
+    public void openOrderEnd()
+    {
+        _logger.LogDebug(
+            "IBKR OpenOrderEnd — {Count} open orders received", _allOpenOrdersBuffer.Count);
+        lock (_lock)
+        {
+            if (_allOpenOrdersTcs is not null)
+            {
+                _allOpenOrdersTcs.TrySetResult(new List<IbkrOpenOrder>(_allOpenOrdersBuffer));
+                _allOpenOrdersBuffer.Clear();
+                _allOpenOrdersTcs = null;
+            }
+        }
     }
 
     /// <summary>
@@ -284,6 +350,62 @@ public class IbkrEWrapper : EWrapper
     }
 
     /// <summary>
+    /// Registers a batch position request. All positions are accumulated until positionEnd fires.
+    /// Used by StartupReconciliationService to get a full account snapshot.
+    /// </summary>
+    public TaskCompletionSource<List<IbkrPosition>> RegisterAllPositionsCallback()
+    {
+        var tcs = new TaskCompletionSource<List<IbkrPosition>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_lock)
+        {
+            _allPositionsBuffer.Clear();
+            _allPositionsTcs = tcs;
+        }
+        return tcs;
+    }
+
+    /// <summary>
+    /// Removes the batch position callback on timeout before positionEnd fires.
+    /// </summary>
+    public void UnregisterAllPositionsCallback()
+    {
+        lock (_lock)
+        {
+            _allPositionsTcs = null;
+            _allPositionsBuffer.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Registers a batch open orders request. All orders are accumulated until openOrderEnd fires.
+    /// Used by StartupReconciliationService to detect orphan GTC orders.
+    /// </summary>
+    public TaskCompletionSource<List<IbkrOpenOrder>> RegisterAllOpenOrdersCallback()
+    {
+        var tcs = new TaskCompletionSource<List<IbkrOpenOrder>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_lock)
+        {
+            _allOpenOrdersBuffer.Clear();
+            _allOpenOrdersTcs = tcs;
+        }
+        return tcs;
+    }
+
+    /// <summary>
+    /// Removes the batch open orders callback on timeout before openOrderEnd fires.
+    /// </summary>
+    public void UnregisterAllOpenOrdersCallback()
+    {
+        lock (_lock)
+        {
+            _allOpenOrdersTcs = null;
+            _allOpenOrdersBuffer.Clear();
+        }
+    }
+
+    /// <summary>
     /// Registers a callback that resolves when IBKR confirms the order is filled.
     /// </summary>
     public TaskCompletionSource<OrderFill> RegisterOrderCallback(int orderId)
@@ -355,18 +477,12 @@ public class IbkrEWrapper : EWrapper
 
     public void error(int id, int errorCode, string errorMsg)
     {
-        // 2000-2999 are IBKR system informational codes; 10349 (market data farm notice)
-        // are benign and expected during normal operation.
         if (errorCode >= 2000 && errorCode < 3000 || errorCode is 10349)
         {
             _logger.LogDebug("IBKR Info [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
         }
         else if (errorCode == 201)
         {
-            // 201 = order rejected (commonly margin insufficient for OCA target orders).
-            // Store the reason so PlaceOrderAsync can surface it for the entry order.
-            // For OCA stop/target orders this fires after the entry succeeds, meaning
-            // the position is open but may be missing stop or target protection.
             lock (_lock) { _rejectionReasons[id] = errorMsg; }
             _logger.LogWarning(
                 "IBKR Order rejected [201] Id {Id} — order will not execute. " +
@@ -385,8 +501,6 @@ public class IbkrEWrapper : EWrapper
         }
         else if (errorCode == 404)
         {
-            // 404 = order held while IBKR locates shares (expected for stock OCA orders).
-            // Not a terminal error, IBKR will resume the order once shares are located.
             _logger.LogWarning(
                 "IBKR Order held while locating [404] Id {Id} — {Message}", id, errorMsg);
         }
@@ -466,8 +580,6 @@ public class IbkrEWrapper : EWrapper
     public void updatePortfolio(Contract contract, double position, double marketPrice, double marketValue, double averageCost, double unrealizedPNL, double realizedPNL, string accountName) { }
     public void updateAccountTime(string timestamp) { }
     public void accountDownloadEnd(string account) { }
-    public void openOrder(int orderId, Contract contract, Order order, OrderState orderState) { }
-    public void openOrderEnd() { }
     public void contractDetails(int reqId, ContractDetails contractDetails) { }
     public void contractDetailsEnd(int reqId) { }
     public void execDetailsEnd(int reqId) { }
@@ -478,7 +590,6 @@ public class IbkrEWrapper : EWrapper
     public void updateMktDepth(int tickerId, int position, int operation, int side, double price, int size) { }
     public void updateMktDepthL2(int tickerId, int position, string marketMaker, int operation, int side, double price, int size, bool isSmartDepth) { }
     public void updateNewsBulletin(int msgId, int msgType, string message, string origExchange) { }
-    public void positionEnd() { }
     public void realtimeBar(int reqId, long date, double open, double high, double low, double close, long volume, double WAP, int count) { }
     public void scannerParameters(string xml) { }
     public void scannerData(int reqId, int rank, ContractDetails contractDetails, string distance, string benchmark, string projection, string legsStr) { }
