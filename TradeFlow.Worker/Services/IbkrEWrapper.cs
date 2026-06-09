@@ -62,7 +62,7 @@ public class IbkrEWrapper : EWrapper
             {
                 if (status is "Filled")
                 {
-                    tcs.TrySetResult(new OrderFill(status, (decimal)avgFillPrice));
+                    tcs.TrySetResult(new OrderFill(status, (decimal)avgFillPrice, (int)filled));
                     _orderCallbacks.Remove(orderId);
                 }
             }

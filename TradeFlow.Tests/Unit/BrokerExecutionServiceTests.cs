@@ -333,4 +333,127 @@ public class BrokerExecutionServiceTests
         trade.Should().NotBeNull();
         trade!.Quantity.Should().Be(3);
     }
+
+    [Fact]
+    public async Task HandleEntryAsync_NormalFill_PartialQty_RecordsActualQty()
+    {
+        // PlaceOrderAsync returns a partial fill, FilledQuantity 3 of ordered 25.
+        // BrokerExecutionService should record the trade with quantity 3, not 25.
+        _brokerMock
+            .Setup(b => b.GetCurrentMarketPriceAsync(
+                It.IsAny<string>(), It.IsAny<TradeType>(),
+                It.IsAny<string?>(), It.IsAny<decimal?>(),
+                It.IsAny<string?>(), default))
+            .ReturnsAsync(1.18m);
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId:       "3006",
+                StopOrderId:   "3008",
+                TargetOrderId: null,
+                FillPrice:     1.18m,
+                FillQuantity:  3,
+                FillAmount:    354.00m,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow));
+
+        var alert = BuildAlert(
+            side:           "bto",
+            type:           "options",
+            direction:      "call",
+            pricePaid:      1.18m,
+            contractSymbol: "RBLX260619C00040000",
+            strike:         40m,
+            userName:       "TestTrader");
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        var trade = _guard.GetOpenTrades().FirstOrDefault();
+        trade.Should().NotBeNull();
+        trade!.Quantity.Should().Be(3);
+        trade.EntryAmount.Should().Be(354.00m);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_LateFill_PartialQty_RecordsActualQty()
+    {
+        // PlaceOrderAsync returns Filled status with partial quantity from position verify.
+        // Simulates the late fill path where GetCurrentPositionPriceAsync returns actual qty.
+        _brokerMock
+            .Setup(b => b.GetCurrentMarketPriceAsync(
+                It.IsAny<string>(), It.IsAny<TradeType>(),
+                It.IsAny<string?>(), It.IsAny<decimal?>(),
+                It.IsAny<string?>(), default))
+            .ReturnsAsync(1.18m);
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId:       "3006",
+                StopOrderId:   "3008",
+                TargetOrderId: null,
+                FillPrice:     1.18m,
+                FillQuantity:  3,
+                FillAmount:    354.00m,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow));
+
+        var alert = BuildAlert(
+            side:           "bto",
+            type:           "options",
+            direction:      "call",
+            pricePaid:      1.18m,
+            contractSymbol: "RBLX260619C00040000",
+            strike:         40m,
+            userName:       "TestTrader");
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        var trade = _guard.GetOpenTrades().FirstOrDefault();
+        trade.Should().NotBeNull();
+        trade!.Quantity.Should().Be(3);
+        trade.EntryAmount.Should().Be(354.00m);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_NormalFill_FullQty_RecordsCorrectly()
+    {
+        // Full fill — FilledQuantity matches ordered quantity.
+        // Verifies the normal path still works correctly after partial fill changes.
+        _brokerMock
+            .Setup(b => b.GetCurrentMarketPriceAsync(
+                It.IsAny<string>(), It.IsAny<TradeType>(),
+                It.IsAny<string?>(), It.IsAny<decimal?>(),
+                It.IsAny<string?>(), default))
+            .ReturnsAsync(4.95m);
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId:       "ORDER-002",
+                StopOrderId:   "STOP-002",
+                TargetOrderId: null,
+                FillPrice:     4.95m,
+                FillQuantity:  2,
+                FillAmount:    990.00m,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow));
+
+        var alert = BuildAlert(
+            side:           "bto",
+            type:           "options",
+            direction:      "call",
+            pricePaid:      4.95m,
+            contractSymbol: "TSLA260620C00450000",
+            strike:         450m,
+            userName:       "TestTrader");
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        var trade = _guard.GetOpenTrades().FirstOrDefault();
+        trade.Should().NotBeNull();
+        trade!.Quantity.Should().Be(2);
+        trade.EntryAmount.Should().Be(990.00m);
+    }
 }

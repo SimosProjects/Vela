@@ -105,7 +105,7 @@ public class IbkrBrokerService : IBrokerService
         if (!EnsureConnected()) return 0m;
 
         var reqId = NextReqId();
-        var tcs = _connection.Wrapper.RegisterAccountCallback(reqId);
+        var tcs   = _connection.Wrapper.RegisterAccountCallback(reqId);
         _connection.Client.reqAccountSummary(reqId, "All", "NetLiquidation");
 
         try
@@ -137,7 +137,7 @@ public class IbkrBrokerService : IBrokerService
 
     /// <summary>
     /// Returns the current average cost and actual held quantity of an open position from IBKR.
-    /// Quantity will be negative for short positions — BrokerExecutionService guards against this.
+    /// Quantity will be negative for short positions, BrokerExecutionService guards against this.
     /// Returns (0, 0) if the position is not found or the request times out.
     /// </summary>
     public async Task<(decimal Price, int Quantity)> GetCurrentPositionPriceAsync(
@@ -212,10 +212,10 @@ public class IbkrBrokerService : IBrokerService
             }
             : new Contract
             {
-                Symbol      = symbol,
-                SecType     = "STK",
-                Exchange    = "SMART",
-                Currency    = "USD",
+                Symbol   = symbol,
+                SecType  = "STK",
+                Exchange = "SMART",
+                Currency = "USD",
             };
 
         // snapshot=false (streaming) so BID/ASK ticks fire even when no recent LAST trade exists.
@@ -227,14 +227,12 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
             var price = await tcs.Task.WaitAsync(cts.Token);
-            _logger.LogDebug(
-                "IBKR market price for {Symbol}: ${Price:F2}", symbol, price);
+            _logger.LogDebug("IBKR market price for {Symbol}: ${Price:F2}", symbol, price);
             return price;
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning(
-                "IBKR GetCurrentMarketPrice timed out for {Symbol}.", symbol);
+            _logger.LogWarning("IBKR GetCurrentMarketPrice timed out for {Symbol}.", symbol);
             _connection.Wrapper.UnregisterMarketDataCallback(reqId);
             return 0m;
         }
@@ -253,7 +251,7 @@ public class IbkrBrokerService : IBrokerService
         if (!EnsureConnected()) return 0m;
 
         var reqId = NextReqId();
-        var tcs = _connection.Wrapper.RegisterAccountCallback(reqId);
+        var tcs   = _connection.Wrapper.RegisterAccountCallback(reqId);
         _connection.Client.reqAccountSummary(reqId, "All", "GrossPositionValue");
 
         try
@@ -285,9 +283,11 @@ public class IbkrBrokerService : IBrokerService
     /// <summary>
     /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
     /// an OCA group containing a TRAIL stop. The LMT target order is omitted until IBKR Level 3
-    /// options approval is granted — Level 2 rejects LMT sell orders in OCA groups.
+    /// options approval is granted, Level 2 rejects LMT sell orders in OCA groups.
     /// On timeout, waits an additional 10 seconds for a late ExecDetails callback before
-    /// giving up — prevents ghost trades when the fill arrives after the timeout fires.
+    /// giving up, prevents ghost trades when the fill arrives after the timeout fires.
+    /// Partial fills are handled by reading FilledQuantity from the orderStatus callback (normal
+    /// path) or reqPositions (late fill path) so the trail stop always matches the actual position.
     /// </summary>
     public async Task<BrokerOrderResult> PlaceOrderAsync(
         TradeOrder order,
@@ -301,7 +301,7 @@ public class IbkrBrokerService : IBrokerService
         var contract   = BuildContract(order);
         var entryOrder = BuildMarketOrder(orderId, order.Quantity, "BUY");
 
-        // Register exec details TCS before placing — catches late fills that arrive
+        // Register exec details TCS before placing, catches late fills that arrive
         // after the 15s timeout fires and the order cancel is sent to IBKR.
         var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId);
 
@@ -323,10 +323,10 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(15));
 
-            // Only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
+            // Only resolves when IBKR confirms status "Filled".
             var state = await tcs.Task.WaitAsync(cts.Token);
 
-            // Normal fill — exec details TCS no longer needed
+            // Normal fill
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
             _logger.LogInformation(
@@ -336,37 +336,38 @@ public class IbkrBrokerService : IBrokerService
             _connection.Client.cancelOrder(tempStopId);
             await Task.Delay(300, ct);
 
+            // Use FilledQuantity from orderStatus, may be less than order.Quantity on a partial
+            // fill. Trail stop must match actual position size to avoid overselling into a short.
+            var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
+            var fillQty    = state.FilledQuantity > 0 ? state.FilledQuantity : order.Quantity;
+            var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+
             var ocaGroup    = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
             var trailStopId = orderId + 2;
-
-            var trailPercent = order.TrailPercent;
-            var trailOrder   = BuildOcaTrailOrder(trailStopId, order.Quantity, trailPercent, ocaGroup);
+            var trailOrder  = BuildOcaTrailOrder(trailStopId, fillQty, order.TrailPercent, ocaGroup);
 
             _connection.Client.placeOrder(trailStopId, contract, trailOrder);
 
             // TODO: re-add LMT target order to OCA group once IBKR Level 3 options
             // approval is granted (~July 2026). Removed due to Level 2 restriction.
             // var targetOrderId = orderId + 3;
-            // var targetOrder   = BuildOcaLimitOrder(targetOrderId, order.Quantity,
+            // var targetOrder   = BuildOcaLimitOrder(targetOrderId, fillQty,
             //                         Math.Round((double)order.TargetPrice, 2), ocaGroup);
             // _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
 
             _logger.LogInformation(
-                "IBKR OCA group placed — Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
-                trailPercent, ocaGroup);
+                "IBKR OCA group placed — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
+                fillQty, order.TrailPercent, ocaGroup);
 
             RegisterStopOrderCallbacks(orderId, trailStopId, null);
-
-            var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
-            var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
 
             return new BrokerOrderResult(
                 OrderId:       orderId.ToString(),
                 StopOrderId:   trailStopId.ToString(),
-                TargetOrderId: null, // TODO: restore targetOrderId.ToString() when Level 3 approved
+                TargetOrderId: null,
                 FillPrice:     fillPrice,
-                FillQuantity:  order.Quantity,
-                FillAmount:    fillPrice * order.Quantity * multiplier,
+                FillQuantity:  fillQty,
+                FillAmount:    fillPrice * fillQty * multiplier,
                 Status:        OrderStatus.Filled,
                 FilledAt:      DateTimeOffset.UtcNow);
         }
@@ -380,7 +381,7 @@ public class IbkrBrokerService : IBrokerService
             _connection.Client.cancelOrder(tempStopId);
             _connection.Wrapper.UnregisterOrderCallback(orderId);
 
-            // Wait up to 10 seconds for a late ExecDetails callback — the fill may have
+            // Wait up to 10 seconds for a late ExecDetails callback, the fill may have
             // already reached IBKR before the cancel arrived, creating a ghost trade.
             try
             {
@@ -390,27 +391,57 @@ public class IbkrBrokerService : IBrokerService
                 var lateFillPrice = await lateExecTcs.Task.WaitAsync(execCts.Token);
 
                 _logger.LogInformation(
-                    "IBKR PlaceOrder late fill detected for {Symbol} @ ${Price:F2} — placing OCA and recording trade.",
+                    "IBKR PlaceOrder late fill detected for {Symbol} @ ${Price:F2} — verifying actual position qty.",
                     order.Symbol, lateFillPrice);
 
                 await Task.Delay(300, ct);
 
+                // ExecDetails only provides price, use reqPositions to verify actual filled
+                // quantity since late fills may be partial and trail stop must match position size.
+                var posKey = order.TradeType == TradeType.Options
+                    ? $"{order.Symbol}::{order.OptionsContractSymbol}"
+                    : $"{order.Symbol}::STK";
+
+                var posTcs = _connection.Wrapper.RegisterPositionCallback(posKey);
+                _connection.Client.reqPositions();
+
+                int actualLateFillQty;
+                try
+                {
+                    using var posCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    posCts.CancelAfter(_options.TimeoutMs);
+                    var (_, lateFillQty) = await posTcs.Task.WaitAsync(posCts.Token);
+                    actualLateFillQty = lateFillQty > 0 ? lateFillQty : order.Quantity;
+                }
+                catch (OperationCanceledException)
+                {
+                    _connection.Wrapper.UnregisterPositionCallback(posKey);
+                    actualLateFillQty = order.Quantity;
+                    _logger.LogWarning(
+                        "IBKR late fill qty verification timed out for {Symbol} — using ordered qty {Qty}.",
+                        order.Symbol, order.Quantity);
+                }
+                finally
+                {
+                    _connection.Client.cancelPositions();
+                }
+
                 var ocaGroup    = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
                 var trailStopId = orderId + 2;
+                var trailOrder  = BuildOcaTrailOrder(trailStopId, actualLateFillQty, order.TrailPercent, ocaGroup);
 
-                var trailOrder = BuildOcaTrailOrder(trailStopId, order.Quantity, order.TrailPercent, ocaGroup);
                 _connection.Client.placeOrder(trailStopId, contract, trailOrder);
 
                 // TODO: re-add LMT target order to OCA group once IBKR Level 3 options
                 // approval is granted (~July 2026). Removed due to Level 2 restriction.
                 // var targetOrderId = orderId + 3;
-                // var targetOrder   = BuildOcaLimitOrder(targetOrderId, order.Quantity,
+                // var targetOrder   = BuildOcaLimitOrder(targetOrderId, actualLateFillQty,
                 //                         Math.Round((double)order.TargetPrice, 2), ocaGroup);
                 // _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
 
                 _logger.LogInformation(
-                    "IBKR OCA group placed for late fill — Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
-                    order.TrailPercent, ocaGroup);
+                    "IBKR OCA group placed for late fill — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
+                    actualLateFillQty, order.TrailPercent, ocaGroup);
 
                 RegisterStopOrderCallbacks(orderId, trailStopId, null);
 
@@ -419,10 +450,10 @@ public class IbkrBrokerService : IBrokerService
                 return new BrokerOrderResult(
                     OrderId:       orderId.ToString(),
                     StopOrderId:   trailStopId.ToString(),
-                    TargetOrderId: null, // TODO: restore targetOrderId.ToString() when Level 3 approved
+                    TargetOrderId: null,
                     FillPrice:     lateFillPrice,
-                    FillQuantity:  order.Quantity,
-                    FillAmount:    lateFillPrice * order.Quantity * multiplier,
+                    FillQuantity:  actualLateFillQty,
+                    FillAmount:    lateFillPrice * actualLateFillQty * multiplier,
                     Status:        OrderStatus.Filled,
                     FilledAt:      DateTimeOffset.UtcNow);
             }
@@ -635,7 +666,6 @@ public class IbkrBrokerService : IBrokerService
             var fillPrice  = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
             var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
 
-            // Order callback resolved — exec details TCS no longer needed
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
 
             _logger.LogInformation(
@@ -727,7 +757,7 @@ public class IbkrBrokerService : IBrokerService
     /// <summary>
     /// Fetches daily OHLCV bars for a stock symbol via Gateway's reqHistoricalData.
     /// Used by MarketConditionsLogger to compute moving averages and ADX.
-    /// Requests barCount + 14 extra bars so ADX(14) has enough warmup data.
+    /// Requests barCount + 28 extra bars so ADX(14) has enough warmup data.
     /// Returns an empty list if Gateway is unavailable or the request times out.
     /// </summary>
     public async Task<List<HistoricalBar>> GetHistoricalBarsAsync(
@@ -755,20 +785,17 @@ public class IbkrBrokerService : IBrokerService
                 Currency = "USD",
             };
 
-        // Request extra bars for ADX(14) warmup — ADX needs 2*period bars minimum
-        var durationDays = barCount + 28;
-        var endDateTime  = string.Empty; // empty = now
-        var durationStr  = $"{durationDays} D";
+        var durationStr = $"{barCount + 28} D";
 
         _connection.Client.reqHistoricalData(
             reqId,
             contract,
-            endDateTime,
+            string.Empty,
             durationStr,
             "1 day",
             "TRADES",
-            1,    // useRTH=1, regular trading hours only
-            1,    // formatDate=1, returns yyyyMMdd string
+            1,
+            1,
             false,
             null);
 
@@ -778,18 +805,14 @@ public class IbkrBrokerService : IBrokerService
             cts.CancelAfter(TimeSpan.FromSeconds(30));
 
             var bars = await tcs.Task.WaitAsync(cts.Token);
-
             _logger.LogDebug(
-                "IBKR historical data received — {Symbol} {Count} bars",
-                symbol, bars.Count);
-
+                "IBKR historical data received — {Symbol} {Count} bars", symbol, bars.Count);
             return bars;
         }
         catch (OperationCanceledException)
         {
             _logger.LogWarning(
-                "IBKR GetHistoricalBars timed out for {Symbol} — falling back to Yahoo Finance.",
-                symbol);
+                "IBKR GetHistoricalBars timed out for {Symbol} — falling back to Yahoo Finance.", symbol);
             _connection.Wrapper.UnregisterHistoricalDataCallback(reqId);
             return [];
         }
@@ -840,7 +863,6 @@ public class IbkrBrokerService : IBrokerService
             "Outcome: {Outcome} FillPrice: ${Price:F2}",
             stopOrderId, mapping.EntryOrderId, mapping.Outcome, fillPrice);
 
-        // Fire on a background thread to avoid blocking the EWrapper callback
         _ = Task.Run(() => _brokerFillHandler?.Invoke(
             mapping.EntryOrderId, fillPrice, mapping.Outcome));
     }
