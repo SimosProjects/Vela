@@ -246,12 +246,9 @@ public class BrokerExecutionService
                     "closing position immediately, nothing recorded",
                     postFillSlippage, _riskOptions.PostFillMaxSlippagePct, alert.Symbol);
 
-                // Close without registering in TradeGuard or writing to CSV/DB.
-                // The OCA stop and target orders are cancelled by IBKR automatically
-                // when the position is fully closed at market.
                 var emergencyClose = new TradeRecord
                 {
-                    AlertId         = alert.Id ?? string.Empty, 
+                    AlertId         = alert.Id ?? string.Empty,
                     OrderId         = result.OrderId,
                     StopOrderId     = result.StopOrderId,
                     TargetOrderId   = result.TargetOrderId,
@@ -290,28 +287,48 @@ public class BrokerExecutionService
         using (var scope = _scopeFactory.CreateScope())
         {
             var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
-            await repo.SaveAsync(new OpenPosition
+
+            if (isAverage)
             {
-                OrderId         = trade.OrderId,
-                StopOrderId     = trade.StopOrderId,
-                TargetOrderId   = trade.TargetOrderId,
-                AlertId         = trade.AlertId,
-                UserName        = trade.UserName,
-                Symbol          = trade.Symbol,
-                TradeType       = trade.TradeType.ToString(),
-                OptionsContract = trade.OptionsContract,
-                Direction       = trade.Direction,
-                Strike          = trade.Strike,
-                Expiration      = trade.Expiration,
-                Quantity        = trade.Quantity,
-                EntryPrice      = trade.EntryPrice,
-                EntryAmount     = trade.EntryAmount,
-                StopPrice       = trade.StopPrice,
-                TargetPrice     = trade.TargetPrice,
-                OpenedAt        = trade.OpenedAt,
-                IsAverage       = trade.IsAverage,
-                HasAveraged     = trade.HasAveraged,
-            }, ct);
+                // Find the existing position and update it rather than inserting a second row.
+                // Recalculates weighted average entry price and combined quantity to match IBKR,
+                // which merges repeated buys of the same symbol into one position.
+                var existing = await repo.GetBySymbolAndUserAsync(trade.Symbol, trade.UserName, ct);
+
+                if (existing is not null)
+                {
+                    var combinedQty        = existing.Quantity + trade.Quantity;
+                    var weightedEntryPrice = (existing.EntryPrice * existing.Quantity +
+                                             trade.EntryPrice * trade.Quantity) / combinedQty;
+                    var combinedAmount     = existing.EntryAmount + trade.EntryAmount;
+
+                    await repo.UpdateAverageAsync(
+                        existing.OrderId,
+                        combinedQty,
+                        weightedEntryPrice,
+                        combinedAmount,
+                        trade.StopOrderId,
+                        ct);
+
+                    _logger.LogInformation(
+                        "Average entry merged — {Symbol} qty {OldQty}+{NewQty}={CombinedQty} " +
+                        "avg price ${AvgPrice:F2}",
+                        trade.Symbol, existing.Quantity, trade.Quantity,
+                        combinedQty, weightedEntryPrice);
+                }
+                else
+                {
+                    // No existing row found — fall back to insert
+                    _logger.LogWarning(
+                        "Average entry for {Symbol} — no existing position found, inserting as new.",
+                        trade.Symbol);
+                    await repo.SaveAsync(BuildOpenPosition(trade), ct);
+                }
+            }
+            else
+            {
+                await repo.SaveAsync(BuildOpenPosition(trade), ct);
+            }
         }
 
         await _csv.OpenTradeAsync(trade, ct);
@@ -325,7 +342,6 @@ public class BrokerExecutionService
 
         await _discord.NotifyOrderPlacedAsync(trade, ct);
 
-        // Fetch balance and exposure after the fill — used for analytics only, not blocking execution
         var accountBalance     = await _broker.GetAccountBalanceAsync(ct);
         var openPositionsValue = await _broker.GetOpenPositionsValueAsync(ct);
 
@@ -419,7 +435,6 @@ public class BrokerExecutionService
 
         if (closedTrade is null) return;
 
-        // Populate exit execution quality metrics for CSV logging
         closedTrade.ExitLatencyMs   = exitLatencyMs;
         closedTrade.ExitSlippagePct = exitSlippagePct;
 
@@ -572,7 +587,6 @@ public class BrokerExecutionService
                 trade.Symbol, trade.Quantity - quantityToClose);
         }
 
-        // Update TradeGuard with new quantity and cleared stop
         var remainingQty = trade.Quantity - quantityToClose;
         _guard.UpdateAfterPartialClose(
             trade.UserName,
@@ -580,7 +594,6 @@ public class BrokerExecutionService
             trade.Symbol,
             remainingQty);
 
-        // Update the database open position quantity
         using (var scope = _scopeFactory.CreateScope())
         {
             var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
@@ -597,6 +610,31 @@ public class BrokerExecutionService
 
         await _discord.NotifyPartialCloseAsync(trade, quantityToClose, closeResult.FillPrice, partialPnl, remainingQty, ct);
     }
+
+    // -- Helpers --
+
+    private static OpenPosition BuildOpenPosition(TradeRecord trade) => new()
+    {
+        OrderId         = trade.OrderId,
+        StopOrderId     = trade.StopOrderId,
+        TargetOrderId   = trade.TargetOrderId,
+        AlertId         = trade.AlertId,
+        UserName        = trade.UserName,
+        Symbol          = trade.Symbol,
+        TradeType       = trade.TradeType.ToString(),
+        OptionsContract = trade.OptionsContract,
+        Direction       = trade.Direction,
+        Strike          = trade.Strike,
+        Expiration      = trade.Expiration,
+        Quantity        = trade.Quantity,
+        EntryPrice      = trade.EntryPrice,
+        EntryAmount     = trade.EntryAmount,
+        StopPrice       = trade.StopPrice,
+        TargetPrice     = trade.TargetPrice,
+        OpenedAt        = trade.OpenedAt,
+        IsAverage       = trade.IsAverage,
+        HasAveraged     = trade.HasAveraged,
+    };
 
     // Returns true if the current time falls within regular market hours (9:30am to 4:00pm ET, Mon-Fri)
     private static bool IsMarketOpenDefault()

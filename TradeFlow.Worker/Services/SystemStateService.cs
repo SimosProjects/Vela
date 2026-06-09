@@ -82,6 +82,8 @@ public class SystemStateService : BackgroundService
         // Brief delay so the rest of Worker startup completes before first write
         await Task.Delay(StartupDelayMs, ct);
 
+        await LoadRegimeFromDatabaseAsync(ct);
+
         while (!ct.IsCancellationRequested)
         {
             await WriteHeartbeatAsync(ct);
@@ -151,6 +153,42 @@ public class SystemStateService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "SystemStateService: heartbeat write failed — Worker continues normally");
+        }
+    }
+
+    private async Task LoadRegimeFromDatabaseAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TradeFlowDbContext>();
+
+            var row = await db.SystemState.FirstOrDefaultAsync(s => s.Id == 1, ct);
+
+            if (row is null || row.RegimeTier == "Unknown")
+                return;
+
+            lock (_regimeLock)
+            {
+                _regimeTier       = row.RegimeTier;
+                _sizingMultiplier = row.SizingMultiplier;
+                _blockCalls       = row.BlockCalls;
+                _spyPrice         = row.SpyPrice;
+                _ma20             = row.Ma20;
+                _ma50             = row.Ma50;
+                _ma200            = row.Ma200;
+                _vix              = row.Vix;
+                _vixDelta         = row.VixDelta;
+                _chopScore        = row.ChopScore;
+            }
+
+            _logger.LogInformation(
+                "SystemStateService: restored regime {Tier} from database", row.RegimeTier);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SystemStateService: regime restore failed — starting with Unknown");
         }
     }
 }

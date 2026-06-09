@@ -28,6 +28,21 @@ public interface IBrokerService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Returns the full snapshot of all positions currently held in the IBKR account.
+    /// Used by startup reconciliation to detect shorts and verify DB positions against reality.
+    /// Returns an empty list if the broker is unavailable or the request times out.
+    /// </summary>
+    Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns all open orders currently active in the IBKR account.
+    /// Used by startup reconciliation to cancel orphan orders that have no matching
+    /// open position in the database, prevents GTC orders firing against empty accounts.
+    /// Returns an empty list if the broker is unavailable or the request times out.
+    /// </summary>
+    Task<List<IbkrOpenOrder>> GetAllOpenOrdersAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Returns the current market price for any symbol using a snapshot quote.
     /// Used by BrokerExecutionService for pre-trade slippage checks before placing orders.
     /// Returns 0 if the quote cannot be retrieved within the timeout.
@@ -67,15 +82,13 @@ public interface IBrokerService
     /// Returns the net liquidation value of the account.
     /// Used by TradeGuard for exposure checks before placing orders.
     /// </summary>
-    Task<decimal> GetAccountBalanceAsync(
-        CancellationToken cancellationToken = default);
+    Task<decimal> GetAccountBalanceAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns the total market value of all open positions.
     /// Used by TradeGuard to calculate current exposure before new orders.
     /// </summary>
-    Task<decimal> GetOpenPositionsValueAsync(
-        CancellationToken cancellationToken = default);
+    Task<decimal> GetOpenPositionsValueAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Subscribes a handler that fires when a broker-side stop or target order fills.
@@ -93,3 +106,24 @@ public interface IBrokerService
         int barCount,
         CancellationToken ct = default);
 }
+
+/// <summary>
+/// A single position held in the IBKR account, returned by GetAllPositionsAsync.
+/// Quantity is negative for short positions.
+/// </summary>
+public record IbkrPosition(
+    string Symbol,
+    string SecType,
+    string? LocalSymbol,
+    int Quantity,
+    decimal AvgCost);
+
+/// <summary>
+/// A single open order active in the IBKR account, returned by GetAllOpenOrdersAsync.
+/// </summary>
+public record IbkrOpenOrder(
+    int OrderId,
+    string Symbol,
+    string Action,
+    string OrderType,
+    int Quantity);

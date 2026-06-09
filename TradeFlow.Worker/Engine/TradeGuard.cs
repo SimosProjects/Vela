@@ -331,6 +331,57 @@ public class TradeGuard
     }
 
     /// <summary>
+    /// Removes a position from TradeGuard by order ID.
+    /// Used by StartupReconciliationService when a DB position has no matching IBKR position.
+    /// </summary>
+    public void RemovePosition(string orderId)
+    {
+        lock (_lock)
+        {
+            var key = _openTrades
+                .FirstOrDefault(kv => kv.Value.OrderId == orderId).Key;
+
+            if (key is null)
+            {
+                _logger.LogWarning(
+                    "TradeGuard: RemovePosition — no position found with OrderId {OrderId}",
+                    orderId);
+                return;
+            }
+
+            _openTrades.Remove(key);
+            _logger.LogInformation(
+                "TradeGuard: removed position OrderId {OrderId} from memory.", orderId);
+        }
+    }
+
+    /// <summary>
+    /// Updates the quantity of a position in TradeGuard by order ID.
+    /// Used by StartupReconciliationService when IBKR reports a different quantity than the DB.
+    /// </summary>
+    public void UpdatePositionQuantity(string orderId, int newQuantity)
+    {
+        lock (_lock)
+        {
+            var trade = _openTrades.Values
+                .FirstOrDefault(t => t.OrderId == orderId);
+
+            if (trade is null)
+            {
+                _logger.LogWarning(
+                    "TradeGuard: UpdatePositionQuantity — no position found with OrderId {OrderId}",
+                    orderId);
+                return;
+            }
+
+            trade.Quantity = newQuantity;
+            _logger.LogInformation(
+                "TradeGuard: updated position {Symbol} OrderId {OrderId} quantity to {Qty}.",
+                trade.Symbol, orderId, newQuantity);
+        }
+    }
+
+    /// <summary>
     /// Called when a position closes. Removes it from open trades and populates exit data.
     /// </summary>
     public TradeRecord? RegisterClose(
