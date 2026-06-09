@@ -28,7 +28,6 @@ var riskEngine = new RiskEngineService([
     new NoLottoRule(configDisabled: false, isChoppy: () => false, chopScore: () => 0),
     new MinXScoreRule(minimumScore: 60.0),
     new ApprovedTraderRule(approvedTraders),
-    new MinDiscordRankRule(allowedRanks, approvedTraders)
 ]);
     
 using var cts = new CancellationTokenSource();
