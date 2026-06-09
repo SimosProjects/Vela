@@ -739,13 +739,21 @@ public class IbkrBrokerService : IBrokerService
 
         var reqId    = NextReqId();
         var tcs      = _connection.Wrapper.RegisterHistoricalDataCallback(reqId);
-        var contract = new Contract
-        {
-            Symbol   = symbol,
-            SecType  = "STK",
-            Exchange = "SMART",
-            Currency = "USD",
-        };
+        var contract = symbol == "VIX"
+            ? new Contract
+            {
+                Symbol   = "VIX",
+                SecType  = "IND",
+                Exchange = "CBOE",
+                Currency = "USD",
+            }
+            : new Contract
+            {
+                Symbol   = symbol,
+                SecType  = "STK",
+                Exchange = "SMART",
+                Currency = "USD",
+            };
 
         // Request extra bars for ADX(14) warmup — ADX needs 2*period bars minimum
         var durationDays = barCount + 28;
