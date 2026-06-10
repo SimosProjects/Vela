@@ -189,7 +189,7 @@ public class IbkrBrokerService : IBrokerService
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(30));
+            cts.CancelAfter(TimeSpan.FromSeconds(60));
             var positions = await tcs.Task.WaitAsync(cts.Token);
             _logger.LogDebug(
                 "IBKR GetAllPositions — {Count} positions received", positions.Count);

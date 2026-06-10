@@ -20,7 +20,9 @@ export function PositionRow({ position, isLast }) {
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 5 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <Pill color={dirColor(direction)}>{direction === 'call' ? 'C' : 'P'}</Pill>
+          {direction !== 'none' && (
+            <Pill color={dirColor(direction)}>{direction === 'call' ? 'C' : 'P'}</Pill>
+          )}
           <span style={{ fontSize: 13, fontWeight: 600, color: B.tx }}>{contract}</span>
           <span style={{ fontSize: 11, color: B.mu }}>×{quantity}</span>
         </div>

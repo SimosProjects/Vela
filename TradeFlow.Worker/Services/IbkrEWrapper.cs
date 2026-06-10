@@ -497,6 +497,16 @@ public class IbkrEWrapper : EWrapper
             _logger.LogWarning(
                 "IBKR Order held while locating [404] Id {Id} — {Message}", id, errorMsg);
         }
+        else if (errorCode == 399)
+        {
+            // Advisory order timing message, not an execution failure
+            _logger.LogDebug("IBKR Order message [399] Id {Id}: {Message}", id, errorMsg);
+        }
+        else if (errorCode == 321)
+        {
+            // Contract validation, often noise from cancelled orders, downgrade from Error
+            _logger.LogWarning("IBKR Request validation [321] Id {Id}: {Message}", id, errorMsg);
+        }
         else
         {
             _logger.LogError("IBKR Error [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
