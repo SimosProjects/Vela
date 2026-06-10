@@ -1,4 +1,3 @@
-
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 var builder = WebApplication.CreateBuilder(args);
@@ -6,12 +5,10 @@ builder.Services.AddSerilog((services, config) =>
     config.ReadFrom.Configuration(builder.Configuration)
           .Enrich.FromLogContext());
 
-// Add services to the container.
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddProblemDetails();
 
-// Add output caching
 builder.Services.AddOutputCache(options =>
 {
     options.AddPolicy("alerts", builder =>
@@ -20,12 +17,10 @@ builder.Services.AddOutputCache(options =>
             .SetVaryByQuery("page", "pageSize", "userName", "symbol", "side", "riskApproved"));
 });
 
-// Configure database connection
 var connectionString = builder.Configuration.GetConnectionString("TradeFlow")
     ?? throw new InvalidOperationException(
         "TradeFlow connection string is not configured.");
 
-// Health checks
 builder.Services.AddHealthChecks()
     .AddNpgSql(connectionString, name: "postgresql");
 
@@ -37,10 +32,8 @@ builder.Services.AddDbContext<TradeFlowDbContext>(options =>
 
 builder.Services.AddScoped<IAlertRepository, AlertRepository>();
 
-// Pipeline
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -48,11 +41,15 @@ if (app.Environment.IsDevelopment())
 }
 else
 {
-    app.UseExceptionHandler("/error");
+    app.UseExceptionHandler();
 }
 
+// One structured log line per request (method, path, status, duration).
 if (!app.Environment.IsEnvironment("Testing"))
+{
+    app.UseSerilogRequestLogging();
     app.UseHttpsRedirection();
+}
 
 app.UseStaticFiles();
 app.UseOutputCache();

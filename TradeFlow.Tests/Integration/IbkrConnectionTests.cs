@@ -6,6 +6,7 @@ using TradeFlow.Worker.Services;
 namespace TradeFlow.Tests.Integration;
 
 // These tests require IB Gateway running on localhost:4002.
+[Trait("Category", "Integration")]
 public class IbkrConnectionTests
 {
     private static bool ShouldSkip =>
