@@ -19,9 +19,11 @@ export function MobilePositionCard({ position }) {
     <div style={{ background: B.card, border: `1px solid ${B.bd}`, borderRadius: 10, overflow: 'hidden', marginBottom: 10 }}>
       <div style={{ padding: '12px 14px 10px', borderBottom: `1px solid ${B.bd2}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <Pill color={dirColor(direction)} style={{ fontSize: 11, padding: '2px 7px' }}>
-            {direction === 'call' ? 'CALL' : 'PUT'}
-          </Pill>
+          {direction !== 'none' && (
+            <Pill color={dirColor(direction)} style={{ fontSize: 11, padding: '2px 7px' }}>
+              {direction === 'call' ? 'CALL' : 'PUT'}
+            </Pill>
+          )}
           <span style={{ fontSize: 15, fontWeight: 700, color: B.tx }}>{contract}</span>
         </div>
         <span style={{ fontSize: 12, color: B.mu2, fontWeight: 500 }}>×{quantity}</span>
