@@ -73,6 +73,28 @@ public class BrokerExecutionService
             return;
         }
 
+        if (_riskOptions.AlertStalenessMaxSlippagePct > 0 && alertedPrice > 0)
+        {
+            var priceAtAlertTime = alert.ActualPriceAtTimeOfAlert ?? 0m;
+            if (priceAtAlertTime > 0)
+            {
+                var staleness = (alertedPrice - priceAtAlertTime) / priceAtAlertTime * 100;
+                if (staleness > _riskOptions.AlertStalenessMaxSlippagePct)
+                {
+                    _logger.LogWarning(
+                        "Alert staleness check failed for {Symbol} — PricePaid ${Paid:F2} " +
+                        "vs alert price ${AlertPrice:F2} ({Staleness:F1}%) exceeds max {Max:F1}%",
+                        alert.Symbol, alertedPrice, priceAtAlertTime,
+                        staleness, _riskOptions.AlertStalenessMaxSlippagePct);
+                    return;
+                }
+
+                _logger.LogDebug(
+                    "Alert staleness check passed for {Symbol} — {Staleness:F1}% within {Max:F1}% limit",
+                    alert.Symbol, staleness, _riskOptions.AlertStalenessMaxSlippagePct);
+            }
+        }
+
         var order = _sizer.Size(alert, classification, isAverage);
         if (order is null)
         {
