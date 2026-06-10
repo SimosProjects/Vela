@@ -13,8 +13,13 @@ builder.Services.AddSerilog((services, config) =>
 var token = Environment.GetEnvironmentVariable("XTRADES_TOKEN")
     ?? throw new InvalidOperationException("XTRADES_TOKEN environment variable is not set.");
 
-builder.Services.Configure<IbkrOptions>(
-    builder.Configuration.GetSection("Ibkr"));
+var ibkrEnabled = Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true";
+
+builder.Services
+    .AddOptions<IbkrOptions>()
+    .Bind(builder.Configuration.GetSection("Ibkr"))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
 
 builder.Services
     .AddOptions<XtradesOptions>()
@@ -88,6 +93,9 @@ builder.Services.AddSingleton(sp =>
         new NoLottoRule(!riskOptions.AllowLotto,   () => regime.IsChoppy, () => regime.ChopScore),
     };
 
+    if (riskOptions.RegimeBearishBlockCalls)
+        rules.Add(new BearishCallBlockRule(() => regime.BlockCalls));
+
     if (riskOptions.MinStockPriceDollars > 0)
         rules.Insert(1, new MinStockPriceRule(riskOptions.MinStockPriceDollars));
 
@@ -123,7 +131,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SystemStateService
 // Switch between paper/live trading and simulation via environment variable.
 // Set IBKR_ENABLED=true in .env to activate IbkrBrokerService.
 // Defaults to NullBrokerService when not set or set to anything else.
-if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+if (ibkrEnabled)
     builder.Services.AddSingleton<IBrokerService>(sp =>
         sp.GetRequiredService<IbkrBrokerService>());
 else
@@ -138,7 +146,7 @@ var host = builder.Build();
 
 // Startup sequence: connect to Gateway, wait for session ready, sync order IDs,
 // then reload TradeGuard state from DB
-if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+if (ibkrEnabled)
 {
     var connection = host.Services.GetRequiredService<IbkrConnectionService>();
     connection.Connect();
@@ -174,7 +182,7 @@ using (var scope = host.Services.CreateScope())
 
         // Re-register stop/target callbacks for restored positions so broker-side
         // trail stop and target fills are detected correctly after a restart
-        if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+        if (ibkrEnabled)
         {
             var broker = host.Services.GetRequiredService<IbkrBrokerService>();
             broker.ReRegisterStopCallbacks(positions);
@@ -184,8 +192,8 @@ using (var scope = host.Services.CreateScope())
 
 // Reconcile IBKR actual state against the database before any alerts are processed.
 // Cancels orphan orders, verifies DB positions against IBKR, and covers any shorts.
-// Only runs when IBKR is enabled — NullBrokerService returns empty lists and skips gracefully.
-if (Environment.GetEnvironmentVariable("IBKR_ENABLED") == "true")
+// Only runs when IBKR is enabled, NullBrokerService returns empty lists and skips gracefully.
+if (ibkrEnabled)
 {
     // Brief delay to let Gateway settle after connection and callback re-registration
     await Task.Delay(TimeSpan.FromSeconds(3));

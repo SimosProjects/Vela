@@ -352,4 +352,40 @@ public class RiskEngineTests
         var result = rule.Evaluate(alert);
         Assert.True(result.Passed);
     }
+
+    [Fact]
+    public void BearishCallBlockRule_BlockInactive_Passes()
+    {
+        var rule   = new BearishCallBlockRule(blockCalls: () => false);
+        var alert  = BuildAlert() with { IsBullish = true, Type = "options" };
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void BearishCallBlockRule_ActiveAndCallEntry_Fails()
+    {
+        var rule   = new BearishCallBlockRule(blockCalls: () => true);
+        var alert  = BuildAlert() with { IsBullish = true, Type = "options", Direction = "call" };
+        var result = rule.Evaluate(alert);
+        Assert.False(result.Passed);
+    }
+
+    [Fact]
+    public void BearishCallBlockRule_ActiveAndPutEntry_Passes()
+    {
+        var rule   = new BearishCallBlockRule(blockCalls: () => true);
+        var alert  = BuildAlert() with { IsBullish = false, Type = "options", Direction = "put" };
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
+
+    [Fact]
+    public void BearishCallBlockRule_ActiveAndStockEntry_Passes()
+    {
+        var rule   = new BearishCallBlockRule(blockCalls: () => true);
+        var alert  = BuildAlert() with { IsBullish = true, Type = "commons" };
+        var result = rule.Evaluate(alert);
+        Assert.True(result.Passed);
+    }
 }

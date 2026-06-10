@@ -5,7 +5,8 @@ using TradeFlow.Worker.Services;
 
 namespace TradeFlow.Tests.Integration;
 
-// These tests require IB Gateway running on localhost:4002.
+// Gateway-running tests require IB Gateway on localhost:4002 and are tagged Integration.
+// Gateway-down tests verify fallback behaviour without a live connection and run in all environments.
 public class IbkrConnectionTests
 {
     private static bool ShouldSkip =>
@@ -15,9 +16,9 @@ public class IbkrConnectionTests
     {
         var options = Options.Create(new IbkrOptions
         {
-            Host = "127.0.0.1",
-            Port = 4002,
-            ClientId = clientId,
+            Host      = "127.0.0.1",
+            Port      = 4002,
+            ClientId  = clientId,
             AccountId = Environment.GetEnvironmentVariable("IBKR__ACCOUNTID") ?? "",
             TimeoutMs = 5000
         });
@@ -36,9 +37,9 @@ public class IbkrConnectionTests
     {
         var options = Options.Create(new IbkrOptions
         {
-            Host = "127.0.0.1",
-            Port = 4002,
-            ClientId = clientId,
+            Host      = "127.0.0.1",
+            Port      = 4002,
+            ClientId  = clientId,
             AccountId = Environment.GetEnvironmentVariable("IBKR__ACCOUNTID") ?? "",
             TimeoutMs = 5000
         });
@@ -49,7 +50,6 @@ public class IbkrConnectionTests
             NullLogger<IbkrBrokerService>.Instance);
     }
 
-    // Builds a connection service pointing at a port with nothing running
     private static IbkrConnectionService BuildDownConnectionService() =>
         new IbkrConnectionService(
             Options.Create(new IbkrOptions
@@ -64,9 +64,9 @@ public class IbkrConnectionTests
             NullLogger<IbkrEWrapper>.Instance,
             new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance));
 
-    // -- Gateway running tests --
+    // -- Gateway running tests (require live IB Gateway) --
 
-    [Fact]
+    [Fact, Trait("Category", "Integration")]
     public void Connect_WithGatewayRunning_ReturnsTrue()
     {
         if (ShouldSkip) return;
@@ -80,7 +80,7 @@ public class IbkrConnectionTests
         service.Dispose();
     }
 
-    [Fact]
+    [Fact, Trait("Category", "Integration")]
     public async Task GetAccountBalanceAsync_ReturnsPositiveBalance()
     {
         if (ShouldSkip) return;
@@ -95,7 +95,7 @@ public class IbkrConnectionTests
         connection.Dispose();
     }
 
-    [Fact]
+    [Fact, Trait("Category", "Integration")]
     public async Task GetOpenPositionsValueAsync_ReturnsNonNegativeValue()
     {
         if (ShouldSkip) return;
@@ -110,7 +110,7 @@ public class IbkrConnectionTests
         connection.Dispose();
     }
 
-    // -- Gateway down tests --
+    // -- Gateway down tests (no live connection required) --
 
     [Fact]
     public async Task GetAccountBalanceAsync_WithGatewayDown_ReturnsZero()
