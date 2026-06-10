@@ -48,6 +48,10 @@ public class BrokerExecutionServiceTests
                 FilledAt: DateTimeOffset.UtcNow));
         _brokerMock.Setup(b => b.RegisterBrokerFillHandler(
             It.IsAny<Action<string, decimal, TradeOutcome>>()));
+        _brokerMock.Setup(b => b.ReplaceTrailStopAsync(
+            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TradeOrder>(),
+            It.IsAny<double>(), default))
+            .ReturnsAsync((string?)null);
         _metricsMock.Setup(m => m.GetTodayTradeCountAsync(
             It.IsAny<DateOnly>(), default)).ReturnsAsync(0);
         _metricsMock.Setup(m => m.CloseAsync(
@@ -564,5 +568,139 @@ public class BrokerExecutionServiceTests
         _brokerMock.Verify(b => b.PlaceOrderAsync(
             It.Is<TradeOrder>(o => o.LimitPrice == null),
             default), Times.Once);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_ElevatedPostFillSlippage_TightensTrail()
+    {
+        // Fill price is 20% above alerted price, exceeding the 10% warning threshold.
+        // Verifies ReplaceTrailStopAsync is called with the configured tighter trail percent.
+        var options = new RiskEngineOptions
+        {
+            PostFillSlippageWarningPct = 10.0,
+            HighSlippageTrailPct       = 25.0
+        };
+        var config = new ConfigurationBuilder().Build();
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId:       "ORDER-010",
+                StopOrderId:   "STOP-010",
+                TargetOrderId: null,
+                FillPrice:     5.94m,
+                FillQuantity:  2,
+                FillAmount:    1_188m,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow));
+
+        var service = new BrokerExecutionService(
+            _brokerMock.Object,
+            _sizer,
+            _guard,
+            new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
+            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
+            _scopeFactory,
+            NullLogger<BrokerExecutionService>.Instance,
+            Options.Create(options),
+            isMarketOpen: () => true);
+
+        var alert = BuildAlert(pricePaid: 4.95m);
+
+        await service.HandleEntryAsync(alert, CallClassification());
+
+        _brokerMock.Verify(b => b.ReplaceTrailStopAsync(
+            "STOP-010",
+            It.IsAny<int>(),
+            It.IsAny<TradeOrder>(),
+            options.HighSlippageTrailPct,
+            default), Times.Once);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_NormalPostFillSlippage_DoesNotTightenTrail()
+    {
+        // Fill price is 5% above alerted price, within the 10% threshold.
+        // Verifies ReplaceTrailStopAsync is not called.
+        var options = new RiskEngineOptions
+        {
+            PostFillSlippageWarningPct = 10.0,
+            HighSlippageTrailPct       = 25.0
+        };
+        var config = new ConfigurationBuilder().Build();
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId:       "ORDER-011",
+                StopOrderId:   "STOP-011",
+                TargetOrderId: null,
+                FillPrice:     5.20m,
+                FillQuantity:  2,
+                FillAmount:    1_040m,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow));
+
+        var service = new BrokerExecutionService(
+            _brokerMock.Object,
+            _sizer,
+            _guard,
+            new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
+            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
+            _scopeFactory,
+            NullLogger<BrokerExecutionService>.Instance,
+            Options.Create(options),
+            isMarketOpen: () => true);
+
+        var alert = BuildAlert(pricePaid: 4.95m);
+
+        await service.HandleEntryAsync(alert, CallClassification());
+
+        _brokerMock.Verify(b => b.ReplaceTrailStopAsync(
+            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TradeOrder>(),
+            It.IsAny<double>(), default), Times.Never);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_TrailTightening_Disabled_DoesNotReplace()
+    {
+        // HighSlippageTrailPct = 0 disables tightening even with 100% slippage.
+        var options = new RiskEngineOptions
+        {
+            PostFillSlippageWarningPct = 10.0,
+            HighSlippageTrailPct       = 0.0
+        };
+        var config = new ConfigurationBuilder().Build();
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId:       "ORDER-012",
+                StopOrderId:   "STOP-012",
+                TargetOrderId: null,
+                FillPrice:     9.90m,
+                FillQuantity:  2,
+                FillAmount:    1_980m,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow));
+
+        var service = new BrokerExecutionService(
+            _brokerMock.Object,
+            _sizer,
+            _guard,
+            new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
+            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
+            _scopeFactory,
+            NullLogger<BrokerExecutionService>.Instance,
+            Options.Create(options),
+            isMarketOpen: () => true);
+
+        var alert = BuildAlert(pricePaid: 4.95m);
+
+        await service.HandleEntryAsync(alert, CallClassification());
+
+        _brokerMock.Verify(b => b.ReplaceTrailStopAsync(
+            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TradeOrder>(),
+            It.IsAny<double>(), default), Times.Never);
     }
 }

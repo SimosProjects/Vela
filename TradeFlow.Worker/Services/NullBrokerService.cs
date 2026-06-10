@@ -119,6 +119,22 @@ public class NullBrokerService : IBrokerService
             FilledAt:      DateTimeOffset.UtcNow));
 
     /// <summary>
+    /// No-op trail stop replacement for testing. Logs the action and returns a fake new stop ID.
+    /// </summary>
+    public Task<string?> ReplaceTrailStopAsync(
+        string existingStopOrderId,
+        int quantity,
+        TradeOrder order,
+        double newTrailPercent,
+        CancellationToken ct = default)
+    {
+        _logger.LogDebug(
+            "[NullBroker] ReplaceTrailStop {Symbol} — {OldId} trail: {Trail}% (simulated)",
+            order.Symbol, existingStopOrderId, newTrailPercent);
+        return Task.FromResult<string?>($"NULL-TRAIL-{Guid.NewGuid():N}"[..16]);
+    }
+
+    /// <summary>
     /// No-op order cancellation for testing.
     /// </summary>
     public Task CancelOrderAsync(int orderId, CancellationToken ct = default) =>
@@ -171,7 +187,7 @@ public class NullBrokerService : IBrokerService
     public void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler) { }
 
     /// <summary>
-    /// Returns an empty list, no Gateway available in simulation.
+    /// Returns an empty list — no Gateway available in simulation.
     /// MarketConditionsLogger falls back to Yahoo Finance when this returns empty.
     /// </summary>
     public Task<List<HistoricalBar>> GetHistoricalBarsAsync(
