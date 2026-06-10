@@ -202,6 +202,10 @@ public class BrokerExecutionService
             };
         }
 
+        // Tighten trail if post-fill slippage exceeds the configured warning threshold.
+        // Must run before RegisterOpen so the updated StopOrderId is stored in TradeGuard and DB.
+        result = await TightenTrailOnElevatedSlippageAsync(order, result, alertedPrice, ct);
+
         _guard.RegisterOpen(order, result);
         var trade = _guard.FindOpenTrade(
             order.UserName, order.OptionsContractSymbol, order.Symbol)!;
@@ -540,6 +544,50 @@ public class BrokerExecutionService
     }
 
     // -- Helpers --
+
+    // Replaces the trail stop with a tighter percentage when the actual fill price is
+    // significantly above the alerted price. Returns an updated BrokerOrderResult with
+    // the new StopOrderId on success, or the original result if the threshold is not
+    // exceeded, tightening is disabled, or the broker replacement fails.
+    private async Task<BrokerOrderResult> TightenTrailOnElevatedSlippageAsync(
+        TradeOrder order,
+        BrokerOrderResult result,
+        decimal alertedPrice,
+        CancellationToken ct)
+    {
+        if (_riskOptions.PostFillSlippageWarningPct <= 0
+            || _riskOptions.HighSlippageTrailPct <= 0
+            || alertedPrice <= 0
+            || result.StopOrderId is null)
+            return result;
+
+        var slippagePct = (result.FillPrice - alertedPrice) / alertedPrice * 100;
+
+        if (slippagePct <= (decimal)_riskOptions.PostFillSlippageWarningPct)
+            return result;
+
+        _logger.LogWarning(
+            "Elevated post-fill slippage for {Symbol} — {Slippage:F1}% above alert price. " +
+            "Tightening trail from {OldTrail}% to {NewTrail}%.",
+            order.Symbol, slippagePct, order.TrailPercent, _riskOptions.HighSlippageTrailPct);
+
+        var newStopId = await _broker.ReplaceTrailStopAsync(
+            result.StopOrderId,
+            result.FillQuantity,
+            order,
+            _riskOptions.HighSlippageTrailPct,
+            ct);
+
+        if (newStopId is null)
+        {
+            _logger.LogWarning(
+                "Trail stop replacement failed for {Symbol} — original trail remains active.",
+                order.Symbol);
+            return result;
+        }
+
+        return result with { StopOrderId = newStopId };
+    }
 
     private static OpenPosition BuildOpenPosition(TradeRecord trade) => new()
     {

@@ -79,6 +79,19 @@ public interface IBrokerService
     Task CancelOrderAsync(int orderId, CancellationToken ct = default);
 
     /// <summary>
+    /// Cancels an existing trail stop and places a new one with a tighter trail percentage.
+    /// Called when post-fill slippage is elevated, to protect the position more aggressively.
+    /// The new stop uses the same entry order mapping so broker-side fills are still routed correctly.
+    /// Returns the new stop order ID, or null if the replacement fails.
+    /// </summary>
+    Task<string?> ReplaceTrailStopAsync(
+        string existingStopOrderId,
+        int quantity,
+        TradeOrder order,
+        double newTrailPercent,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Returns the net liquidation value of the account.
     /// Used by TradeGuard for exposure checks before placing orders.
     /// </summary>

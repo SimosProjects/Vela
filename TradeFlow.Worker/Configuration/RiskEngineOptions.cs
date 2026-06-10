@@ -68,6 +68,18 @@ public class RiskEngineOptions
     [Range(0, 100, ErrorMessage = "StockMaxSlippagePct must be between 0 and 100.")]
     public decimal StockMaxSlippagePct { get; init; } = 5.0m;
 
+    // Post-fill slippage threshold above which the trail stop is tightened.
+    // Compared against (fillPrice - alertedPrice) / alertedPrice * 100.
+    // 0 = disabled; no tightening applied regardless of fill quality.
+    [Range(0, 100, ErrorMessage = "PostFillSlippageWarningPct must be between 0 and 100.")]
+    public double PostFillSlippageWarningPct { get; init; } = 10.0;
+
+    // Trail percentage applied when PostFillSlippageWarningPct is exceeded.
+    // Should be tighter than the risk-tier trail percentages.
+    // 0 = disabled; original trail remains even when threshold is crossed.
+    [Range(0, 100, ErrorMessage = "HighSlippageTrailPct must be between 0 and 100.")]
+    public double HighSlippageTrailPct { get; init; } = 25.0;
+
     [Range(1, 100, ErrorMessage = "MaxDailyExposurePct must be between 1 and 100.")]
     public double MaxDailyExposurePct { get; init; } = 30.0;
 

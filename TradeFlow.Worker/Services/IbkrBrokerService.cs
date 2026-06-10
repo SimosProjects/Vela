@@ -367,7 +367,7 @@ public class IbkrBrokerService : IBrokerService
 
         var fillWindowSeconds = order.LimitPrice.HasValue ? LimitOrderFillWindowSeconds : 15;
 
-        // Register exec details TCS before placing, catches late fills that arrive
+        // Register exec details TCS before placing — catches late fills that arrive
         // after the fill window fires and the order cancel is sent to IBKR.
         var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId);
 
@@ -389,10 +389,10 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(fillWindowSeconds));
 
-            // Only resolves when IBKR confirms status "Filled".
+            // Only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
             var state = await tcs.Task.WaitAsync(cts.Token);
 
-            // Normal fill
+            // Normal fill — exec details TCS no longer needed
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
             _logger.LogDebug(
@@ -402,7 +402,7 @@ public class IbkrBrokerService : IBrokerService
             _connection.Client.cancelOrder(tempStopId);
             await Task.Delay(300, ct);
 
-            // Use FilledQuantity from orderStatus, may be less than order.Quantity on a partial
+            // Use FilledQuantity from orderStatus — may be less than order.Quantity on a partial
             // fill. Trail stop must match actual position size to avoid overselling into a short.
             var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
             var fillQty    = state.FilledQuantity > 0 ? state.FilledQuantity : order.Quantity;
@@ -413,6 +413,9 @@ public class IbkrBrokerService : IBrokerService
             var trailOrder  = BuildOcaTrailOrder(trailStopId, fillQty, order.TrailPercent, ocaGroup);
 
             _connection.Client.placeOrder(trailStopId, contract, trailOrder);
+
+            // TODO: re-add LMT target order to OCA group once IBKR Level 3 options
+            // approval is granted (~July 2026). Removed due to Level 2 restriction.
 
             _logger.LogDebug(
                 "IBKR OCA group placed — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
@@ -886,6 +889,69 @@ public class IbkrBrokerService : IBrokerService
         }
     }
 
+    /// <summary>
+    /// Cancels an existing trail stop and places a new one with a tighter trail percentage.
+    /// Looks up the entry order mapping before removing so exec callbacks are re-wired correctly.
+    /// Returns the new stop order ID, or null if the broker is unavailable or parsing fails.
+    /// </summary>
+    public async Task<string?> ReplaceTrailStopAsync(
+        string existingStopOrderId,
+        int quantity,
+        TradeOrder order,
+        double newTrailPercent,
+        CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return null;
+
+        if (!int.TryParse(existingStopOrderId, out var existingId))
+        {
+            _logger.LogWarning(
+                "IBKR ReplaceTrailStop — cannot parse stop order ID: {Id}", existingStopOrderId);
+            return null;
+        }
+
+        // Look up the parent entry order ID before removing from the map so callbacks
+        // can be re-wired to the same entry after the replacement is placed.
+        string entryOrderId;
+        lock (_stopMapLock)
+        {
+            entryOrderId = _stopOrderMap.TryGetValue(existingId, out var mapping)
+                ? mapping.EntryOrderId
+                : string.Empty;
+        }
+
+        _connection.Client.cancelOrder(existingId);
+        _connection.Wrapper.UnregisterExecDetailsCallback(existingId);
+        RemoveStopOrderMapping(existingId);
+
+        await Task.Delay(300, ct);
+
+        var contract    = BuildContract(order);
+        var newStopId   = GetNextOrderId();
+        var ocaGroup    = $"OCA_{newStopId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+        var trailOrder  = BuildOcaTrailOrder(newStopId, quantity, newTrailPercent, ocaGroup);
+
+        _connection.Client.placeOrder(newStopId, contract, trailOrder);
+
+        // Re-wire exec callbacks so broker-side fills on the new stop still route correctly
+        if (!string.IsNullOrEmpty(entryOrderId))
+        {
+            lock (_stopMapLock)
+            {
+                _stopOrderMap[newStopId] = (entryOrderId, TradeOutcome.StoppedOut);
+            }
+
+            _connection.Wrapper.RegisterExecDetailsCallback(newStopId, fillPrice =>
+                OnStopOrderFilled(newStopId, fillPrice));
+        }
+
+        _logger.LogDebug(
+            "IBKR trail stop replaced for {Symbol} — {OldId} → {NewId} trail: {Trail}%",
+            order.Symbol, existingStopOrderId, newStopId, newTrailPercent);
+
+        return newStopId.ToString();
+    }
+
     // -- Helpers --
 
     private void RegisterStopOrderCallbacks(int entryOrderId, int trailStopId, int? targetOrderId)
@@ -1031,7 +1097,7 @@ public class IbkrBrokerService : IBrokerService
             Transmit      = false,
         };
 
-    // Temporary bracket stop, placed atomically with the entry to ensure immediate protection.
+    // Temporary bracket stop — placed atomically with the entry to ensure immediate protection.
     // Cancelled and replaced with OCA trail stop once the entry fill is confirmed.
     private static Order BuildStopOrder(int orderId, int parentId, int quantity, double stopPrice) =>
         new()
@@ -1045,7 +1111,7 @@ public class IbkrBrokerService : IBrokerService
             Transmit      = false,
         };
 
-    // Standalone trailing stop in an OCA group, no ParentId so IBKR accepts TRAIL type.
+    // Standalone trailing stop in an OCA group — no ParentId so IBKR accepts TRAIL type.
     private static Order BuildOcaTrailOrder(int orderId, int quantity, double trailPercent, string ocaGroup) =>
         new()
         {
@@ -1059,6 +1125,9 @@ public class IbkrBrokerService : IBrokerService
             Tif             = "GTC",
             Transmit        = true,
         };
+
+    // TODO: restore when IBKR Level 3 options approval is granted (~July 2026)
+    // private static Order BuildOcaLimitOrder(int orderId, int quantity, double limitPrice, string ocaGroup) => ...
 
     private static Order BuildCloseOrder(int orderId, TradeRecord trade) =>
         new()
