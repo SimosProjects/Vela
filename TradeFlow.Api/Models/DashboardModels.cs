@@ -74,7 +74,8 @@ public record PositionResponse(
     decimal TargetPrice,
     DateTimeOffset OpenedAt,
     string Trader,
-    double? XScore
+    double? XScore,
+    string RiskTier
 );
 
 /// <summary>Closed trade returned by GET /api/dashboard/closed-today.</summary>

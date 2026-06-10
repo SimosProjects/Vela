@@ -1,10 +1,13 @@
 import { B, dirColor, fmtDollar, fmtTime } from '../styles/theme.js';
 import { Pill } from './shared/index.js';
 
-export function PositionRow({ position, onClose, isLast }) {
-  const { contract, direction, quantity, entryPrice, costBasis, stopPrice, targetPrice, trailPct, openedAt, trader, xScore, discordRank } = position;
-  const stopPct  = ((stopPrice  - entryPrice) / entryPrice * 100).toFixed(0);
+export function PositionRow({ position, isLast }) {
+  const { contract, direction, quantity, entryPrice, costBasis, stopPrice,
+          targetPrice, openedAt, trader, xScore, riskTier } = position;
+
+  const stopPct   = ((stopPrice   - entryPrice) / entryPrice * 100).toFixed(0);
   const targetPct = ((targetPrice - entryPrice) / entryPrice * 100).toFixed(0);
+  const riskColor = riskTier === 'Lotto' ? B.rd : riskTier === 'High' ? B.am : B.mu;
 
   return (
     <div
@@ -23,26 +26,21 @@ export function PositionRow({ position, onClose, isLast }) {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 11, color: B.mu2 }}>{fmtDollar(costBasis)}</span>
-          <button
-            onClick={() => onClose(position)}
-            className="btn-close"
-            style={{
-              padding: '3px 8px',
-              borderRadius: 4,
-              fontSize: 10,
-              fontWeight: 700,
-              color: B.rd,
-              background: 'rgba(248,81,73,0.07)',
-              border: `1px solid rgba(248,81,73,0.28)`,
-              transition: 'background 0.1s',
-            }}
-          >
-            CLOSE
-          </button>
+          <span style={{
+            padding: '2px 7px',
+            borderRadius: 4,
+            fontSize: 10,
+            fontWeight: 700,
+            color: riskColor,
+            background: `${riskColor}12`,
+            border: `1px solid ${riskColor}30`,
+          }}>
+            {riskTier === 'High' ? 'HIGH RISK' : riskTier?.toUpperCase() ?? 'STANDARD'}
+          </span>
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4, fontSize: 11 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, fontSize: 11 }}>
         <div>
           <div style={{ color: B.mu2 }}>Entry</div>
           <div style={{ color: B.tx, fontWeight: 500 }}>${entryPrice.toFixed(2)}</div>
@@ -57,10 +55,6 @@ export function PositionRow({ position, onClose, isLast }) {
           <div style={{ color: B.gr, fontWeight: 500 }}>${targetPrice.toFixed(2)}</div>
           <div style={{ color: B.mu, fontSize: 10 }}>+{targetPct}%</div>
         </div>
-        <div>
-          <div style={{ color: B.mu2 }}>Trail</div>
-          <div style={{ color: B.mu }}>{trailPct}%</div>
-        </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ color: B.mu2 }}>Opened</div>
           <div style={{ color: B.mu }}>{fmtTime(openedAt)}</div>
@@ -68,7 +62,7 @@ export function PositionRow({ position, onClose, isLast }) {
       </div>
 
       <div style={{ marginTop: 5, fontSize: 10, color: B.mu }}>
-        {trader} · xScore <span style={{ color: B.tx }}>{xScore}</span> · {discordRank}
+        {trader} · xScore <span style={{ color: B.tx }}>{xScore}</span>
       </div>
     </div>
   );

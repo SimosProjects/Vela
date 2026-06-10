@@ -87,7 +87,7 @@ public class IbkrBrokerService : IBrokerService
 
             count++;
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "IBKR re-registered stop callbacks for {Symbol} — StopOrderId: {StopId} TargetOrderId: {TargetId}",
                 p.Symbol, stopId, hasTarget ? targetId : null);
         }
@@ -387,7 +387,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             // Normal fill — exec details TCS no longer needed
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "IBKR entry filled. OrderId: {OrderId} Status: {Status} — replacing stop with OCA trail",
                 orderId, state.Status);
 
@@ -413,7 +413,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             //                         Math.Round((double)order.TargetPrice, 2), ocaGroup);
             // _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "IBKR OCA group placed — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
                 fillQty, order.TrailPercent, ocaGroup);
 
@@ -497,7 +497,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
                 //                         Math.Round((double)order.TargetPrice, 2), ocaGroup);
                 // _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
 
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "IBKR OCA group placed for late fill — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
                     actualLateFillQty, order.TrailPercent, ocaGroup);
 
@@ -596,7 +596,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
 
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "IBKR partial close filled. OrderId: {OrderId} Symbol: {Symbol} Qty: {Qty} FillPrice: {Price:F2}",
                 closeOrderId, trade.Symbol, quantityToClose, fillPrice);
 
@@ -656,7 +656,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
         _connection.Wrapper.UnregisterExecDetailsCallback(orderId);
         RemoveStopOrderMapping(orderId);
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "IBKR order {OrderId} cancelled — removed from stop tracking.", orderId);
 
         return Task.CompletedTask;
@@ -726,7 +726,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
 
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
 
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "IBKR position closed. OrderId: {OrderId} Symbol: {Symbol} Status: {Status} FillPrice: {Price:F2}",
                 closeOrderId, trade.Symbol, fill.Status, fillPrice);
 
@@ -756,7 +756,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
                 var execFillPrice = await execTcs.Task.WaitAsync(execCts.Token);
                 var multiplier    = trade.TradeType == TradeType.Options ? 100m : 1m;
 
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "IBKR ClosePosition recovered fill via execDetails — Symbol: {Symbol} FillPrice: {Price:F2}",
                     trade.Symbol, execFillPrice);
 
@@ -916,7 +916,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             _stopOrderMap.Remove(stopOrderId);
         }
 
-        _logger.LogInformation(
+        _logger.LogDebug(
             "IBKR broker-side fill detected — StopOrderId: {StopId} EntryOrderId: {EntryId} " +
             "Outcome: {Outcome} FillPrice: ${Price:F2}",
             stopOrderId, mapping.EntryOrderId, mapping.Outcome, fillPrice);
