@@ -98,7 +98,8 @@ public class BrokerExecutionServiceTests
         string? contractSymbol = "TSLA260620C00450000",
         decimal? strike = 450,
         string userName = "TestTrader",
-        decimal? actualPriceAtTimeOfAlert = null) =>
+        decimal? actualPriceAtTimeOfAlert = null,
+        string expiration = "2026-06-20T00:00:00") =>
         new(
             Id: Guid.NewGuid().ToString(),
             UserId: null,
@@ -107,7 +108,7 @@ public class BrokerExecutionServiceTests
             Type: type,
             Direction: direction,
             Strike: strike,
-            Expiration: "2026-06-20T00:00:00",
+            Expiration: expiration,
             OptionsContractSymbol: contractSymbol,
             ContractDescription: null,
             Side: side,
@@ -253,13 +254,6 @@ public class BrokerExecutionServiceTests
     public async Task HandleEntryAsync_Pending_ZeroQty_DoesNotRecordTrade()
     {
         _brokerMock
-            .Setup(b => b.GetCurrentMarketPriceAsync(
-                It.IsAny<string>(), It.IsAny<TradeType>(),
-                It.IsAny<string?>(), It.IsAny<decimal?>(),
-                It.IsAny<string?>(), default))
-            .ReturnsAsync(4.95m);
-
-        _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
                 OrderId: "1", StopOrderId: null, TargetOrderId: null,
@@ -281,13 +275,6 @@ public class BrokerExecutionServiceTests
     public async Task HandleEntryAsync_Pending_NegativeQty_DoesNotRecordTrade()
     {
         _brokerMock
-            .Setup(b => b.GetCurrentMarketPriceAsync(
-                It.IsAny<string>(), It.IsAny<TradeType>(),
-                It.IsAny<string?>(), It.IsAny<decimal?>(),
-                It.IsAny<string?>(), default))
-            .ReturnsAsync(4.95m);
-
-        _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
                 OrderId: "1", StopOrderId: null, TargetOrderId: null,
@@ -308,13 +295,6 @@ public class BrokerExecutionServiceTests
     [Fact]
     public async Task HandleEntryAsync_Pending_PartialFill_RecordsActualQty()
     {
-        _brokerMock
-            .Setup(b => b.GetCurrentMarketPriceAsync(
-                It.IsAny<string>(), It.IsAny<TradeType>(),
-                It.IsAny<string?>(), It.IsAny<decimal?>(),
-                It.IsAny<string?>(), default))
-            .ReturnsAsync(4.95m);
-
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
@@ -340,13 +320,6 @@ public class BrokerExecutionServiceTests
     {
         // PlaceOrderAsync returns Filled with a quantity lower than what was ordered.
         // Verifies the recorded position reflects the broker's actual fill quantity.
-        _brokerMock
-            .Setup(b => b.GetCurrentMarketPriceAsync(
-                It.IsAny<string>(), It.IsAny<TradeType>(),
-                It.IsAny<string?>(), It.IsAny<decimal?>(),
-                It.IsAny<string?>(), default))
-            .ReturnsAsync(1.18m);
-
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
@@ -381,13 +354,6 @@ public class BrokerExecutionServiceTests
     {
         // PlaceOrderAsync times out (Pending), then GetCurrentPositionPriceAsync confirms
         // a partial fill. Verifies the pending path records only what IBKR actually holds.
-        _brokerMock
-            .Setup(b => b.GetCurrentMarketPriceAsync(
-                It.IsAny<string>(), It.IsAny<TradeType>(),
-                It.IsAny<string?>(), It.IsAny<decimal?>(),
-                It.IsAny<string?>(), default))
-            .ReturnsAsync(1.18m);
-
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
@@ -558,5 +524,45 @@ public class BrokerExecutionServiceTests
 
         _brokerMock.Verify(b => b.PlaceOrderAsync(
             It.IsAny<TradeOrder>(), default), Times.Once);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_StandardOptions_PlaceOrderReceivesLimitPrice()
+    {
+        // PositionSizer computes LimitPrice from OptionsStandardMaxSlippagePct.
+        // Verifies the computed limit price flows through to PlaceOrderAsync.
+        var alert = BuildAlert(
+            pricePaid:      4.95m,
+            contractSymbol: "TSLA260620C00450000",
+            strike:         450m);
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        var expectedLimit = Math.Round(4.95m * (1 + new RiskEngineOptions().OptionsStandardMaxSlippagePct / 100), 2);
+
+        _brokerMock.Verify(b => b.PlaceOrderAsync(
+            It.Is<TradeOrder>(o => o.LimitPrice == expectedLimit),
+            default), Times.Once);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_LottoAlert_PlaceOrderHasNoLimitPrice()
+    {
+        // Lotto options always use a market order regardless of slippage config.
+        var todayEt = DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow,
+                TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).DateTime);
+
+        var alert = BuildAlert(
+            pricePaid:      0.50m,
+            contractSymbol: "TSLA260620C00450000",
+            strike:         450m,
+            expiration:     $"{todayEt:yyyy-MM-dd}T00:00:00");
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        _brokerMock.Verify(b => b.PlaceOrderAsync(
+            It.Is<TradeOrder>(o => o.LimitPrice == null),
+            default), Times.Once);
     }
 }

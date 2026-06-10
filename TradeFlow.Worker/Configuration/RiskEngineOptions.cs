@@ -56,6 +56,18 @@ public class RiskEngineOptions
     [Range(0, 100, ErrorMessage = "AlertStalenessMaxSlippagePct must be between 0 and 100.")]
     public decimal AlertStalenessMaxSlippagePct { get; init; } = 25.0m;
 
+    // Maximum acceptable fill price above PricePaid per risk tier.
+    // Used to compute the limit order ceiling: PricePaid * (1 + threshold / 100).
+    // 0 = disabled for that tier (falls back to market order).
+    [Range(0, 100, ErrorMessage = "OptionsStandardMaxSlippagePct must be between 0 and 100.")]
+    public decimal OptionsStandardMaxSlippagePct { get; init; } = 15.0m;
+
+    [Range(0, 100, ErrorMessage = "OptionsHighMaxSlippagePct must be between 0 and 100.")]
+    public decimal OptionsHighMaxSlippagePct { get; init; } = 20.0m;
+
+    [Range(0, 100, ErrorMessage = "StockMaxSlippagePct must be between 0 and 100.")]
+    public decimal StockMaxSlippagePct { get; init; } = 5.0m;
+
     [Range(1, 100, ErrorMessage = "MaxDailyExposurePct must be between 1 and 100.")]
     public double MaxDailyExposurePct { get; init; } = 30.0;
 

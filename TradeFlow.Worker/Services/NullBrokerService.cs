@@ -22,16 +22,17 @@ public class NullBrokerService : IBrokerService
         TradeOrder order,
         CancellationToken cancellationToken = default)
     {
-        var orderId = $"NULL-{Guid.NewGuid():N}"[..12];
+        var orderType = order.LimitPrice.HasValue ? $"LMT ${order.LimitPrice:F2}" : "MKT";
 
         _logger.LogInformation(
             "[NullBroker] PLACE ORDER — {Type} {Symbol} {Direction} " +
-            "× {Quantity} @ ~${Entry:F2} | Stop: ${Stop:F2} | Target: ${Target:F2} | Budget: ${Budget:F2}",
+            "× {Quantity} @ ~${Entry:F2} ({OrderType}) | Stop: ${Stop:F2} | Target: ${Target:F2} | Budget: ${Budget:F2}",
             order.TradeType,
             order.Symbol,
             order.Direction ?? "—",
             order.Quantity,
             order.EstimatedEntryPrice,
+            orderType,
             order.StopPrice,
             order.TargetPrice,
             order.BudgetUsed);
@@ -58,7 +59,7 @@ public class NullBrokerService : IBrokerService
     {
         var simulatedPrice = trade.EntryPrice * 1.10m;
         _logger.LogDebug(
-            "[NullBroker] GetCurrentPositionPrice {Symbol} → ${Price:F2} x{Qty} simulated",
+            "[NullBroker] GetCurrentPositionPrice {Symbol} -> ${Price:F2} x{Qty} simulated",
             trade.Symbol, simulatedPrice, trade.Quantity);
         return Task.FromResult((simulatedPrice, trade.Quantity));
     }
@@ -69,7 +70,7 @@ public class NullBrokerService : IBrokerService
     /// </summary>
     public Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct = default)
     {
-        _logger.LogDebug("[NullBroker] GetAllPositions → empty (simulation)");
+        _logger.LogDebug("[NullBroker] GetAllPositions -> empty (simulation)");
         return Task.FromResult(new List<IbkrPosition>());
     }
 
@@ -79,7 +80,7 @@ public class NullBrokerService : IBrokerService
     /// </summary>
     public Task<List<IbkrOpenOrder>> GetAllOpenOrdersAsync(CancellationToken ct = default)
     {
-        _logger.LogDebug("[NullBroker] GetAllOpenOrders → empty (simulation)");
+        _logger.LogDebug("[NullBroker] GetAllOpenOrders -> empty (simulation)");
         return Task.FromResult(new List<IbkrOpenOrder>());
     }
 
@@ -95,7 +96,7 @@ public class NullBrokerService : IBrokerService
         CancellationToken ct = default)
     {
         _logger.LogDebug(
-            "[NullBroker] GetCurrentMarketPrice {Symbol} → alerted price (0% slippage simulated)",
+            "[NullBroker] GetCurrentMarketPrice {Symbol} -> alerted price (0% slippage simulated)",
             symbol);
         return Task.FromResult(0m);
     }
@@ -151,7 +152,7 @@ public class NullBrokerService : IBrokerService
     /// </summary>
     public Task<decimal> GetAccountBalanceAsync(CancellationToken cancellationToken = default)
     {
-        _logger.LogDebug("[NullBroker] GetAccountBalance → $100,000 simulated");
+        _logger.LogDebug("[NullBroker] GetAccountBalance -> $100,000 simulated");
         return Task.FromResult(100_000m);
     }
 
@@ -160,7 +161,7 @@ public class NullBrokerService : IBrokerService
     /// </summary>
     public Task<decimal> GetOpenPositionsValueAsync(CancellationToken cancellationToken = default)
     {
-        _logger.LogDebug("[NullBroker] GetOpenPositionsValue → $0 simulated");
+        _logger.LogDebug("[NullBroker] GetOpenPositionsValue -> $0 simulated");
         return Task.FromResult(0m);
     }
 
@@ -170,7 +171,7 @@ public class NullBrokerService : IBrokerService
     public void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler) { }
 
     /// <summary>
-    /// Returns an empty list — no Gateway available in simulation.
+    /// Returns an empty list, no Gateway available in simulation.
     /// MarketConditionsLogger falls back to Yahoo Finance when this returns empty.
     /// </summary>
     public Task<List<HistoricalBar>> GetHistoricalBarsAsync(
@@ -178,7 +179,7 @@ public class NullBrokerService : IBrokerService
         int barCount,
         CancellationToken ct = default)
     {
-        _logger.LogDebug("[NullBroker] GetHistoricalBars {Symbol} → empty (simulation)", symbol);
+        _logger.LogDebug("[NullBroker] GetHistoricalBars {Symbol} -> empty (simulation)", symbol);
         return Task.FromResult(new List<HistoricalBar>());
     }
 }

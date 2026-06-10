@@ -14,7 +14,7 @@ public class IbkrBrokerService : IBrokerService
     private readonly IbkrOptions _options;
     private readonly ILogger<IbkrBrokerService> _logger;
 
-    private int _nextReqId = 1;
+    private int _nextReqId   = 1;
     private int _nextOrderId = 1;
 
     // Maps stop/target orderId to the parent entry orderId so broker-side fills can be routed
@@ -23,6 +23,9 @@ public class IbkrBrokerService : IBrokerService
 
     // Subscribed by PositionMonitorService to handle broker-side stop and target fills
     private Action<string, decimal, TradeOutcome>? _brokerFillHandler;
+
+    // Fill window for limit orders before the unfilled portion is cancelled
+    private const int LimitOrderFillWindowSeconds = 7;
 
     private static readonly TimeZoneInfo EasternTime =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
@@ -176,7 +179,7 @@ public class IbkrBrokerService : IBrokerService
         }
     }
 
-public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct = default)
+    public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct = default)
     {
         if (!EnsureConnected()) return [];
 
@@ -340,12 +343,12 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
 
     /// <summary>
     /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
-    /// an OCA group containing a TRAIL stop. The LMT target order is omitted until IBKR Level 3
-    /// options approval is granted — Level 2 rejects LMT sell orders in OCA groups.
-    /// On timeout, waits an additional 10 seconds for a late ExecDetails callback before
-    /// giving up — prevents ghost trades when the fill arrives after the timeout fires.
-    /// Partial fills are handled by reading FilledQuantity from the orderStatus callback (normal
-    /// path) or reqPositions (late fill path) so the trail stop always matches the actual position.
+    /// an OCA group containing a TRAIL stop. When the order has a LimitPrice set, a LMT order
+    /// is placed with a shorter fill window (7s); unfilled remainder is cancelled before
+    /// BrokerExecutionService verifies the actual held quantity. Market orders retain the 15s
+    /// window with late-fill detection via ExecDetails. Partial fills are handled by reading
+    /// FilledQuantity from the orderStatus callback (normal path) or reqPositions (late fill
+    /// path) so the trail stop always matches the actual position size.
     /// </summary>
     public async Task<BrokerOrderResult> PlaceOrderAsync(
         TradeOrder order,
@@ -354,13 +357,18 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
         if (!EnsureConnected())
             return FailedResult("Not connected to IB Gateway");
 
-        var orderId    = GetNextOrderId();
-        var tcs        = _connection.Wrapper.RegisterOrderCallback(orderId);
-        var contract   = BuildContract(order);
-        var entryOrder = BuildMarketOrder(orderId, order.Quantity, "BUY");
+        var orderId  = GetNextOrderId();
+        var tcs      = _connection.Wrapper.RegisterOrderCallback(orderId);
+        var contract = BuildContract(order);
 
-        // Register exec details TCS before placing — catches late fills that arrive
-        // after the 15s timeout fires and the order cancel is sent to IBKR.
+        var entryOrder = order.LimitPrice.HasValue
+            ? BuildLimitOrder(orderId, order.Quantity, "BUY", order.LimitPrice.Value)
+            : BuildMarketOrder(orderId, order.Quantity, "BUY");
+
+        var fillWindowSeconds = order.LimitPrice.HasValue ? LimitOrderFillWindowSeconds : 15;
+
+        // Register exec details TCS before placing, catches late fills that arrive
+        // after the fill window fires and the order cancel is sent to IBKR.
         var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId);
 
         // Place entry with a temporary fixed STP as bracket child so there is always
@@ -379,12 +387,12 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             _connection.Client.placeOrder(tempStopId, contract, tempStopOrder);
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(15));
+            cts.CancelAfter(TimeSpan.FromSeconds(fillWindowSeconds));
 
-            // Only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
+            // Only resolves when IBKR confirms status "Filled".
             var state = await tcs.Task.WaitAsync(cts.Token);
 
-            // Normal fill — exec details TCS no longer needed
+            // Normal fill
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
             _logger.LogDebug(
@@ -394,7 +402,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             _connection.Client.cancelOrder(tempStopId);
             await Task.Delay(300, ct);
 
-            // Use FilledQuantity from orderStatus — may be less than order.Quantity on a partial
+            // Use FilledQuantity from orderStatus, may be less than order.Quantity on a partial
             // fill. Trail stop must match actual position size to avoid overselling into a short.
             var fillPrice  = state.AvgFillPrice > 0 ? state.AvgFillPrice : order.EstimatedEntryPrice;
             var fillQty    = state.FilledQuantity > 0 ? state.FilledQuantity : order.Quantity;
@@ -405,13 +413,6 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             var trailOrder  = BuildOcaTrailOrder(trailStopId, fillQty, order.TrailPercent, ocaGroup);
 
             _connection.Client.placeOrder(trailStopId, contract, trailOrder);
-
-            // TODO: re-add LMT target order to OCA group once IBKR Level 3 options
-            // approval is granted (~July 2026). Removed due to Level 2 restriction.
-            // var targetOrderId = orderId + 3;
-            // var targetOrder   = BuildOcaLimitOrder(targetOrderId, fillQty,
-            //                         Math.Round((double)order.TargetPrice, 2), ocaGroup);
-            // _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
 
             _logger.LogDebug(
                 "IBKR OCA group placed — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
@@ -431,6 +432,32 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
         }
         catch (OperationCanceledException)
         {
+            // Limit order: cancel the unfilled portion and return Pending so
+            // BrokerExecutionService can verify what quantity actually filled.
+            // The 3s delay in BrokerExecutionService doubles as the cancel propagation window.
+            if (order.LimitPrice.HasValue)
+            {
+                _connection.Client.cancelOrder(orderId);
+                _connection.Client.cancelOrder(tempStopId);
+                _connection.Wrapper.UnregisterOrderCallback(orderId);
+                _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
+
+                _logger.LogWarning(
+                    "IBKR limit order fill window expired for {Symbol} @ ${Limit:F2} — cancelling unfilled portion.",
+                    order.Symbol, order.LimitPrice.Value);
+
+                return new BrokerOrderResult(
+                    OrderId:       orderId.ToString(),
+                    StopOrderId:   null,
+                    TargetOrderId: null,
+                    FillPrice:     0m,
+                    FillQuantity:  0,
+                    FillAmount:    0m,
+                    Status:        OrderStatus.Pending,
+                    FilledAt:      DateTimeOffset.UtcNow);
+            }
+
+            // Market order timeout: wait for a late ExecDetails callback before giving up.
             _logger.LogWarning(
                 "IBKR PlaceOrder timed out for {Symbol} after 15s — sending cancel, checking for late fill.",
                 order.Symbol);
@@ -439,8 +466,6 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             _connection.Client.cancelOrder(tempStopId);
             _connection.Wrapper.UnregisterOrderCallback(orderId);
 
-            // Wait up to 10 seconds for a late ExecDetails callback — the fill may have
-            // already reached IBKR before the cancel arrived, creating a ghost trade.
             try
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -454,8 +479,6 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
 
                 await Task.Delay(300, ct);
 
-                // ExecDetails only provides price — use reqPositions to verify actual filled
-                // quantity since late fills may be partial and trail stop must match position size.
                 var posKey = order.TradeType == TradeType.Options
                     ? $"{order.Symbol}::{order.OptionsContractSymbol}"
                     : $"{order.Symbol}::STK";
@@ -490,13 +513,6 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
 
                 _connection.Client.placeOrder(trailStopId, contract, trailOrder);
 
-                // TODO: re-add LMT target order to OCA group once IBKR Level 3 options
-                // approval is granted (~July 2026). Removed due to Level 2 restriction.
-                // var targetOrderId = orderId + 3;
-                // var targetOrder   = BuildOcaLimitOrder(targetOrderId, actualLateFillQty,
-                //                         Math.Round((double)order.TargetPrice, 2), ocaGroup);
-                // _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
-
                 _logger.LogDebug(
                     "IBKR OCA group placed for late fill — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
                     actualLateFillQty, order.TrailPercent, ocaGroup);
@@ -517,7 +533,6 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             }
             catch (OperationCanceledException)
             {
-                // No late fill arrived within 10s — order was truly cancelled
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
                 _logger.LogWarning(
@@ -707,11 +722,9 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
 
         var closeOrderId = GetNextOrderId();
         var tcs          = _connection.Wrapper.RegisterOrderCallback(closeOrderId);
-
-        // Register exec details TCS before placing — catches the fill even if orderStatus times out
-        var execTcs    = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
-        var contract   = BuildCloseContract(trade);
-        var closeOrder = BuildCloseOrder(closeOrderId, trade);
+        var execTcs      = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
+        var contract     = BuildCloseContract(trade);
+        var closeOrder   = BuildCloseOrder(closeOrderId, trade);
 
         try
         {
@@ -801,10 +814,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
     public void SyncOrderId(int maxDbOrderId = 0)
     {
         var gatewayId = _connection.Wrapper.NextValidOrderId;
-
-        // Ensure the first issued ID exceeds both Gateway's counter and the DB high-water mark.
-        // GetNextOrderId() adds 10, so target is set 10 below the safe floor.
-        var target = Math.Max(gatewayId - 10, maxDbOrderId);
+        var target    = Math.Max(gatewayId - 10, maxDbOrderId);
         Interlocked.Exchange(ref _nextOrderId, target);
 
         _logger.LogInformation(
@@ -878,9 +888,6 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
 
     // -- Helpers --
 
-    // Registers exec detail callbacks for the trail stop and optionally the target OCA order.
-    // When either fires, routes the fill to PositionMonitorService via the broker fill handler.
-    // targetOrderId is null when no target was placed (Level 2 restriction or 0DTE).
     private void RegisterStopOrderCallbacks(int entryOrderId, int trailStopId, int? targetOrderId)
     {
         var entryIdStr = entryOrderId.ToString();
@@ -901,9 +908,6 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
                 OnStopOrderFilled(targetOrderId.Value, fillPrice));
     }
 
-    // Called by IbkrEWrapper when a stop or target order fills broker-side.
-    // Looks up the parent trade and fires the broker fill handler on a background thread
-    // to avoid blocking the EWrapper callback thread.
     private void OnStopOrderFilled(int stopOrderId, decimal fillPrice)
     {
         (string EntryOrderId, TradeOutcome Outcome) mapping;
@@ -1016,7 +1020,18 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             Transmit      = false,
         };
 
-    // Temporary bracket stop — placed atomically with the entry to ensure immediate protection.
+    private static Order BuildLimitOrder(int orderId, int quantity, string action, decimal limitPrice) =>
+        new()
+        {
+            OrderId       = orderId,
+            Action        = action,
+            OrderType     = "LMT",
+            LmtPrice      = (double)limitPrice,
+            TotalQuantity = quantity,
+            Transmit      = false,
+        };
+
+    // Temporary bracket stop, placed atomically with the entry to ensure immediate protection.
     // Cancelled and replaced with OCA trail stop once the entry fill is confirmed.
     private static Order BuildStopOrder(int orderId, int parentId, int quantity, double stopPrice) =>
         new()
@@ -1030,7 +1045,7 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             Transmit      = false,
         };
 
-    // Standalone trailing stop in an OCA group — no ParentId so IBKR accepts TRAIL type.
+    // Standalone trailing stop in an OCA group, no ParentId so IBKR accepts TRAIL type.
     private static Order BuildOcaTrailOrder(int orderId, int quantity, double trailPercent, string ocaGroup) =>
         new()
         {
@@ -1044,21 +1059,6 @@ public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct 
             Tif             = "GTC",
             Transmit        = true,
         };
-
-    // TODO: restore when IBKR Level 3 options approval is granted (~July 2026)
-    // private static Order BuildOcaLimitOrder(int orderId, int quantity, double limitPrice, string ocaGroup) =>
-    //     new()
-    //     {
-    //         OrderId       = orderId,
-    //         Action        = "SELL",
-    //         OrderType     = "LMT",
-    //         LmtPrice      = limitPrice,
-    //         TotalQuantity = quantity,
-    //         OcaGroup      = ocaGroup,
-    //         OcaType       = 1,
-    //         Tif           = "GTC",
-    //         Transmit      = true,
-    //     };
 
     private static Order BuildCloseOrder(int orderId, TradeRecord trade) =>
         new()
