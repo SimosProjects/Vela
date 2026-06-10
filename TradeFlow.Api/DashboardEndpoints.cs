@@ -15,16 +15,16 @@ public static class DashboardEndpoints
     {
         var group = app.MapGroup("/api/dashboard").WithTags("Dashboard");
 
-        group.MapGet("/state",        GetState)       .WithName("GetDashboardState")
+        group.MapGet("/state", GetState).WithName("GetDashboardState")
              .WithSummary("Returns regime, account snapshot, and system health.");
 
-        group.MapGet("/positions",    GetPositions)   .WithName("GetOpenPositions")
+        group.MapGet("/positions", GetPositions).WithName("GetOpenPositions")
              .WithSummary("Returns all currently open positions.");
 
-        group.MapGet("/closed-today", GetClosedToday) .WithName("GetClosedToday")
+        group.MapGet("/closed-today", GetClosedToday).WithName("GetClosedToday")
              .WithSummary("Returns trades closed today in Eastern Time.");
 
-        group.MapPost("/pause",       TogglePause)    .WithName("TogglePause")
+        group.MapPost("/pause", TogglePause).WithName("TogglePause")
              .WithSummary("Flips is_paused in system_state. Worker reads this at each poll cycle.");
     }
 
@@ -131,7 +131,8 @@ public static class DashboardEndpoints
             TargetPrice: x.TargetPrice,
             OpenedAt:    x.OpenedAt,
             Trader:      x.UserName,
-            XScore:      x.XScore
+            XScore:      x.XScore,
+            RiskTier:    DetermineRiskTier(x.OptionsContract)
         )).ToList();
 
         return Results.Ok(positions);
@@ -242,6 +243,40 @@ public static class DashboardEndpoints
         catch
         {
             return occ;
+        }
+    }
+
+    // Derives risk tier from OCC contract expiration date using the same
+    // logic as the risk engine. Falls back to Standard for stocks or parse failures.
+    private static string DetermineRiskTier(string? optionsContract)
+    {
+        if (string.IsNullOrEmpty(optionsContract) || optionsContract.Length < 15)
+            return "Standard";
+
+        try
+        {
+            var datePart = optionsContract[^15..^9];
+            var year     = 2000 + int.Parse(datePart[..2]);
+            var month    = int.Parse(datePart[2..4]);
+            var day      = int.Parse(datePart[4..6]);
+            var expDate  = new DateOnly(year, month, day);
+
+            var todayEt = DateOnly.FromDateTime(
+                TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, Et).DateTime);
+
+            var daysToExpiry = expDate.DayNumber - todayEt.DayNumber;
+
+            if (daysToExpiry <= 1) return "Lotto";
+
+            var daysUntilFriday = (int)todayEt.DayOfWeek == 0
+                ? 5
+                : Math.Max(0, 6 - (int)todayEt.DayOfWeek);
+
+            return expDate <= todayEt.AddDays(daysUntilFriday) ? "High" : "Standard";
+        }
+        catch
+        {
+            return "Standard";
         }
     }
 }

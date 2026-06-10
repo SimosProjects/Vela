@@ -51,18 +51,11 @@ public class IbkrEWrapper : EWrapper
         double avgFillPrice, int permId, int parentId, double lastFillPrice,
         int clientId, string whyHeld, double mktCapPrice)
     {
-        if (status is "Filled" or "Cancelled" or "Inactive")
-        {
-            _logger.LogInformation(
-                "IBKR OrderStatus — OrderId: {OrderId} Status: {Status} Filled: {Filled} AvgPrice: {Price}",
-                orderId, status, filled, avgFillPrice);
-        }
-        else
-        {
-            _logger.LogDebug(
-                "IBKR OrderStatus — OrderId: {OrderId} Status: {Status} Filled: {Filled} AvgPrice: {Price}",
-                orderId, status, filled, avgFillPrice);
-        }
+        // All orderStatus callbacks at Debug — ORDER PLACED / POSITION CLOSED in BrokerExecutionService
+        // provide the operator-facing summary at Information level.
+        _logger.LogDebug(
+            "IBKR OrderStatus — OrderId: {OrderId} Status: {Status} Filled: {Filled} AvgPrice: {Price}",
+            orderId, status, filled, avgFillPrice);
 
         lock (_lock)
         {
@@ -79,7 +72,7 @@ public class IbkrEWrapper : EWrapper
 
     public void execDetails(int reqId, Contract contract, Execution execution)
     {
-        _logger.LogInformation(
+        _logger.LogDebug(
             "IBKR ExecDetails — OrderId: {OrderId} Symbol: {Symbol} Side: {Side} AvgPrice: {Price} Qty: {Qty}",
             execution.OrderId, contract.Symbol, execution.Side,
             execution.AvgPrice, execution.CumQty);
@@ -447,7 +440,7 @@ public class IbkrEWrapper : EWrapper
     public Task<int> WaitForNextValidIdAsync() => _nextValidIdReady.Task;
 
     public void connectAck() =>
-        _logger.LogInformation("IBKR connection acknowledged.");
+        _logger.LogDebug("IBKR connection acknowledged.");
 
     public void nextValidId(int orderId)
     {
@@ -457,7 +450,7 @@ public class IbkrEWrapper : EWrapper
     }
 
     public void managedAccounts(string accountsList) =>
-        _logger.LogInformation("IBKR Managed Accounts: {Accounts}", accountsList);
+        _logger.LogDebug("IBKR Managed Accounts: {Accounts}", accountsList);
 
     public void connectionClosed()
     {

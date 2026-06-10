@@ -12,10 +12,10 @@ namespace TradeFlow.Worker.Services;
 /// Three steps run in sequence:
 /// 1. Cancel orphan orders — any active IBKR order whose parent entry order ID
 ///    has no matching row in open_positions is cancelled immediately.
-/// 2. Verify DB positions against IBKR — for each row in open_positions, confirm
+/// 2. Verify DB positions against IBKR, for each row in open_positions, confirm
 ///    IBKR actually holds it. Rows with no matching IBKR position are removed from
 ///    the DB and TradeGuard. Quantity mismatches are corrected to match IBKR.
-/// 3. Detect and cover shorts — any negative-quantity IBKR position is an
+/// 3. Detect and cover shorts, any negative-quantity IBKR position is an
 ///    unintended short. Place an immediate market BUY to cover and send a critical
 ///    Discord alert.
 /// </summary>
@@ -214,7 +214,7 @@ public class StartupReconciliationService
             }
             else
             {
-                _logger.LogInformation(
+                _logger.LogDebug(
                     "Startup reconciliation — {Symbol} verified OK (qty {Qty}).",
                     dbPos.Symbol, ibkrMatch.Quantity);
             }

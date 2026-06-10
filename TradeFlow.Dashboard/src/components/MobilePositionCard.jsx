@@ -1,14 +1,17 @@
 import { B, dirColor, fmtDollar, fmtTime } from '../styles/theme.js';
 import { Pill } from './shared/index.js';
 
-export function MobilePositionCard({ position, onClose }) {
-  const { contract, direction, quantity, entryPrice, costBasis, stopPrice, targetPrice, trailPct, openedAt, trader, xScore } = position;
+export function MobilePositionCard({ position }) {
+  const { contract, direction, quantity, entryPrice, costBasis, stopPrice,
+          targetPrice, openedAt, trader, xScore, riskTier } = position;
+
   const stopPct   = ((stopPrice   - entryPrice) / entryPrice * 100).toFixed(0);
   const targetPct = ((targetPrice - entryPrice) / entryPrice * 100).toFixed(0);
+  const riskColor = riskTier === 'Lotto' ? B.rd : riskTier === 'High' ? B.am : B.mu;
 
   const columns = [
-    { label: 'Entry',  value: `$${entryPrice.toFixed(2)}`,  color: B.tx, sub: null          },
-    { label: 'Stop',   value: `$${stopPrice.toFixed(2)}`,   color: B.rd, sub: `${stopPct}%` },
+    { label: 'Entry',  value: `$${entryPrice.toFixed(2)}`,  color: B.tx, sub: null             },
+    { label: 'Stop',   value: `$${stopPrice.toFixed(2)}`,   color: B.rd, sub: `${stopPct}%`    },
     { label: 'Target', value: `$${targetPrice.toFixed(2)}`, color: B.gr, sub: `+${targetPct}%` },
   ];
 
@@ -44,26 +47,20 @@ export function MobilePositionCard({ position, onClose }) {
             {trader} <span style={{ color: B.mu }}>xs{xScore}</span>
           </div>
           <div style={{ fontSize: 10, color: B.mu, marginTop: 1 }}>
-            {fmtDollar(costBasis)} cost · Trail {trailPct}% · {fmtTime(openedAt)}
+            {fmtDollar(costBasis)} cost · {fmtTime(openedAt)}
           </div>
         </div>
-        <button
-          onClick={() => onClose(position)}
-          className="btn-close"
-          style={{
-            padding: '9px 16px',
-            borderRadius: 6,
-            fontSize: 11,
-            fontWeight: 700,
-            color: B.rd,
-            background: 'rgba(248,81,73,0.08)',
-            border: `1px solid rgba(248,81,73,0.32)`,
-            minWidth: 72,
-            transition: 'background 0.1s',
-          }}
-        >
-          CLOSE
-        </button>
+        <span style={{
+          padding: '6px 12px',
+          borderRadius: 6,
+          fontSize: 11,
+          fontWeight: 700,
+          color: riskColor,
+          background: `${riskColor}12`,
+          border: `1px solid ${riskColor}30`,
+        }}>
+          {riskTier === 'High' ? 'HIGH RISK' : riskTier?.toUpperCase() ?? 'STANDARD'}
+        </span>
       </div>
     </div>
   );

@@ -32,10 +32,20 @@ export function usePolling(intervalMs = 10000) {
           }),
         ]);
 
-        // state contains { regime, account, system }, spread merges them as
-        // top-level keys alongside positions and closedToday.
-        // riskConfig and traders stay from the previous data (initially MOCK).
-        setData(prev => ({ ...prev, positions, closedToday, ...state }));
+        // time
+        setData(prev => ({
+          ...prev,
+          positions,
+          closedToday,
+          ...state,
+          timestamp: new Date().toLocaleDateString('en-US', {
+            weekday: 'short', month: 'short', day: 'numeric', year: 'numeric',
+            timeZone: 'America/New_York',
+          }) + ' · ' + new Date().toLocaleTimeString('en-US', {
+            hour: 'numeric', minute: '2-digit', hour12: true,
+            timeZone: 'America/New_York',
+          }) + ' ET',
+        }));
         setLastUpdated(new Date());
         setError(null);
       } catch (e) {

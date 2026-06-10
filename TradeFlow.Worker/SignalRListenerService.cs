@@ -9,6 +9,11 @@ namespace TradeFlow.Worker;
 /// Uses a two-step connection flow: POST to negotiate for a short-lived token, then connect
 /// to Azure SignalR using that token. Decouples the SignalR callback from the processing
 /// pipeline using a bounded Channel to handle burst traffic without blocking the connection.
+///
+/// A watchdog timer monitors event delivery during market hours. If no alert has been
+/// received in 10 minutes while the market is open, the connection is forcibly dropped
+/// and renegotiated — this recovers from silent stale subscriptions where the socket
+/// remains connected but the hub stops delivering events.
 /// </summary>
 public class SignalRListenerService : BackgroundService
 {
@@ -16,6 +21,7 @@ public class SignalRListenerService : BackgroundService
     private const string AlertEventName = "newAlert";
     private const string HubName = "notification";
     private const int ChannelCapacity = 500;
+    private static readonly TimeSpan WatchdogThreshold = TimeSpan.FromMinutes(10);
 
     private readonly IAlertNormalizer _normalizer;
     private readonly RiskEngineService _riskEngine;
@@ -26,13 +32,19 @@ public class SignalRListenerService : BackgroundService
     private readonly DiscordNotificationService _discord;
     private readonly BrokerExecutionService _execution;
 
+    // Updated by the connection loop whenever an alert event is received.
+    // Read by the watchdog to detect silent stale subscriptions.
+    private DateTimeOffset _lastAlertReceivedAt = DateTimeOffset.UtcNow;
+
     // DropOldest prevents the SignalR callback from blocking on alert bursts.
-    // A warning is logged when the channel is at capacity so bursts are visible in logs.
     private readonly Channel<JsonElement> _alertChannel =
         Channel.CreateBounded<JsonElement>(new BoundedChannelOptions(ChannelCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest
         });
+
+    private static readonly TimeZoneInfo EasternTime =
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
     public SignalRListenerService(
         IAlertNormalizer normalizer,
@@ -67,7 +79,9 @@ public class SignalRListenerService : BackgroundService
         _logger.LogInformation("SignalR listener service stopped.");
     }
 
-    // Negotiates with Xtrades then connects to Azure SignalR. Reconnects with exponential backoff on failure.
+    // Negotiates with Xtrades then connects to Azure SignalR.
+    // Monitors the connection with a watchdog — if no alert arrives within
+    // WatchdogThreshold during market hours, drops and renegotiates the connection.
     private async Task RunConnectionLoopAsync(CancellationToken stoppingToken)
     {
         var attempt = 0;
@@ -75,6 +89,9 @@ public class SignalRListenerService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             HubConnection? connection = null;
+            // CTS used to force-close the connection when the watchdog fires
+            using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+
             try
             {
                 var (hubUrl, signalRToken) = await NegotiateAsync(stoppingToken);
@@ -92,10 +109,11 @@ public class SignalRListenerService : BackgroundService
 
                 connection.On<JsonElement>(AlertEventName, async alert =>
                 {
+                    _lastAlertReceivedAt = DateTimeOffset.UtcNow;
+
                     _logger.LogDebug("SignalR newAlert received");
                     try
                     {
-                        // Warn if channel is near capacity, indicates processing is falling behind
                         if (_alertChannel.Reader.Count >= ChannelCapacity - 1)
                             _logger.LogWarning(
                                 "SignalR alert channel at capacity ({Count}/{Max}) — oldest alert will be dropped.",
@@ -115,6 +133,7 @@ public class SignalRListenerService : BackgroundService
                 connection.Reconnected += _ =>
                 {
                     attempt = 0;
+                    _lastAlertReceivedAt = DateTimeOffset.UtcNow;
                     _logger.LogInformation("SignalR reconnected.");
                     return Task.CompletedTask;
                 };
@@ -127,20 +146,50 @@ public class SignalRListenerService : BackgroundService
 
                 await connection.StartAsync(stoppingToken);
                 attempt = 0;
+                _lastAlertReceivedAt = DateTimeOffset.UtcNow;
 
                 _logger.LogInformation(
                     "SignalR connected. Hub: {Hub}, ConnectionId: {Id}",
                     HubName, connection.ConnectionId);
 
+                // Monitor connection health — check every 60s for silent stale subscription
                 while (connection.State != HubConnectionState.Disconnected
-                       && !stoppingToken.IsCancellationRequested)
+                       && !watchdogCts.Token.IsCancellationRequested)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                    await Task.Delay(TimeSpan.FromSeconds(60), watchdogCts.Token);
+
+                    if (watchdogCts.Token.IsCancellationRequested) break;
+
+                    if (!IsMarketOpen()) continue;
+
+                    var silenceDuration = DateTimeOffset.UtcNow - _lastAlertReceivedAt;
+                    if (silenceDuration >= WatchdogThreshold)
+                    {
+                        _logger.LogWarning(
+                            "SignalR watchdog — no alerts received in {Minutes:F0} minutes during market hours. " +
+                            "Forcing reconnect to recover stale subscription.",
+                            silenceDuration.TotalMinutes);
+
+                        await _discord.NotifyCriticalAsync(
+                            "⚠️ SignalR Watchdog — Reconnecting",
+                            $"No alerts received in {silenceDuration.TotalMinutes:F0} minutes during market hours. " +
+                            "Forcing reconnect to recover stale hub subscription.",
+                            stoppingToken);
+
+                        // Cancel watchdog loop — outer finally disposes the connection,
+                        // triggering the reconnect cycle
+                        await watchdogCts.CancelAsync();
+                        break;
+                    }
                 }
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
             }
             catch (OperationCanceledException)
             {
-                break;
+                // Watchdog fired — fall through to reconnect
             }
             catch (Exception ex)
             {
@@ -216,7 +265,6 @@ public class SignalRListenerService : BackgroundService
     {
         _logger.LogDebug("Processing SignalR alert: {Raw}", alertElement.GetRawText());
 
-        // Payload arrives as a JSON array, take the first element
         var element = alertElement.ValueKind == JsonValueKind.Array
             ? alertElement[0]
             : alertElement;
@@ -241,8 +289,6 @@ public class SignalRListenerService : BackgroundService
         var classification = AlertClassifier.Classify(normalized);
         var riskResult = _riskEngine.Evaluate(normalized);
 
-        // Side rejections (stc/btc) are expected, exits are not entries.
-        // Only log at Information for genuine risk failures worth reviewing.
         var isSideRejection = !riskResult.Approved &&
             (riskResult.Reason?.Contains("stc", StringComparison.OrdinalIgnoreCase) == true ||
              riskResult.Reason?.Contains("btc", StringComparison.OrdinalIgnoreCase) == true ||
@@ -274,7 +320,6 @@ public class SignalRListenerService : BackgroundService
                 await _execution.HandleEntryAsync(normalized, classification, isAverage: true, stoppingToken);
         }
 
-        // Exits are processed regardless of risk approval
         if (normalized.Side?.ToLower() is "stc" or "btc")
             await _execution.HandleExitAsync(normalized, stoppingToken);
 
@@ -294,6 +339,18 @@ public class SignalRListenerService : BackgroundService
         await repository.SaveManyAsync([entity], stoppingToken);
     }
 
+    // Returns true if ET time is within regular market hours (9:30am to 4:00pm, Mon-Fri)
+    private static bool IsMarketOpen()
+    {
+        var et = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime);
+
+        if (et.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+            return false;
+
+        var t = et.TimeOfDay;
+        return t >= new TimeSpan(9, 30, 0) && t < new TimeSpan(16, 0, 0);
+    }
+
     private async Task RetryWithBackoffAsync(int attempt, CancellationToken stoppingToken)
     {
         var maxDelay = TimeSpan.FromSeconds(60);
@@ -311,7 +368,7 @@ public class SignalRListenerService : BackgroundService
 
 /// <summary>
 /// Exponential backoff with jitter for SignalR automatic reconnect.
-/// Used for transient drops — the outer loop handles complete connection failures.
+/// Used for transient drops, the outer loop handles complete connection failures.
 /// </summary>
 public class ExponentialBackoffRetryPolicy : IRetryPolicy
 {
