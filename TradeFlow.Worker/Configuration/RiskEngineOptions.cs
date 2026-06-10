@@ -51,6 +51,11 @@ public class RiskEngineOptions
     [Range(1, 100, ErrorMessage = "StockLottoTrailPct must be between 1 and 100.")]
     public double StockLottoTrailPct { get; init; } = 20.0;
 
+    // 0 = disabled. Rejects alerts where PricePaid exceeds ActualPriceAtTimeOfAlert by more than this %.
+    // Catches already-running trades before any IBKR interaction.
+    [Range(0, 100, ErrorMessage = "AlertStalenessMaxSlippagePct must be between 0 and 100.")]
+    public decimal AlertStalenessMaxSlippagePct { get; init; } = 25.0m;
+
     [Range(1, 100, ErrorMessage = "MaxDailyExposurePct must be between 1 and 100.")]
     public double MaxDailyExposurePct { get; init; } = 30.0;
 
@@ -84,38 +89,39 @@ public class RiskEngineOptions
 
     [Range(0.01, 1.0, ErrorMessage = "OptionPartialCloseRatio must be between 0.01 and 1.0.")]
     public double OptionPartialCloseRatio { get; init; } = 0.5;
+
     public decimal DailyLossLimit { get; init; } = 0m;
 
     // -- Choppy market regime config --
- 
+
     // VIX day-over-day spike % that counts as a chop signal.
     [Range(0, 100)]
     public double ChopVixSpikePct { get; init; } = 3.0;
- 
+
     // SPY ADX below this threshold counts as a chop signal (no clear trend).
     [Range(0, 100)]
     public double ChopAdxThreshold { get; init; } = 20.0;
- 
+
     // SPY above its 50MA by more than this % counts as a chop signal (extended, pullback risk).
     [Range(0, 100)]
     public double ChopSpyExtendedPct { get; init; } = 7.0;
- 
+
     // VIX level above this counts as a chop signal (elevated fear).
     [Range(0, 200)]
     public double ChopVixLevel { get; init; } = 20.0;
- 
+
     // Number of chop signals required to declare a choppy regime (0-4).
     [Range(1, 4)]
     public int ChopMinSignals { get; init; } = 2;
- 
+
     // Daily loss limit applied when the session is classified as choppy.
     // Must be negative to activate. Set to 0 to disable.
     public decimal ChopDailyLossLimit { get; init; } = 0m;
 
-    // Minimum difference between -DI and +DI to flag as a strong bearish trend
+    // Minimum difference between -DI and +DI to flag as a strong bearish trend.
     public double ChopBearishDiDiff { get; init; } = 5.0;
 
-    // Minimum % below 50MA to trigger the bearish structure signal (0 = any amount below)
+    // Minimum % below 50MA to trigger the bearish structure signal (0 = any amount below).
     public double ChopSpyBelowMaPct { get; init; } = 0.0;
 
     // Position sizing multiplier when regime is Bullish (SPY above 20MA, VIX calm).
