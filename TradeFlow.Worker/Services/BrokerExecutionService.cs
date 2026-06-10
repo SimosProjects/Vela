@@ -91,7 +91,7 @@ public class BrokerExecutionService
             return;
         }
 
-        // Pre-trade slippage check — compares current market price against alerted price.
+        // Pre-trade slippage check, compares current market price against alerted price.
         // Skipped if MaxEntrySlippagePct is 0 (disabled) or market data returns 0.
         if (_riskOptions.MaxEntrySlippagePct > 0)
         {
@@ -231,47 +231,6 @@ public class BrokerExecutionService
                 FillAmount   = positionPrice * positionQty * pendingMultiplier,
                 Status       = OrderStatus.Filled,
             };
-        }
-
-        // Post-fill slippage guard — if the actual IBKR fill is too far above the alert
-        // price the position is closed immediately before it is recorded anywhere.
-        // This prevents bad fills from bypassing the pre-trade check (e.g. timeout path).
-        if (_riskOptions.PostFillMaxSlippagePct > 0 && alertedPrice > 0)
-        {
-            var postFillSlippage = (result.FillPrice - alertedPrice) / alertedPrice * 100;
-            if (postFillSlippage > _riskOptions.PostFillMaxSlippagePct)
-            {
-                _logger.LogWarning(
-                    "Post-fill slippage {Slippage:F1}% exceeds {Max:F1}% for {Symbol} — " +
-                    "closing position immediately, nothing recorded",
-                    postFillSlippage, _riskOptions.PostFillMaxSlippagePct, alert.Symbol);
-
-                var emergencyClose = new TradeRecord
-                {
-                    AlertId         = alert.Id ?? string.Empty,
-                    OrderId         = result.OrderId,
-                    StopOrderId     = result.StopOrderId,
-                    TargetOrderId   = result.TargetOrderId,
-                    UserName        = order.UserName,
-                    XScore          = (decimal)(alert.XScore ?? 0),
-                    DiscordRank     = alert.DiscordRank,
-                    Symbol          = order.Symbol,
-                    TradeType       = order.TradeType,
-                    OptionsContract = order.OptionsContractSymbol,
-                    Direction       = order.Direction,
-                    Strike          = order.Strike,
-                    Expiration      = order.Expiration,
-                    Quantity        = result.FillQuantity,
-                    EntryPrice      = result.FillPrice,
-                    EntryAmount     = result.FillAmount,
-                    StopPrice       = order.StopPrice,
-                    TargetPrice     = order.TargetPrice,
-                    OpenedAt        = result.FilledAt,
-                };
-
-                await _broker.ClosePositionAsync(emergencyClose, TradeOutcome.ForcedClose, ct);
-                return;
-            }
         }
 
         _guard.RegisterOpen(order, result);
