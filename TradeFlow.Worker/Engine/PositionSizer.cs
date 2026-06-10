@@ -8,11 +8,15 @@ namespace TradeFlow.Worker.Engine;
 //   Stocks:  $1,500 initial, $500 average
 //
 // Risk tier is auto-classified for options based on expiry:
-//   Expires today          → lotto (regardless of Xtrades label)
-//   Expires this week      → high  (regardless of Xtrades label)
-//   Expires beyond week    → use Xtrades risk label as-is
+//   Expires today          -> lotto (regardless of Xtrades label)
+//   Expires this week      -> high  (regardless of Xtrades label)
+//   Expires beyond week    -> use Xtrades risk label as-is
 //
 // Trailing stop percentages are risk-tiered and configurable via RiskEngineOptions.
+//
+// Limit price is computed per risk tier from the per-risk slippage thresholds.
+// Lotto always uses a market order (LimitPrice = null).
+// When a threshold is 0, that tier falls back to market order.
 //
 // Trader restrictions — if a trader appears in RestrictedTraders, their budget is scaled
 // by the configured allocation percentage (0 = blocked, 25 = 25% of normal budget, etc).
@@ -132,6 +136,7 @@ public class PositionSizer
             : price.Value * (decimal)_options.StockTargetMultiple;
 
         var trailPercent = ResolveTrailPercent(isOptions, effectiveRisk);
+        var limitPrice   = ComputeLimitPrice(isOptions, effectiveRisk, price.Value);
 
         var budgetUsed = isOptions
             ? quantity * price.Value * 100
@@ -152,6 +157,7 @@ public class PositionSizer
             StopPrice:             stopPrice,
             TargetPrice:           targetPrice,
             TrailPercent:          trailPercent,
+            LimitPrice:            limitPrice,
             IsAverage:             isAverage,
             XScore:                (decimal)(alert.XScore ?? 0),
             DiscordRank:           alert.DiscordRank);
@@ -195,4 +201,24 @@ public class PositionSizer
             (false, "high")  => _options.StockHighTrailPct,
             (false, _)       => _options.StockStandardTrailPct,
         };
+
+    // Returns the limit order ceiling price for the given risk tier and entry price.
+    // Lotto always returns null, lotto entries use market orders.
+    // Returns null when the configured threshold is 0 (disabled for that tier).
+    private decimal? ComputeLimitPrice(bool isOptions, string effectiveRisk, decimal price)
+    {
+        if (effectiveRisk == "lotto")
+            return null;
+
+        var threshold = isOptions
+            ? effectiveRisk == "high"
+                ? _options.OptionsHighMaxSlippagePct
+                : _options.OptionsStandardMaxSlippagePct
+            : _options.StockMaxSlippagePct;
+
+        if (threshold <= 0)
+            return null;
+
+        return Math.Round(price * (1 + threshold / 100), 2);
+    }
 }

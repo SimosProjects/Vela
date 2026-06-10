@@ -108,7 +108,7 @@ public class PositionSizerTests
         var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
         var order = sizer.Size(alert, CallClassification());
 
-        // 25% of $2,000 = $500 budget → floor($500 / ($4.95 * 100)) = 1 contract
+        // 25% of $2,000 = $500 budget -> floor($500 / ($4.95 * 100)) = 1 contract
         order.Should().NotBeNull();
         order!.Quantity.Should().Be(1);
     }
@@ -166,7 +166,6 @@ public class PositionSizerTests
     [Fact]
     public void Size_PriceTooHighForBudget_ReturnsNull()
     {
-        // Price so high that quantity rounds down to 0
         var alert = BuildAlert("bto", "options", "call", 150.00m, "TSLA260620C00450000", 450);
         var order = _sizer.Size(alert, CallClassification());
 
@@ -253,7 +252,6 @@ public class PositionSizerTests
         var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
         var order = sizer.Size(alert, CallClassification());
 
-        // At 25% of $3000 = $750, floor(750 / 495) = 1 contract
         order.Should().NotBeNull();
         order!.Quantity.Should().Be(1);
     }
@@ -283,13 +281,11 @@ public class PositionSizerTests
             NullLogger<PositionSizer>.Instance,
             regime);
 
-        // Lotto alert — expiring today
         var today = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss");
         var alert = BuildAlert("bto", "options", "call", 0.50m, "TSLA260620C00450000", 450,
             expiration: today);
         var order = sizer.Size(alert, CallClassification());
 
-        // Lotto budget ($500) should not be scaled
         if (order is not null)
             order.BudgetUsed.Should().BeLessThanOrEqualTo(DefaultOptions.OptionsLottoBudget);
     }
@@ -319,5 +315,85 @@ public class PositionSizerTests
         regime.SizingMultiplier.Should().Be(0.25m);
         regime.BlockCalls.Should().BeTrue();
         regime.IsChoppy.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Size_StandardOptions_ComputesLimitPrice()
+    {
+        const decimal price = 4.95m;
+        var expected = Math.Round(price * (1 + DefaultOptions.OptionsStandardMaxSlippagePct / 100), 2);
+
+        var alert = BuildAlert("bto", "options", "call", price, "TSLA260620C00450000", 450);
+        var order = _sizer.Size(alert, CallClassification());
+
+        order.Should().NotBeNull();
+        order!.LimitPrice.Should().Be(expected);
+    }
+
+    [Fact]
+    public void Size_HighOptionsThisWeek_ComputesHighLimitPrice()
+    {
+        var et      = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow,
+            TimeZoneInfo.FindSystemTimeZoneById("America/New_York"));
+        var todayEt = DateOnly.FromDateTime(et.DateTime);
+        var friday  = todayEt.AddDays((int)DayOfWeek.Friday - (int)todayEt.DayOfWeek);
+
+        if (todayEt.DayOfWeek == DayOfWeek.Friday)
+            return; // On Fridays all same-week expiries are lotto; no high window exists
+
+        const decimal price = 4.95m;
+        var expected = Math.Round(price * (1 + DefaultOptions.OptionsHighMaxSlippagePct / 100), 2);
+
+        var alert = BuildAlert("bto", "options", "call", price,
+            "TSLA260620C00450000", 450,
+            expiration: $"{friday:yyyy-MM-dd}T00:00:00");
+
+        var order = _sizer.Size(alert, CallClassification());
+
+        order.Should().NotBeNull();
+        order!.LimitPrice.Should().Be(expected);
+    }
+
+    [Fact]
+    public void Size_LottoOptions_LimitPriceIsNull()
+    {
+        var todayEt = DateOnly.FromDateTime(
+            TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow,
+                TimeZoneInfo.FindSystemTimeZoneById("America/New_York")).DateTime);
+
+        var alert = BuildAlert("bto", "options", "call", 0.50m,
+            "TSLA260620C00450000", 450,
+            expiration: $"{todayEt:yyyy-MM-dd}T00:00:00");
+
+        var order = _sizer.Size(alert, CallClassification());
+
+        if (order is not null)
+            order.LimitPrice.Should().BeNull();
+    }
+
+    [Fact]
+    public void Size_Stock_ComputesLimitPrice()
+    {
+        const decimal price = 165.33m;
+        var expected = Math.Round(price * (1 + DefaultOptions.StockMaxSlippagePct / 100), 2);
+
+        var alert = BuildAlert("bto", "commons", "none", price);
+        var order = _sizer.Size(alert, StockClassification());
+
+        order.Should().NotBeNull();
+        order!.LimitPrice.Should().Be(expected);
+    }
+
+    [Fact]
+    public void Size_DisabledSlippage_LimitPriceIsNull()
+    {
+        var options = new RiskEngineOptions { OptionsStandardMaxSlippagePct = 0m };
+        var sizer   = new PositionSizer(Options.Create(options), NullLogger<PositionSizer>.Instance);
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        var order = sizer.Size(alert, CallClassification());
+
+        order.Should().NotBeNull();
+        order!.LimitPrice.Should().BeNull();
     }
 }
