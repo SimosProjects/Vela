@@ -138,7 +138,6 @@ export const MOCK = {
     stocksStdTrailPct: 10,
     dailyLossLimit: -2000,
     chopDailyLossLimit: -1500,
-    maxEntrySlippagePct: 5.0,
     allowedDiscordRanks: ['Top Analyst', 'Analyst', 'Junior Analyst', 'Top Trader', 'XT Sniper'],
   },
 

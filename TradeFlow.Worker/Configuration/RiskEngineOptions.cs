@@ -25,8 +25,6 @@ public class RiskEngineOptions
 
     public bool AllowHigh { get; init; } = true;
 
-    public bool SkipTradeOnSlippageTimeout { get; init; } = true;
-
     public List<string> BlockedSymbols { get; init; } = [];
 
     [Range(0, 10000, ErrorMessage = "MinStockPriceDollars must be between 0 and 10000.")]
@@ -52,12 +50,6 @@ public class RiskEngineOptions
 
     [Range(1, 100, ErrorMessage = "StockLottoTrailPct must be between 1 and 100.")]
     public double StockLottoTrailPct { get; init; } = 20.0;
-
-    [Range(0, 100, ErrorMessage = "MaxEntrySlippagePct must be between 0 and 100.")]
-    public decimal MaxEntrySlippagePct { get; init; } = 5.0m;
-
-    [Range(0, 100, ErrorMessage = "PostFillMaxSlippagePct must be between 0 and 100.")]
-    public decimal PostFillMaxSlippagePct { get; init; } = 10.0m;
 
     [Range(1, 100, ErrorMessage = "MaxDailyExposurePct must be between 1 and 100.")]
     public double MaxDailyExposurePct { get; init; } = 30.0;
