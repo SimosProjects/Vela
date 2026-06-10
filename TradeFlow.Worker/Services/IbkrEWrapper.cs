@@ -29,10 +29,6 @@ public class IbkrEWrapper : EWrapper
     private readonly List<IbkrPosition> _allPositionsBuffer = new();
     private TaskCompletionSource<List<IbkrPosition>>? _allPositionsTcs;
 
-    // Batch open orders snapshot, accumulates all orders until openOrderEnd fires
-    private readonly List<IbkrOpenOrder> _allOpenOrdersBuffer = new();
-    private TaskCompletionSource<List<IbkrOpenOrder>>? _allOpenOrdersTcs;
-
     private Action? _onConnectionClosed;
     private readonly Lock _lock = new();
 
@@ -211,35 +207,9 @@ public class IbkrEWrapper : EWrapper
         _logger.LogDebug(
             "IBKR OpenOrder — OrderId: {OrderId} Symbol: {Symbol} Action: {Action} Type: {Type} Qty: {Qty}",
             orderId, contract.Symbol, order.Action, order.OrderType, order.TotalQuantity);
-
-        lock (_lock)
-        {
-            if (_allOpenOrdersTcs is not null)
-            {
-                _allOpenOrdersBuffer.Add(new IbkrOpenOrder(
-                    OrderId:   orderId,
-                    Symbol:    contract.Symbol,
-                    Action:    order.Action,
-                    OrderType: order.OrderType,
-                    Quantity:  (int)order.TotalQuantity));
-            }
-        }
     }
 
-    public void openOrderEnd()
-    {
-        _logger.LogDebug(
-            "IBKR OpenOrderEnd — {Count} open orders received", _allOpenOrdersBuffer.Count);
-        lock (_lock)
-        {
-            if (_allOpenOrdersTcs is not null)
-            {
-                _allOpenOrdersTcs.TrySetResult(new List<IbkrOpenOrder>(_allOpenOrdersBuffer));
-                _allOpenOrdersBuffer.Clear();
-                _allOpenOrdersTcs = null;
-            }
-        }
-    }
+    public void openOrderEnd() { }
 
     /// <summary>
     /// Registers a callback that resolves when IBKR returns market data for the given request ID.
@@ -367,34 +337,6 @@ public class IbkrEWrapper : EWrapper
         {
             _allPositionsTcs = null;
             _allPositionsBuffer.Clear();
-        }
-    }
-
-    /// <summary>
-    /// Registers a batch open orders request. All orders are accumulated until openOrderEnd fires.
-    /// Used by StartupReconciliationService to detect orphan GTC orders.
-    /// </summary>
-    public TaskCompletionSource<List<IbkrOpenOrder>> RegisterAllOpenOrdersCallback()
-    {
-        var tcs = new TaskCompletionSource<List<IbkrOpenOrder>>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_lock)
-        {
-            _allOpenOrdersBuffer.Clear();
-            _allOpenOrdersTcs = tcs;
-        }
-        return tcs;
-    }
-
-    /// <summary>
-    /// Removes the batch open orders callback on timeout before openOrderEnd fires.
-    /// </summary>
-    public void UnregisterAllOpenOrdersCallback()
-    {
-        lock (_lock)
-        {
-            _allOpenOrdersTcs = null;
-            _allOpenOrdersBuffer.Clear();
         }
     }
 

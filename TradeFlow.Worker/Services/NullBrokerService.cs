@@ -75,16 +75,6 @@ public class NullBrokerService : IBrokerService
     }
 
     /// <summary>
-    /// Returns an empty list, no Gateway available in simulation.
-    /// StartupReconciliationService skips orphan order cancellation when this returns empty.
-    /// </summary>
-    public Task<List<IbkrOpenOrder>> GetAllOpenOrdersAsync(CancellationToken ct = default)
-    {
-        _logger.LogDebug("[NullBroker] GetAllOpenOrders -> empty (simulation)");
-        return Task.FromResult(new List<IbkrOpenOrder>());
-    }
-
-    /// <summary>
     /// Returns zero, 0% slippage in simulation.
     /// </summary>
     public Task<decimal> GetCurrentMarketPriceAsync(
@@ -187,7 +177,7 @@ public class NullBrokerService : IBrokerService
     public void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler) { }
 
     /// <summary>
-    /// Returns an empty list — no Gateway available in simulation.
+    /// Returns an empty list, no Gateway available in simulation.
     /// MarketConditionsLogger falls back to Yahoo Finance when this returns empty.
     /// </summary>
     public Task<List<HistoricalBar>> GetHistoricalBarsAsync(
