@@ -91,59 +91,6 @@ public class BrokerExecutionService
             return;
         }
 
-        // Pre-trade slippage check, compares current market price against alerted price.
-        // Skipped if MaxEntrySlippagePct is 0 (disabled) or market data returns 0.
-        if (_riskOptions.MaxEntrySlippagePct > 0)
-        {
-            var currentPrice = await _broker.GetCurrentMarketPriceAsync(
-                order.Symbol,
-                order.TradeType,
-                order.Direction,
-                order.Strike,
-                order.Expiration,
-                ct);
-
-            if (currentPrice <= 0)
-            {
-                if (_riskOptions.SkipTradeOnSlippageTimeout)
-                {
-                    _logger.LogWarning(
-                        "Slippage check timed out for {Symbol} — skipping trade (SkipTradeOnSlippageTimeout=true)",
-                        alert.Symbol);
-                    return;
-                }
-
-                _logger.LogWarning(
-                    "Slippage check timed out for {Symbol} — proceeding without price check",
-                    alert.Symbol);
-            }
-            else if (alertedPrice <= 0)
-            {
-                _logger.LogWarning(
-                    "Slippage check skipped for {Symbol} — alerted price is 0 (PricePaid missing from alert)",
-                    alert.Symbol);
-                return;
-            }
-            else
-            {
-                var slippage = Math.Abs(currentPrice - alertedPrice) / alertedPrice * 100;
-
-                if (slippage > _riskOptions.MaxEntrySlippagePct)
-                {
-                    _logger.LogWarning(
-                        "Slippage check failed for {Symbol} — alerted ${Alerted:F2} " +
-                        "current ${Current:F2} slippage {Slippage:F1}% exceeds max {Max:F1}%",
-                        alert.Symbol, alertedPrice,
-                        currentPrice, slippage, _riskOptions.MaxEntrySlippagePct);
-                    return;
-                }
-
-                _logger.LogDebug(
-                    "Slippage check passed for {Symbol} — {Slippage:F1}% within {Max:F1}% limit",
-                    alert.Symbol, slippage, _riskOptions.MaxEntrySlippagePct);
-            }
-        }
-
         var orderSubmittedAt = DateTimeOffset.UtcNow;
 
         BrokerOrderResult result;

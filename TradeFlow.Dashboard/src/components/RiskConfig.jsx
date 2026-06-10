@@ -50,9 +50,8 @@ export function RiskConfig({ config }) {
       <KV label="Standard trail"  value={`${config.stocksStdTrailPct}%`} />
 
       <SubHeader>Limits</SubHeader>
-      <KV label="Daily loss limit"    value={`$${Math.abs(config.dailyLossLimit).toLocaleString()}`}     valueColor={B.rd} />
-      <KV label="Chop loss limit"     value={`$${Math.abs(config.chopDailyLossLimit).toLocaleString()}`} valueColor={B.am} />
-      <KV label="Max entry slippage"  value={`${config.maxEntrySlippagePct}%`} />
+      <KV label="Daily loss limit"  value={`$${Math.abs(config.dailyLossLimit).toLocaleString()}`}     valueColor={B.rd} />
+      <KV label="Chop loss limit"   value={`$${Math.abs(config.chopDailyLossLimit).toLocaleString()}`} valueColor={B.am} />
 
       <div style={{ height: '0.5px', background: B.bd, margin: '10px 0 6px' }} />
       <div style={{ fontSize: 10, color: B.mu, marginBottom: 5 }}>Allowed Discord ranks</div>
