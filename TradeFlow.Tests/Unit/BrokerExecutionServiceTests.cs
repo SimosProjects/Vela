@@ -11,6 +11,15 @@ namespace TradeFlow.Tests.Unit;
 
 public class BrokerExecutionServiceTests
 {
+    // Writes to a temp directory so tests never pollute the real trades CSV files.
+    private static readonly IConfiguration TestConfig = new ConfigurationBuilder()
+        .AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Trades:Directory"] = Path.Combine(
+                Directory.GetCurrentDirectory(), "..", "..", "..", "..", "trades", "test")
+        })
+        .Build();
+
     private readonly Mock<IBrokerService> _brokerMock = new();
     private readonly Mock<ITradeMetricsRepository> _metricsMock = new();
     private readonly IServiceScopeFactory _scopeFactory;
@@ -69,7 +78,7 @@ public class BrokerExecutionServiceTests
         services.AddScoped<IOpenPositionRepository>(_ => Mock.Of<IOpenPositionRepository>());
         _scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
-        var config = new ConfigurationBuilder().Build();
+        var config = TestConfig;
 
         _execution = new BrokerExecutionService(
             _brokerMock.Object,
@@ -507,7 +516,7 @@ public class BrokerExecutionServiceTests
     {
         // AlertStalenessMaxSlippagePct = 0 disables the gate entirely.
         var options = new RiskEngineOptions { AlertStalenessMaxSlippagePct = 0m };
-        var config  = new ConfigurationBuilder().Build();
+        var config  = TestConfig;
 
         var service = new BrokerExecutionService(
             _brokerMock.Object,
@@ -580,7 +589,7 @@ public class BrokerExecutionServiceTests
             PostFillSlippageWarningPct = 10.0,
             HighSlippageTrailPct       = 25.0
         };
-        var config = new ConfigurationBuilder().Build();
+        var config = TestConfig;
 
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
@@ -627,7 +636,7 @@ public class BrokerExecutionServiceTests
             PostFillSlippageWarningPct = 10.0,
             HighSlippageTrailPct       = 25.0
         };
-        var config = new ConfigurationBuilder().Build();
+        var config = TestConfig;
 
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
@@ -670,7 +679,7 @@ public class BrokerExecutionServiceTests
             PostFillSlippageWarningPct = 10.0,
             HighSlippageTrailPct       = 0.0
         };
-        var config = new ConfigurationBuilder().Build();
+        var config = TestConfig;
 
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))

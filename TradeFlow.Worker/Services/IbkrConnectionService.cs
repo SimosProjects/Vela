@@ -170,6 +170,7 @@ public class IbkrConnectionService : IDisposable
 
     public void Dispose()
     {
+        StopKeepalive();
         Disconnect();
         _client.Close();
     }
