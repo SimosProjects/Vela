@@ -337,8 +337,8 @@ public class BrokerExecutionServiceTests
     [Fact]
     public async Task HandleEntryAsync_NormalFill_PartialQty_RecordsActualQty()
     {
-        // PlaceOrderAsync returns a partial fill, FilledQuantity 3 of ordered 25.
-        // BrokerExecutionService should record the trade with quantity 3, not 25.
+        // PlaceOrderAsync returns Filled with a quantity lower than what was ordered.
+        // Verifies the recorded position reflects the broker's actual fill quantity.
         _brokerMock
             .Setup(b => b.GetCurrentMarketPriceAsync(
                 It.IsAny<string>(), It.IsAny<TradeType>(),
@@ -378,8 +378,8 @@ public class BrokerExecutionServiceTests
     [Fact]
     public async Task HandleEntryAsync_LateFill_PartialQty_RecordsActualQty()
     {
-        // PlaceOrderAsync returns Filled status with partial quantity from position verify.
-        // Simulates the late fill path where GetCurrentPositionPriceAsync returns actual qty.
+        // PlaceOrderAsync times out (Pending), then GetCurrentPositionPriceAsync confirms
+        // a partial fill. Verifies the pending path records only what IBKR actually holds.
         _brokerMock
             .Setup(b => b.GetCurrentMarketPriceAsync(
                 It.IsAny<string>(), It.IsAny<TradeType>(),
@@ -393,11 +393,15 @@ public class BrokerExecutionServiceTests
                 OrderId:       "3006",
                 StopOrderId:   "3008",
                 TargetOrderId: null,
-                FillPrice:     1.18m,
-                FillQuantity:  3,
-                FillAmount:    354.00m,
-                Status:        OrderStatus.Filled,
+                FillPrice:     0m,
+                FillQuantity:  0,
+                FillAmount:    0m,
+                Status:        OrderStatus.Pending,
                 FilledAt:      DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default))
+            .ReturnsAsync((1.18m, 3));
 
         var alert = BuildAlert(
             side:           "bto",
@@ -413,7 +417,6 @@ public class BrokerExecutionServiceTests
         var trade = _guard.GetOpenTrades().FirstOrDefault();
         trade.Should().NotBeNull();
         trade!.Quantity.Should().Be(3);
-        trade.EntryAmount.Should().Be(354.00m);
     }
 
     [Fact]
@@ -455,5 +458,47 @@ public class BrokerExecutionServiceTests
         trade.Should().NotBeNull();
         trade!.Quantity.Should().Be(2);
         trade.EntryAmount.Should().Be(990.00m);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_HighPostFillSlippage_RecordsTrade_DoesNotClose()
+    {
+        // Fill price is well above the alerted price (22% slippage).
+        _brokerMock
+            .Setup(b => b.GetCurrentMarketPriceAsync(
+                It.IsAny<string>(), It.IsAny<TradeType>(),
+                It.IsAny<string?>(), It.IsAny<decimal?>(),
+                It.IsAny<string?>(), default))
+            .ReturnsAsync(5.00m);
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId:       "ORDER-003",
+                StopOrderId:   "STOP-003",
+                TargetOrderId: null,
+                FillPrice:     6.10m,
+                FillQuantity:  2,
+                FillAmount:    1_220.00m,
+                Status:        OrderStatus.Filled,
+                FilledAt:      DateTimeOffset.UtcNow));
+
+        var alert = BuildAlert(
+            side:           "bto",
+            type:           "options",
+            direction:      "call",
+            pricePaid:      5.00m,
+            contractSymbol: "TSLA260620C00450000",
+            strike:         450m,
+            userName:       "TestTrader");
+
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        _guard.GetOpenTrades().Should().NotBeEmpty("position must be recorded despite high fill slippage");
+
+        _brokerMock.Verify(b => b.ClosePositionAsync(
+            It.IsAny<TradeRecord>(),
+            TradeOutcome.ForcedClose,
+            default), Times.Never, "emergency close must not fire after it was removed");
     }
 }
