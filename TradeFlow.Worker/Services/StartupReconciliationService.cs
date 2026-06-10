@@ -1,4 +1,3 @@
-using TradeFlow.Worker.Data;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Models;
 
@@ -7,15 +6,13 @@ namespace TradeFlow.Worker.Services;
 /// <summary>
 /// Runs once on startup as a blocking step before any alerts are processed.
 /// Reconciles IBKR actual state against the open_positions database to prevent
-/// orphan GTC orders and short positions from creating runaway losses.
+/// short positions and stale DB rows from causing incorrect trading behaviour.
 ///
-/// Three steps run in sequence:
-/// 1. Cancel orphan orders — any active IBKR order whose parent entry order ID
-///    has no matching row in open_positions is cancelled immediately.
-/// 2. Verify DB positions against IBKR, for each row in open_positions, confirm
+/// Two steps run in sequence:
+/// 1. Verify DB positions against IBKR, for each row in open_positions, confirm
 ///    IBKR actually holds it. Rows with no matching IBKR position are removed from
 ///    the DB and TradeGuard. Quantity mismatches are corrected to match IBKR.
-/// 3. Detect and cover shorts, any negative-quantity IBKR position is an
+/// 2. Detect and cover shorts, any negative-quantity IBKR position is an
 ///    unintended short. Place an immediate market BUY to cover and send a critical
 ///    Discord alert.
 /// </summary>
@@ -42,7 +39,7 @@ public class StartupReconciliationService
     }
 
     /// <summary>
-    /// Runs all three reconciliation steps. Called from Program.cs before host.Run().
+    /// Runs all reconciliation steps. Called from Program.cs before host.Run().
     /// Exceptions are caught and logged — a reconciliation failure must never prevent startup,
     /// but it is always surfaced as a critical Discord alert so the operator is aware.
     /// </summary>
@@ -53,18 +50,16 @@ public class StartupReconciliationService
         try
         {
             var ibkrPositions = await _broker.GetAllPositionsAsync(ct);
-            var ibkrOrders    = await _broker.GetAllOpenOrdersAsync(ct);
             var dbPositions   = await _repo.GetAllAsync(ct);
 
-            if (ibkrPositions.Count == 0 && ibkrOrders.Count == 0)
+            if (ibkrPositions.Count == 0)
             {
                 _logger.LogInformation(
-                    "Startup reconciliation — IBKR returned no positions or orders. " +
+                    "Startup reconciliation — IBKR returned no positions. " +
                     "Either account is clean or Gateway did not respond. Skipping.");
                 return;
             }
 
-            //await CancelOrphanOrdersAsync(ibkrOrders, dbPositions, ct);
             await VerifyDbPositionsAsync(ibkrPositions, dbPositions, ct);
             await CoverShortsAsync(ibkrPositions, ct);
 
@@ -81,75 +76,7 @@ public class StartupReconciliationService
         }
     }
 
-    // -- Step 1: Cancel orphan orders --
-
-    // Any order in IBKR whose parent entry order ID has no matching open_positions row is
-    // an orphan. It either fired against a now-closed position or was left over from a
-    // previous session that did not clean up. Cancelling it prevents it from executing
-    // against an empty account and creating a short.
-    private async Task CancelOrphanOrdersAsync(
-        List<IbkrOpenOrder> ibkrOrders,
-        List<OpenPosition> dbPositions,
-        CancellationToken ct)
-    {
-        if (ibkrOrders.Count == 0)
-        {
-            _logger.LogInformation("Startup reconciliation step 1 — no open orders in IBKR.");
-            return;
-        }
-
-        var knownOrderIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var p in dbPositions)
-        {
-            knownOrderIds.Add(p.OrderId);
-            if (p.StopOrderId is not null)   knownOrderIds.Add(p.StopOrderId);
-            if (p.TargetOrderId is not null) knownOrderIds.Add(p.TargetOrderId);
-        }
-
-        var orphans = ibkrOrders
-            .Where(o => !knownOrderIds.Contains(o.OrderId.ToString()))
-            .ToList();
-
-        if (orphans.Count == 0)
-        {
-            _logger.LogInformation(
-                "Startup reconciliation step 1 — all {Count} open orders are accounted for.",
-                ibkrOrders.Count);
-            return;
-        }
-
-        _logger.LogWarning(
-            "Startup reconciliation step 1 — found {Count} orphan order(s). Cancelling.",
-            orphans.Count);
-
-        var details = string.Join("\n", orphans.Select(o =>
-            $"  OrderId {o.OrderId} — {o.Symbol} {o.Action} {o.Quantity} {o.OrderType}"));
-
-        foreach (var order in orphans)
-        {
-            try
-            {
-                await _broker.CancelOrderAsync(order.OrderId, ct);
-                _logger.LogWarning(
-                    "Startup reconciliation — cancelled orphan order {OrderId} ({Symbol} {Action} {Qty})",
-                    order.OrderId, order.Symbol, order.Action, order.Quantity);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex,
-                    "Startup reconciliation — failed to cancel orphan order {OrderId}",
-                    order.OrderId);
-            }
-        }
-
-        await _discord.NotifyCriticalAsync(
-            "⚠️ Orphan Orders Cancelled on Startup",
-            $"{orphans.Count} order(s) with no matching open position were cancelled:\n{details}\n" +
-            "These would have created short positions if left open.",
-            ct);
-    }
-
-    // -- Step 2: Verify DB positions against IBKR --
+    // -- Step 1: Verify DB positions against IBKR --
 
     private async Task VerifyDbPositionsAsync(
         List<IbkrPosition> ibkrPositions,
@@ -159,12 +86,12 @@ public class StartupReconciliationService
         if (dbPositions.Count == 0)
         {
             _logger.LogInformation(
-                "Startup reconciliation step 2 — no open positions in DB to verify.");
+                "Startup reconciliation step 1 — no open positions in DB to verify.");
             return;
         }
 
         _logger.LogInformation(
-            "Startup reconciliation step 2 — verifying {Count} DB position(s) against IBKR.",
+            "Startup reconciliation step 1 — verifying {Count} DB position(s) against IBKR.",
             dbPositions.Count);
 
         foreach (var dbPos in dbPositions)
@@ -221,7 +148,7 @@ public class StartupReconciliationService
         }
     }
 
-    // -- Step 3: Detect and cover shorts --
+    // -- Step 2: Detect and cover shorts --
 
     private async Task CoverShortsAsync(
         List<IbkrPosition> ibkrPositions,
@@ -232,12 +159,12 @@ public class StartupReconciliationService
         if (shorts.Count == 0)
         {
             _logger.LogInformation(
-                "Startup reconciliation step 3 — no short positions detected.");
+                "Startup reconciliation step 2 — no short positions detected.");
             return;
         }
 
         _logger.LogError(
-            "Startup reconciliation step 3 — found {Count} short position(s). Covering immediately.",
+            "Startup reconciliation step 2 — found {Count} short position(s). Covering immediately.",
             shorts.Count);
 
         var details = string.Join("\n", shorts.Select(p =>
@@ -246,7 +173,7 @@ public class StartupReconciliationService
         await _discord.NotifyCriticalAsync(
             $"🚨 SHORT POSITIONS DETECTED — Covering {shorts.Count} position(s)",
             $"The following short positions were found on startup and are being covered:\n{details}\n" +
-            "These are unintended shorts, likely caused by orphan sell orders executing against empty positions.",
+            "These are unintended shorts, likely caused by sell orders executing against empty positions.",
             ct);
 
         foreach (var shortPos in shorts)

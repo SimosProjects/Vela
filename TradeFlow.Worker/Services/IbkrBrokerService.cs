@@ -208,36 +208,6 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
-    /// Returns all open orders currently active in the IBKR account.
-    /// Calls reqAllOpenOrders() and waits for openOrderEnd() to signal completion.
-    /// Used by StartupReconciliationService to cancel orphan GTC orders.
-    /// Returns an empty list if the request times out.
-    /// </summary>
-    public async Task<List<IbkrOpenOrder>> GetAllOpenOrdersAsync(CancellationToken ct = default)
-    {
-        if (!EnsureConnected()) return [];
-
-        var tcs = _connection.Wrapper.RegisterAllOpenOrdersCallback();
-        _connection.Client.reqAllOpenOrders();
-
-        try
-        {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(15));
-            var orders = await tcs.Task.WaitAsync(cts.Token);
-            _logger.LogDebug(
-                "IBKR GetAllOpenOrders — {Count} orders received", orders.Count);
-            return orders;
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogWarning("IBKR GetAllOpenOrders timed out.");
-            _connection.Wrapper.UnregisterAllOpenOrdersCallback();
-            return [];
-        }
-    }
-
-    /// <summary>
     /// Returns the current market price for any symbol using streaming market data.
     /// Resolves on LAST price immediately, or on bid/ask midpoint when no recent trade exists
     /// (premarket, after-hours). Used for pre-trade slippage checks before placing orders.
