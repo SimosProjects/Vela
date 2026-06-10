@@ -21,7 +21,7 @@ public class BrokerExecutionService
     private readonly RiskEngineOptions _riskOptions;
 
     // Set by MarketSchedulerService to pause new entries without requiring a restart
-    public static bool IsPaused { get; set; } = false;
+    public bool IsPaused { get; set; } = false;
 
     public BrokerExecutionService(
         IBrokerService broker,

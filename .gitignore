@@ -6,6 +6,7 @@ obj/
 appsettings.Development.json
 logs/
 reports/
+trades/test/
 TradeFlow.Analytics/reports/
 
 # Node / React dashboard

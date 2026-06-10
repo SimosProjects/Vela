@@ -135,7 +135,7 @@ public class MarketSchedulerService : BackgroundService
                     break;
 
                 case "PauseTrading":
-                    BrokerExecutionService.IsPaused = true;
+                    _execution.IsPaused = true;
                     _logger.LogInformation("Trading paused by scheduler — no new entries will be placed.");
                     break;
 
