@@ -81,6 +81,11 @@ builder.Services.AddHttpClient("Scheduler", client =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
+builder.Services.AddHttpClient("MarketConditions", client =>
+{
+    client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
+});
+
 builder.Services.AddSingleton<IAlertNormalizer, AlertNormalizer>();
 builder.Services.AddSingleton<AlertMetrics>();
 builder.Services.AddSingleton<MarketRegimeService>();

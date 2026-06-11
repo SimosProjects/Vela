@@ -559,44 +559,59 @@ public class BrokerExecutionService
     // -- Helpers --
 
     private async Task<BrokerOrderResult> TightenTrailOnElevatedSlippageAsync(
-        TradeOrder order,
-        BrokerOrderResult result,
-        decimal alertedPrice,
-        CancellationToken ct)
-    {
-        if (_riskOptions.PostFillSlippageWarningPct <= 0
-            || _riskOptions.HighSlippageTrailPct <= 0
-            || alertedPrice <= 0
-            || result.StopOrderId is null)
-            return result;
-
-        var slippagePct = (result.FillPrice - alertedPrice) / alertedPrice * 100;
-
-        if (slippagePct <= (decimal)_riskOptions.PostFillSlippageWarningPct)
-            return result;
-
-        _logger.LogWarning(
-            "Elevated post-fill slippage for {Symbol} — {Slippage:F1}% above alert price. " +
-            "Tightening trail from {OldTrail}% to {NewTrail}%.",
-            order.Symbol, slippagePct, order.TrailPercent, _riskOptions.HighSlippageTrailPct);
-
-        var newStopId = await _broker.ReplaceTrailStopAsync(
-            result.StopOrderId,
-            result.FillQuantity,
-            order,
-            _riskOptions.HighSlippageTrailPct,
-            ct);
-
-        if (newStopId is null)
+            TradeOrder order,
+            BrokerOrderResult result,
+            decimal alertedPrice,
+            CancellationToken ct)
         {
-            _logger.LogWarning(
-                "Trail stop replacement failed for {Symbol} — original trail remains active.",
-                order.Symbol);
-            return result;
-        }
+            if (_riskOptions.PostFillSlippageWarningPct <= 0
+                || _riskOptions.HighSlippageTrailPct <= 0
+                || alertedPrice <= 0
+                || result.StopOrderId is null)
+                return result;
 
-        return result with { StopOrderId = newStopId };
-    }
+            var slippagePct = (result.FillPrice - alertedPrice) / alertedPrice * 100;
+
+            if (slippagePct <= (decimal)_riskOptions.PostFillSlippageWarningPct)
+                return result;
+
+            // Take the tighter of the configured high-slippage trail and the current trail.
+            // HighSlippageTrailPct targets options (e.g. 25%) but a stock position may already
+            // carry a trail of 10-20%. Replacing with 25% would loosen the stop rather than
+            // tighten it, so we cap at whichever percentage is already more protective.
+            var newTrailPct = Math.Min(order.TrailPercent, _riskOptions.HighSlippageTrailPct);
+
+            if (newTrailPct >= order.TrailPercent)
+            {
+                _logger.LogDebug(
+                    "Elevated slippage for {Symbol} — current trail {Trail}% is already tighter " +
+                    "than high-slippage trail {HighTrail}%, no replacement needed.",
+                    order.Symbol, order.TrailPercent, _riskOptions.HighSlippageTrailPct);
+                return result;
+            }
+
+            _logger.LogWarning(
+                "Elevated post-fill slippage for {Symbol} — {Slippage:F1}% above alert price. " +
+                "Tightening trail from {OldTrail}% to {NewTrail}%.",
+                order.Symbol, slippagePct, order.TrailPercent, newTrailPct);
+
+            var newStopId = await _broker.ReplaceTrailStopAsync(
+                result.StopOrderId,
+                result.FillQuantity,
+                order,
+                newTrailPct,
+                ct);
+
+            if (newStopId is null)
+            {
+                _logger.LogWarning(
+                    "Trail stop replacement failed for {Symbol} — original trail remains active.",
+                    order.Symbol);
+                return result;
+            }
+
+            return result with { StopOrderId = newStopId };
+        }
 
     private static OpenPosition BuildOpenPosition(TradeRecord trade) => new()
     {

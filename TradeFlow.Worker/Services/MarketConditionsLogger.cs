@@ -36,6 +36,7 @@ public class MarketConditionsLogger
 
     public MarketConditionsLogger(
         IConfiguration config,
+        IHttpClientFactory httpClientFactory,
         IBrokerService broker,
         ILogger<MarketConditionsLogger> logger,
         IOptions<RiskEngineOptions> riskOptions,
@@ -47,8 +48,7 @@ public class MarketConditionsLogger
         _riskOptions = riskOptions.Value;
         _regime      = regime;
         _systemState = systemState;
-        _httpClient  = new HttpClient();
-        _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
+        _httpClient  = httpClientFactory.CreateClient("MarketConditions");
 
         var configuredDir = config["Trades:Directory"];
         var tradesDir = configuredDir is not null
@@ -216,13 +216,13 @@ public class MarketConditionsLogger
     private (RegimeTier Tier, decimal SizingMultiplier, bool BlockCalls) DetermineRegimeTier(
         decimal spyPrice, decimal ma20, decimal ma50, decimal ma200, decimal vix)
     {
-        var bullishMultiplier = (decimal)_riskOptions.RegimeBullishSizingPct;
-        var choppyMultiplier  = (decimal)_riskOptions.RegimeChoppySizingPct;
-        var bearishMultiplier = (decimal)_riskOptions.RegimeBearishSizingPct;
+        var bullishMultiplier   = (decimal)_riskOptions.RegimeBullishSizingPct;
+        var choppyMultiplier    = (decimal)_riskOptions.RegimeChoppySizingPct;
+        var bearishMultiplier   = (decimal)_riskOptions.RegimeBearishSizingPct;
         var blockCallsInBearish = _riskOptions.RegimeBearishBlockCalls;
-        var vixBearish  = (decimal)_riskOptions.RegimeVixBearishThreshold;
-        var vixChoppy   = (decimal)_riskOptions.RegimeVixChoppyThreshold;
-        var below50Pct  = (decimal)_riskOptions.RegimeSpyBelow50MaPct;
+        var vixBearish          = (decimal)_riskOptions.RegimeVixBearishThreshold;
+        var vixChoppy           = (decimal)_riskOptions.RegimeVixChoppyThreshold;
+        var below50Pct          = (decimal)_riskOptions.RegimeSpyBelow50MaPct;
 
         // Master switch: SPY below 200MA = never full size regardless of daily signals
         var belowMa200 = ma200 > 0 && spyPrice < ma200;
@@ -258,7 +258,7 @@ public class MarketConditionsLogger
     private static SymbolData BuildSymbolDataFromBars(
         IList<HistoricalBar> bars, bool includeAdx)
     {
-        var closes = bars.Select(b => b.Close).ToList();
+        var closes    = bars.Select(b => b.Close).ToList();
         var price     = closes[^1];
         var prevClose = closes.Count >= 2 ? closes[^2] : price;
 
