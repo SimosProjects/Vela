@@ -19,8 +19,27 @@ export default function App() {
   const isMobile = useIsMobile();
   const [paused, setPaused] = useState(false);
   const [modalPosition, setModalPosition] = useState(null);
-
   const { data, lastUpdated, error } = usePolling(10000);
+
+  // Sync paused state from the API on each poll so the button always
+  // reflects the real Worker state, including on initial load and after
+  // any external change (e.g. Worker restart resets pause to false).
+  useEffect(() => {
+    if (data.system?.isPaused !== undefined) {
+      setPaused(data.system.isPaused);
+    }
+  }, [data.system?.isPaused]);
+
+  const onTogglePause = async () => {
+    try {
+      const res  = await fetch('/api/dashboard/pause', { method: 'POST' });
+      const body = await res.json();
+      // Use the value returned by the API as the source of truth
+      setPaused(body.isPaused);
+    } catch {
+      // Network error, leave local state as-is; next poll will correct it
+    }
+  };
 
   const handleConfirmClose = () => {
     // TODO: POST /api/dashboard/positions/{modalPosition.id}/close
@@ -32,7 +51,7 @@ export default function App() {
     data,
     paused,
     lastUpdated,
-    onTogglePause: () => setPaused(p => !p),
+    onTogglePause,
     onForceClose: pos => setModalPosition(pos),
   };
 
@@ -43,11 +62,9 @@ export default function App() {
           ⚠ Poll error: {error} — showing last known data
         </div>
       )}
-
       {isMobile
         ? <MobileLayout  {...layoutProps} />
         : <DesktopLayout {...layoutProps} />}
-
       <ForceCloseModal
         position={modalPosition}
         isMobile={isMobile}

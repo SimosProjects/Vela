@@ -5,6 +5,7 @@ import { StatBar }             from '../components/StatBar.jsx';
 import { OpenPositions }       from '../components/OpenPositions.jsx';
 import { ClosedTrades }        from '../components/ClosedTrades.jsx';
 import { RegimePanel }         from '../components/RegimePanel.jsx';
+import { ControlsPanel }       from '../components/ControlsPanel.jsx';
 import { RiskConfig }          from '../components/RiskConfig.jsx';
 import { TraderRoster }        from '../components/TraderRoster.jsx';
 import { AlertSourcePanel, BrokerPanel } from '../components/SystemPanels.jsx';
@@ -17,7 +18,7 @@ export function DesktopLayout({ data, paused, onTogglePause, onForceClose, lastU
   const marketOpen = system?.marketOpen ?? true;
   const { width }  = useWindowSize();
   const showLog    = width >= 1000;
-  
+
   const gridTemplate = showLog
     ? '2fr 1.2fr 300px'
     : 'minmax(0, 1fr) 300px';
@@ -43,6 +44,11 @@ export function DesktopLayout({ data, paused, onTogglePause, onForceClose, lastU
           {showLog && <LogPanel />}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <RegimePanel regime={regime} />
+            <ControlsPanel
+              blockCalls={regime?.blockCalls ?? false}
+              paused={paused}
+              onTogglePause={onTogglePause}
+            />
             <RiskConfig config={riskConfig} />
             <AlertSourcePanel system={system} />
             <BrokerPanel system={system} />
