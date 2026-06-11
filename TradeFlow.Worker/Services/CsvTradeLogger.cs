@@ -35,6 +35,11 @@ public class CsvTradeLogger
         "Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %," +
         "Status,Result,UserName,XScore,DiscordRank,P&L,P&L %";
 
+    // XScore column index per trade type, used to recover the value from existing rows
+    // when LoadFromDatabase resets it to 0 on Worker restart.
+    private const int OptionsXScoreCol = 21;
+    private const int StocksXScoreCol  = 17;
+
     public CsvTradeLogger(
         IConfiguration config,
         ILogger<CsvTradeLogger> logger)
@@ -191,7 +196,7 @@ public class CsvTradeLogger
 
         var statusIdx     = tradeType == TradeType.Options ? 18 : 14;
         var closedDateIdx = 2;
-        var pnlIdx        = tradeType == TradeType.Options ? 22 : 18;
+        var pnlIdx        = tradeType == TradeType.Options ? 23 : 19;
 
         foreach (var line in lines.Skip(1))
         {
@@ -342,7 +347,7 @@ public class CsvTradeLogger
     {
         var et     = TimeZoneInfo.ConvertTime(t.OpenedAt, EasternTime);
         var xScore = t.XScore.ToString("F0");
-        var rank = t.DiscordRank ?? "";
+        var rank   = t.DiscordRank ?? "";
 
         if (t.TradeType == TradeType.Options)
         {
@@ -397,8 +402,8 @@ public class CsvTradeLogger
             ? TimeZoneInfo.ConvertTime(t.ClosedAt.Value, EasternTime)
             : (DateTimeOffset?)null;
         var pnlSign = t.PnL >= 0 ? "+" : "";
-        var xScore = t.XScore.ToString("F0");
-        var rank = t.DiscordRank ?? "";
+        var xScore  = t.XScore.ToString("F0");
+        var rank    = t.DiscordRank ?? "";
 
         if (t.TradeType == TradeType.Options)
         {
@@ -480,6 +485,7 @@ public class CsvTradeLogger
         var updated = false;
 
         var exitPriceCol = trade.TradeType == TradeType.Options ? 14 : 10;
+        var xScoreCol    = trade.TradeType == TradeType.Options ? OptionsXScoreCol : StocksXScoreCol;
 
         for (var i = 0; i < lines.Length; i++)
         {
@@ -503,6 +509,17 @@ public class CsvTradeLogger
                     decimal.TryParse(cols[13].TrimEnd('%').TrimStart('+'),
                         NumberStyles.Any, CultureInfo.InvariantCulture, out var sp))
                     trade.SlippagePct = sp;
+
+                // Preserve the xScore from the open row when LoadFromDatabase reset it to 0.
+                // Xtrades sometimes omits xScore in specific alerts; if it was correctly
+                // recorded on entry, carry it forward rather than overwriting with 0.
+                if (trade.XScore == 0m && cols.Length > xScoreCol &&
+                    decimal.TryParse(cols[xScoreCol], NumberStyles.Any,
+                        CultureInfo.InvariantCulture, out var existingXScore) &&
+                    existingXScore > 0m)
+                {
+                    trade.XScore = existingXScore;
+                }
 
                 lines[i] = BuildClosedRow(trade);
                 updated  = true;
@@ -552,18 +569,20 @@ public class CsvTradeLogger
 
         var wins = trades.Count(c =>
             c[statusIndex] == "Closed" &&
-            decimal.TryParse(c[pnlIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var p) &&
+            decimal.TryParse(c[pnlIndex].TrimStart('+'), NumberStyles.Any,
+                CultureInfo.InvariantCulture, out var p) &&
             p > 0);
 
         var losses = trades.Count(c =>
             c[statusIndex] == "Closed" &&
-            decimal.TryParse(c[pnlIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var p) &&
+            decimal.TryParse(c[pnlIndex].TrimStart('+'), NumberStyles.Any,
+                CultureInfo.InvariantCulture, out var p) &&
             p < 0);
 
         var totalPnl = trades
             .Where(c => c[statusIndex] == "Closed")
-            .Sum(c => decimal.TryParse(
-                c[pnlIndex], NumberStyles.Any, CultureInfo.InvariantCulture, out var p) ? p : 0);
+            .Sum(c => decimal.TryParse(c[pnlIndex].TrimStart('+'), NumberStyles.Any,
+                CultureInfo.InvariantCulture, out var p) ? p : 0);
 
         var winRate = closed > 0 ? (decimal)wins / closed * 100 : 0;
         var pnlSign = totalPnl >= 0 ? "+" : "";

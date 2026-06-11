@@ -37,10 +37,21 @@ public class SystemStateServiceTests
             discord);
     }
 
+    private static MarketRegimeService BuildRegimeService() =>
+        new(NullLogger<MarketRegimeService>.Instance);
+
     private static (SystemStateService svc, string dbName) BuildService(TradeGuard? guard = null)
     {
         guard ??= BuildTradeGuard();
-        var ibkr = BuildIbkrService();
+        var ibkr       = BuildIbkrService();
+        var regime     = BuildRegimeService();
+        var riskOptions = Options.Create(new RiskEngineOptions
+        {
+            RegimeBullishSizingPct = 1.0,
+            RegimeChoppySizingPct  = 0.5,
+            RegimeBearishSizingPct = 0.25,
+            RegimeBearishBlockCalls = true,
+        });
 
         var dbName = $"sysstate_{Guid.NewGuid():N}";
         var dbOptions = new DbContextOptionsBuilder<TradeFlowDbContext>()
@@ -52,7 +63,7 @@ public class SystemStateServiceTests
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         var svc = new SystemStateService(
-            scopeFactory, ibkr, guard, NullLogger<SystemStateService>.Instance);
+            scopeFactory, ibkr, guard, regime, riskOptions, NullLogger<SystemStateService>.Instance);
 
         return (svc, dbName);
     }
@@ -161,11 +172,40 @@ public class SystemStateServiceTests
     }
 
     [Fact]
+    public async Task WriteHeartbeat_WithForceRegime_AppliesOverrideAndClears()
+    {
+        // When the dashboard writes force_regime, the next heartbeat applies it to
+        // MarketRegimeService and clears the column so the override only fires once.
+        var (svc, dbName) = BuildService();
+
+        using (var seed = OpenDb(dbName))
+        {
+            seed.SystemState.Add(new SystemState
+            {
+                Id          = 1,
+                RegimeTier  = "Bearish",
+                ForceRegime = "Bullish",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        await svc.WriteHeartbeatAsync(CancellationToken.None);
+
+        using var verify = OpenDb(dbName);
+        var row = await verify.SystemState.FindAsync(1);
+        row!.RegimeTier.Should().Be("Bullish", "override should have been applied");
+        row.BlockCalls.Should().BeFalse("Bullish regime should not block calls");
+        row.ForceRegime.Should().BeNull("override should be cleared after a single application");
+    }
+
+    [Fact]
     public async Task WriteHeartbeat_DbUnavailable_DoesNotPropagate()
     {
         // Verify the trading path is never affected by a failed DB write.
-        var guard = BuildTradeGuard();
-        var ibkr = BuildIbkrService();
+        var guard      = BuildTradeGuard();
+        var ibkr       = BuildIbkrService();
+        var regime     = BuildRegimeService();
+        var riskOptions = Options.Create(new RiskEngineOptions());
 
         var dbOptions = new DbContextOptionsBuilder<TradeFlowDbContext>()
             .UseInMemoryDatabase($"sysstate_throw_{Guid.NewGuid():N}")
@@ -179,7 +219,7 @@ public class SystemStateServiceTests
         var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         var svc = new SystemStateService(
-            scopeFactory, ibkr, guard, NullLogger<SystemStateService>.Instance);
+            scopeFactory, ibkr, guard, regime, riskOptions, NullLogger<SystemStateService>.Instance);
 
         svc.UpdateRegime("Bullish", 1.0m, false, 578m, 572m, 561m, 521m, 13m, -1m, 1);
 

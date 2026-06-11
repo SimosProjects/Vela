@@ -169,16 +169,26 @@ if (ibkrEnabled)
     guard.StartCacheRefresh(CancellationToken.None);
 }
 
-// Reload open positions from DB into TradeGuard on restart
+// Reload open positions from DB into TradeGuard on restart, restoring xScore from
+// trade_metrics so the value survives restarts and is written correctly on close.
 using (var scope = host.Services.CreateScope())
 {
     var repo  = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+    var db    = scope.ServiceProvider.GetRequiredService<TradeFlowDbContext>();
     var guard = host.Services.GetRequiredService<TradeGuard>();
 
     var positions = await repo.GetAllAsync();
     if (positions.Count > 0)
     {
-        guard.LoadFromDatabase(positions);
+        var orderIds = positions
+            .Select(p => p.OrderId)
+            .ToHashSet();
+
+        var xScores = await db.TradeMetrics
+            .Where(t => orderIds.Contains(t.Id))
+            .ToDictionaryAsync(t => t.Id, t => t.XScore ?? 0m);
+
+        guard.LoadFromDatabase(positions, xScores);
 
         // Re-register stop/target callbacks for restored positions so broker-side
         // trail stop and target fills are detected correctly after a restart
