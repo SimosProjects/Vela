@@ -38,7 +38,8 @@ public record AccountResponse(
     decimal Balance,
     decimal OpenValue,
     decimal ExposurePct,
-    decimal DailyPnl
+    decimal DailyPnl,
+    decimal Deployable
 );
 
 /// <summary>

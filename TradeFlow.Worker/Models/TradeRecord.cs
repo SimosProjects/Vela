@@ -12,7 +12,7 @@ public record TradeRecord
     public required string? StopOrderId { get; set; }
     public required string? TargetOrderId { get; init; }
     public required string UserName { get; init; }
-    public required decimal XScore { get; init; }
+    public required decimal XScore { get; set; }
     public required string? DiscordRank { get; init; }
 
     // Instrument

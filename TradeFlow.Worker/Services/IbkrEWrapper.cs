@@ -449,6 +449,11 @@ public class IbkrEWrapper : EWrapper
             // Contract validation, often noise from cancelled orders, downgrade from Error
             _logger.LogWarning("IBKR Request validation [321] Id {Id}: {Message}", id, errorMsg);
         }
+        else if (errorCode is 10147 or 10148)
+        {
+            // Order already in a terminal state — IBKR cancelled or filled it before our cancel arrived
+            _logger.LogWarning("IBKR Cancel ignored [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);
+        }
         else
         {
             _logger.LogError("IBKR Error [{Code}] Id {Id}: {Message}", errorCode, id, errorMsg);

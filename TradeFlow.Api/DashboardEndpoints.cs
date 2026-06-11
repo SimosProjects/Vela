@@ -11,6 +11,8 @@ public static class DashboardEndpoints
     private static readonly TimeZoneInfo Et =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
+    private static readonly string[] ValidRegimeTiers = ["Bullish", "Choppy", "Bearish"];
+
     public static void MapDashboardEndpoints(this WebApplication app)
     {
         var group = app.MapGroup("/api/dashboard").WithTags("Dashboard");
@@ -26,6 +28,9 @@ public static class DashboardEndpoints
 
         group.MapPost("/pause", TogglePause).WithName("TogglePause")
              .WithSummary("Flips is_paused in system_state. Worker reads this at each poll cycle.");
+
+        group.MapPost("/regime", OverrideRegime).WithName("OverrideRegime")
+             .WithSummary("Queues a manual regime override. Applied by the Worker within 30 seconds.");
     }
 
     // -- Handlers --
@@ -48,16 +53,12 @@ public static class DashboardEndpoints
         var workerRunning = state?.WorkerHeartbeat.HasValue == true
             && (now - state.WorkerHeartbeat!.Value).TotalSeconds < 60;
 
-        // Xtrades feed is only expected to be active during market hours.
-        // Outside market hours, treat it as connected when the Worker is running.
-        var xtradesConnected = marketOpen
-            ? lastAlertAt.HasValue && (now - lastAlertAt.Value).TotalMinutes < 2
-            : workerRunning;
+        var xtradesConnected = state?.SignalRConnected ?? false;
 
-        var balance      = state?.AccountBalance ?? 0m;
-        var openValue    = state?.OpenValue ?? 0m;
-        var exposurePct  = balance > 0 ? Math.Round(openValue / balance * 100, 1) : 0m;
-        var sizingPct    = (int)Math.Round((state?.SizingMultiplier ?? 1.0m) * 100);
+        var balance     = state?.AccountBalance ?? 0m;
+        var openValue   = state?.OpenValue ?? 0m;
+        var exposurePct = balance > 0 ? Math.Round(openValue / balance * 100, 1) : 0m;
+        var sizingPct   = (int)Math.Round((state?.SizingMultiplier ?? 1.0m) * 100);
 
         var regime = new RegimeResponse(
             Tier:       state?.RegimeTier ?? "Unknown",
@@ -80,7 +81,8 @@ public static class DashboardEndpoints
             Balance:     balance,
             OpenValue:   openValue,
             ExposurePct: exposurePct,
-            DailyPnl:    dailyPnl
+            DailyPnl:    dailyPnl,
+            Deployable:  balance - openValue
         );
 
         var system = new SystemStatusResponse(
@@ -183,6 +185,34 @@ public static class DashboardEndpoints
         return Results.Ok(new { isPaused = newPaused });
     }
 
+    private static async Task<IResult> OverrideRegime(
+        RegimeOverrideRequest request,
+        TradeFlowDbContext db,
+        CancellationToken ct)
+    {
+        if (!ValidRegimeTiers.Contains(request.Tier, StringComparer.OrdinalIgnoreCase))
+            return Results.BadRequest(
+                $"Invalid regime tier '{request.Tier}'. Valid values: Bullish, Choppy, Bearish.");
+
+        var state = await db.SystemState.FirstOrDefaultAsync(s => s.Id == 1, ct);
+        if (state is null)
+            return Results.NotFound("system_state row not yet initialised — is the Worker running?");
+
+        // Normalise casing before writing so the Worker's Enum.TryParse succeeds
+        var normalised = ValidRegimeTiers.First(t =>
+            t.Equals(request.Tier, StringComparison.OrdinalIgnoreCase));
+
+        await db.SystemState
+            .Where(s => s.Id == 1)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.ForceRegime, normalised), ct);
+
+        return Results.Ok(new
+        {
+            forceRegime = normalised,
+            message     = $"Regime override to {normalised} queued — will apply within 30 seconds."
+        });
+    }
+
     // -- Helpers --
 
     private static DateTimeOffset TodayStartUtc()
@@ -233,7 +263,6 @@ public static class DashboardEndpoints
             var day   = int.Parse(datePart[4..6]);
             var date  = new DateOnly(year, month, day);
 
-            // Drop the decimal when the strike is a whole number (250 not 250.00)
             var strikeStr = strike % 1 == 0
                 ? ((int)strike).ToString()
                 : strike.ToString("0.##");
@@ -280,3 +309,6 @@ public static class DashboardEndpoints
         }
     }
 }
+
+/// <summary>Request body for POST /api/dashboard/regime.</summary>
+public record RegimeOverrideRequest(string Tier);

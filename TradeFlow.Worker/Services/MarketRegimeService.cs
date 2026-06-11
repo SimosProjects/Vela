@@ -10,12 +10,10 @@ public class MarketRegimeService
     private volatile int _chopScore = 0;
     private volatile RegimeTier _tier = RegimeTier.Bullish;
     private volatile bool _blockCalls = false;
-
     private decimal _ma20 = 0m;
     private decimal _ma50 = 0m;
     private decimal _ma200 = 0m;
     private readonly Lock _maLock = new();
-
     private readonly ILogger<MarketRegimeService> _logger;
 
     public MarketRegimeService(ILogger<MarketRegimeService> logger)
@@ -55,7 +53,7 @@ public class MarketRegimeService
 
     /// <summary>
     /// Sets the market regime for the day based on the morning chop score and MA cascade.
-    /// Called once at market open by MarketConditionsLogger after fetching market data.
+    /// Called by MarketConditionsLogger after fetching market data at open and mid-day re-checks.
     /// </summary>
     public void SetRegime(
         int chopScore,
@@ -67,11 +65,11 @@ public class MarketRegimeService
         decimal ma50,
         decimal ma200)
     {
-        _chopScore        = chopScore;
-        _isChoppy         = chopScore >= minSignalsForChop;
-        _tier             = tier;
-        SizingMultiplier  = sizingMultiplier;
-        _blockCalls       = blockCalls;
+        _chopScore       = chopScore;
+        _isChoppy        = chopScore >= minSignalsForChop;
+        _tier            = tier;
+        SizingMultiplier = sizingMultiplier;
+        _blockCalls      = blockCalls;
 
         lock (_maLock)
         {
@@ -91,6 +89,22 @@ public class MarketRegimeService
                 "Market regime: CHOPPY (score {Score}/6, threshold {Min}) — " +
                 "high risk and lotto trades blocked for the session",
                 chopScore, minSignalsForChop);
+    }
+
+    /// <summary>
+    /// Applies a manual regime override without a full market data re-assessment.
+    /// Called by SystemStateService when a force_regime value is written to system_state
+    /// via the dashboard API. MA values and chop score are preserved from the last assessment.
+    /// </summary>
+    public void SetRegimeTier(RegimeTier tier, decimal sizingMultiplier, bool blockCalls)
+    {
+        _tier            = tier;
+        SizingMultiplier = sizingMultiplier;
+        _blockCalls      = blockCalls;
+
+        _logger.LogInformation(
+            "Market regime manually overridden — Tier: {Tier} | Sizing: {Multiplier:P0} | BlockCalls: {BlockCalls}",
+            tier, sizingMultiplier, blockCalls);
     }
 }
 

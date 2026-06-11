@@ -31,6 +31,7 @@ public class SignalRListenerService : BackgroundService
     private readonly string _token;
     private readonly DiscordNotificationService _discord;
     private readonly BrokerExecutionService _execution;
+    private readonly SystemStateService _systemState;
 
     // Updated by the connection loop whenever an alert event is received.
     // Read by the watchdog to detect silent stale subscriptions.
@@ -53,15 +54,17 @@ public class SignalRListenerService : BackgroundService
         ILogger<SignalRListenerService> logger,
         DiscordNotificationService discord,
         BrokerExecutionService execution,
-        IHttpClientFactory httpClientFactory)
+        IHttpClientFactory httpClientFactory,
+        SystemStateService systemState)
     {
-        _normalizer = normalizer;
-        _riskEngine = riskEngine;
+        _normalizer   = normalizer;
+        _riskEngine   = riskEngine;
         _scopeFactory = scopeFactory;
-        _logger = logger;
-        _discord = discord;
-        _execution = execution;
+        _logger       = logger;
+        _discord      = discord;
+        _execution    = execution;
         _httpClientFactory = httpClientFactory;
+        _systemState  = systemState;
 
         _token = Environment.GetEnvironmentVariable("XTRADES_TOKEN")
             ?? throw new InvalidOperationException(
@@ -126,6 +129,7 @@ public class SignalRListenerService : BackgroundService
 
                 connection.Reconnecting += ex =>
                 {
+                    _systemState.UpdateSignalRConnected(false);
                     _logger.LogWarning("SignalR reconnecting. Reason: {Reason}", ex?.Message);
                     return Task.CompletedTask;
                 };
@@ -134,12 +138,14 @@ public class SignalRListenerService : BackgroundService
                 {
                     attempt = 0;
                     _lastAlertReceivedAt = DateTimeOffset.UtcNow;
+                    _systemState.UpdateSignalRConnected(true);
                     _logger.LogInformation("SignalR reconnected.");
                     return Task.CompletedTask;
                 };
 
                 connection.Closed += ex =>
                 {
+                    _systemState.UpdateSignalRConnected(false);
                     _logger.LogWarning("SignalR closed. Reason: {Reason}", ex?.Message ?? "clean close");
                     return Task.CompletedTask;
                 };
@@ -147,6 +153,7 @@ public class SignalRListenerService : BackgroundService
                 await connection.StartAsync(stoppingToken);
                 attempt = 0;
                 _lastAlertReceivedAt = DateTimeOffset.UtcNow;
+                _systemState.UpdateSignalRConnected(true);
 
                 _logger.LogInformation(
                     "SignalR connected. Hub: {Hub}, ConnectionId: {Id}",
@@ -197,6 +204,7 @@ public class SignalRListenerService : BackgroundService
             }
             finally
             {
+                _systemState.UpdateSignalRConnected(false);
                 if (connection is not null)
                     await connection.DisposeAsync();
             }
@@ -285,9 +293,9 @@ public class SignalRListenerService : BackgroundService
             return;
         }
 
-        var normalized = _normalizer.Normalize(alert);
-        var classification = AlertClassifier.Classify(normalized);
-        var riskResult = _riskEngine.Evaluate(normalized);
+        var normalized      = _normalizer.Normalize(alert);
+        var classification  = AlertClassifier.Classify(normalized);
+        var riskResult      = _riskEngine.Evaluate(normalized);
 
         var isSideRejection = !riskResult.Approved &&
             (riskResult.Reason?.Contains("stc", StringComparison.OrdinalIgnoreCase) == true ||

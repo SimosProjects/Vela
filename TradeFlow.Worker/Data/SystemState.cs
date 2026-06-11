@@ -10,7 +10,7 @@ public class SystemState
 {
     public int Id { get; set; } = 1;
 
-    // Regime, time set by MarketConditionsLogger
+    // Regime, set by MarketConditionsLogger at 9:20am and on any scheduled mid-day re-check
     public string RegimeTier { get; set; } = "Unknown";
     public decimal SizingMultiplier { get; set; } = 1.0m;
     public bool BlockCalls { get; set; }
@@ -22,9 +22,15 @@ public class SystemState
     public decimal? VixDelta { get; set; }
     public int? ChopScore { get; set; }
 
+    // Written by the dashboard API to request a manual regime override.
+    // Consumed and cleared by SystemStateService on its next heartbeat tick.
+    [System.ComponentModel.DataAnnotations.Schema.Column("force_regime")]
+    public string? ForceRegime { get; set; }
+
     // System status, updated every 30 seconds
     public bool IsPaused { get; set; }
     public bool IbkrConnected { get; set; }
+    public bool SignalRConnected { get; set; }
     public DateTimeOffset? WorkerHeartbeat { get; set; }
 
     // Account snapshot, updated every 30 seconds

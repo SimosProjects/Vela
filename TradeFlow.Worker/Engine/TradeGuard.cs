@@ -36,6 +36,12 @@ public class TradeGuard
 
     // In-memory open positions, keyed by match key (userName + contractSymbol or symbol)
     private readonly Dictionary<string, TradeRecord> _openTrades = new();
+
+    // Tracks symbols reserved by CheckAsync but not yet confirmed by RegisterOpen.
+    // Counted alongside _openTrades so concurrent ingestion paths cannot both pass
+    // the per-symbol cap before either has called RegisterOpen.
+    private readonly Dictionary<string, int> _pendingReservations = new();
+
     private readonly Lock _lock = new();
 
     // Cached IBKR account values, refreshed every 30s in the background
@@ -81,10 +87,13 @@ public class TradeGuard
     }
 
     /// <summary>
-    /// Seeds TradeGuard in-memory state from persisted open positions on startup.
+    /// Seeds TradeGuard in-memory state from persisted open positions on startup,
+    /// restoring xScore from trade_metrics so it survives Worker restarts.
     /// Ensures exit alerts and position monitoring work correctly after a Worker restart.
     /// </summary>
-    public void LoadFromDatabase(IEnumerable<OpenPosition> positions)
+    public void LoadFromDatabase(
+        IEnumerable<OpenPosition> positions,
+        IReadOnlyDictionary<string, decimal>? xScoresByOrderId = null)
     {
         lock (_lock)
         {
@@ -93,6 +102,9 @@ public class TradeGuard
                 var tradeType = Enum.TryParse<TradeType>(p.TradeType, out var tt)
                     ? tt : TradeType.Options;
 
+                decimal xScore = 0m;
+                xScoresByOrderId?.TryGetValue(p.OrderId, out xScore);
+
                 var record = new TradeRecord
                 {
                     AlertId         = p.AlertId,
@@ -100,7 +112,7 @@ public class TradeGuard
                     StopOrderId     = p.StopOrderId,
                     TargetOrderId   = p.TargetOrderId,
                     UserName        = p.UserName,
-                    XScore          = 0m,
+                    XScore          = xScore,
                     DiscordRank     = null,
                     Symbol          = p.Symbol,
                     TradeType       = tradeType,
@@ -122,8 +134,8 @@ public class TradeGuard
                 _openTrades[matchKey] = record;
 
                 _logger.LogInformation(
-                    "TradeGuard: restored position {Symbol} OrderId: {OrderId} from database",
-                    p.Symbol, p.OrderId);
+                    "TradeGuard: restored position {Symbol} OrderId: {OrderId} XScore: {XScore} from database",
+                    p.Symbol, p.OrderId, xScore);
             }
 
             _logger.LogInformation(
@@ -134,6 +146,9 @@ public class TradeGuard
     /// <summary>
     /// Returns null if the order is allowed, or a rejection reason string if blocked.
     /// Checks position limits, exposure caps, and the daily loss limit in sequence.
+    /// If all checks pass, atomically reserves a slot for this symbol so concurrent
+    /// ingestion paths cannot both pass the per-symbol cap before either registers.
+    /// The caller must call ReleaseReservation on any failure path before RegisterOpen.
     /// Uses cached balance and open positions value, no IBKR round trips on the hot path.
     /// </summary>
     public async Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)
@@ -142,14 +157,15 @@ public class TradeGuard
         string? positionBlock = null;
         lock (_lock)
         {
-            // Block any new entry if the underlying symbol already has the maximum number of open
-            // positions regardless of instrument type. Averaging is exempt since it is deliberately
-            // adding to an existing position.
             if (!order.IsAverage)
             {
+                // Count both confirmed open positions and pending reservations to prevent
+                // concurrent paths from both passing the cap before either registers.
+                _pendingReservations.TryGetValue(order.Symbol, out var pendingCount);
                 var symbolCount = _openTrades.Values
                     .Count(t => string.Equals(
-                        t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
+                        t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase))
+                    + pendingCount;
 
                 if (symbolCount >= _maxPositionsPerSymbol)
                     positionBlock =
@@ -172,6 +188,14 @@ public class TradeGuard
                 {
                     positionBlock = $"No open position found for {order.Symbol} — cannot average";
                 }
+            }
+
+            // Reserve the slot atomically while still under the lock.
+            // Cleared by RegisterOpen on success or ReleaseReservation on any failure path.
+            if (positionBlock is null && !order.IsAverage)
+            {
+                _pendingReservations.TryGetValue(order.Symbol, out var reservedCount);
+                _pendingReservations[order.Symbol] = reservedCount + 1;
             }
         }
 
@@ -196,38 +220,43 @@ public class TradeGuard
             var deployableRemaining = maxDailyDeployment - todayOpenedValue;
 
             if (order.BudgetUsed > deployableRemaining)
+            {
+                ReleaseReservation(order);
                 return
                     $"Daily exposure cap reached — need ${order.BudgetUsed:F2}, " +
                     $"deployable ${deployableRemaining:F2} " +
                     $"(cap ${maxDailyDeployment:F2}, today open ${todayOpenedValue:F2})";
+            }
 
-            // Stock sub-cap limits how much of the daily cap stocks can consume.
             if (order.TradeType == TradeType.Stock && _stockDailyAllocationPct > 0)
             {
                 var todayStockValue    = GetTodayOpenedValueByType(TradeType.Stock);
                 var maxStockDeployment = maxDailyDeployment * (decimal)(_stockDailyAllocationPct / 100.0);
 
                 if (order.BudgetUsed + todayStockValue > maxStockDeployment)
+                {
+                    ReleaseReservation(order);
                     return
                         $"Stock daily allocation cap reached — need ${order.BudgetUsed:F2}, " +
                         $"stock deployable ${Math.Max(0, maxStockDeployment - todayStockValue):F2} " +
                         $"(stock cap ${maxStockDeployment:F2}, stock open today ${todayStockValue:F2})";
+                }
             }
 
-            // Hard balance check — never deploy more than available cash.
             var available = balance - openValue;
             if (order.BudgetUsed > available)
+            {
+                ReleaseReservation(order);
                 return
                     $"Insufficient available balance — need ${order.BudgetUsed:F2}, " +
                     $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})";
+            }
         }
 
-        // Pick the effective limit based on current market regime.
-        // Choppy sessions use the tighter ChopDailyLossLimit when set.
         var effectiveLimit = _regime?.IsChoppy == true && _chopDailyLossLimit < 0
             ? _chopDailyLossLimit
             : _dailyLossLimit;
- 
+
         if (effectiveLimit < 0 && _csv is not null)
         {
             var todayPnl = await _csv.GetTodayRealizedPnLAsync(ct);
@@ -239,7 +268,8 @@ public class TradeGuard
                     "today's realized P&L ${PnL:F2} at or below limit ${Limit:F2}. " +
                     "No new entries will be accepted for the rest of the session.",
                     regimeLabel, todayPnl, effectiveLimit);
- 
+
+                ReleaseReservation(order);
                 return
                     $"Daily loss limit reached ({regimeLabel} regime) — " +
                     $"today's realized P&L ${todayPnl:F2} (limit ${effectiveLimit:F2})";
@@ -250,7 +280,28 @@ public class TradeGuard
     }
 
     /// <summary>
+    /// Releases the slot reserved by CheckAsync when execution fails before RegisterOpen.
+    /// Must be called on every failure path between a successful CheckAsync and RegisterOpen.
+    /// No-op for averaging orders, which do not reserve slots.
+    /// </summary>
+    public void ReleaseReservation(TradeOrder order)
+    {
+        if (order.IsAverage) return;
+
+        lock (_lock)
+        {
+            if (!_pendingReservations.TryGetValue(order.Symbol, out var count)) return;
+
+            if (count <= 1)
+                _pendingReservations.Remove(order.Symbol);
+            else
+                _pendingReservations[order.Symbol] = count - 1;
+        }
+    }
+
+    /// <summary>
     /// Called after a successful PlaceOrderAsync to register the position in memory.
+    /// Clears the reservation made during CheckAsync.
     /// </summary>
     public void RegisterOpen(TradeOrder order, BrokerOrderResult result)
     {
@@ -264,6 +315,15 @@ public class TradeGuard
                 _logger.LogInformation(
                     "TradeGuard: averaged into {Symbol} — position updated", order.Symbol);
                 return;
+            }
+
+            // Clear the slot reserved during CheckAsync now that the position is confirmed.
+            if (!order.IsAverage && _pendingReservations.TryGetValue(order.Symbol, out var reservedCount))
+            {
+                if (reservedCount <= 1)
+                    _pendingReservations.Remove(order.Symbol);
+                else
+                    _pendingReservations[order.Symbol] = reservedCount - 1;
             }
 
             var record = new TradeRecord
@@ -479,7 +539,6 @@ public class TradeGuard
 
     // -- Helpers --
 
-    // Returns the total entry amount of positions opened today in ET.
     private decimal GetTodayOpenedValue()
     {
         var todayEt = DateOnly.FromDateTime(
@@ -494,7 +553,6 @@ public class TradeGuard
         }
     }
 
-    // Returns the total entry amount of positions of a specific type opened today in ET.
     private decimal GetTodayOpenedValueByType(TradeType tradeType)
     {
         var todayEt = DateOnly.FromDateTime(
@@ -511,7 +569,6 @@ public class TradeGuard
         }
     }
 
-    // Refreshes cached balance and open positions value every 30 seconds.
     private async Task RefreshCacheLoopAsync(CancellationToken ct)
     {
         await Task.Delay(InitialRefreshDelayMs, ct);

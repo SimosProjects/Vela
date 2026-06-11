@@ -1,3 +1,4 @@
+using TradeFlow.Worker.Configuration;
 using TradeFlow.Worker.Engine;
 
 namespace TradeFlow.Worker.Services;
@@ -18,6 +19,8 @@ public class SystemStateService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IbkrConnectionService _ibkr;
     private readonly TradeGuard _tradeGuard;
+    private readonly MarketRegimeService _marketRegime;
+    private readonly RiskEngineOptions _riskOptions;
     private readonly ILogger<SystemStateService> _logger;
 
     // Regime snapshot set by UpdateRegime(), flushed to DB on next heartbeat cycle
@@ -31,18 +34,23 @@ public class SystemStateService : BackgroundService
     private decimal? _vix;
     private decimal? _vixDelta;
     private int? _chopScore;
+    private volatile bool _signalRConnected;
     private readonly Lock _regimeLock = new();
 
     public SystemStateService(
         IServiceScopeFactory scopeFactory,
         IbkrConnectionService ibkr,
         TradeGuard tradeGuard,
+        MarketRegimeService marketRegime,
+        IOptions<RiskEngineOptions> riskOptions,
         ILogger<SystemStateService> logger)
     {
-        _scopeFactory = scopeFactory;
-        _ibkr         = ibkr;
-        _tradeGuard   = tradeGuard;
-        _logger       = logger;
+        _scopeFactory  = scopeFactory;
+        _ibkr          = ibkr;
+        _tradeGuard    = tradeGuard;
+        _marketRegime  = marketRegime;
+        _riskOptions   = riskOptions.Value;
+        _logger        = logger;
     }
 
     /// <summary>
@@ -75,6 +83,16 @@ public class SystemStateService : BackgroundService
             _vixDelta         = vixDelta;
             _chopScore        = chopScore;
         }
+    }
+
+    /// <summary>
+    /// Stores the current SignalR connection state in memory. Persisted to the
+    /// database on the next heartbeat cycle within 30 seconds.
+    /// Called by SignalRListenerService on connect, reconnect, and disconnect.
+    /// </summary>
+    public void UpdateSignalRConnected(bool connected)
+    {
+        _signalRConnected = connected;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -128,6 +146,41 @@ public class SystemStateService : BackgroundService
                 db.SystemState.Add(row);
             }
 
+            // Apply any pending manual regime override written by the dashboard API.
+            // Consumed here and cleared so it only fires once.
+            if (!string.IsNullOrEmpty(row.ForceRegime) &&
+                Enum.TryParse<RegimeTier>(row.ForceRegime, out var forcedTier))
+            {
+                var sizingForced = forcedTier switch
+                {
+                    RegimeTier.Bullish => (decimal)_riskOptions.RegimeBullishSizingPct,
+                    RegimeTier.Choppy  => (decimal)_riskOptions.RegimeChoppySizingPct,
+                    RegimeTier.Bearish => (decimal)_riskOptions.RegimeBearishSizingPct,
+                    _                  => 1.0m
+                };
+                var blockCallsForced = forcedTier == RegimeTier.Bearish
+                    && _riskOptions.RegimeBearishBlockCalls;
+
+                _marketRegime.SetRegimeTier(forcedTier, sizingForced, blockCallsForced);
+
+                // Update the local snapshot so this heartbeat write reflects the override
+                tier       = forcedTier.ToString();
+                sizingMult = sizingForced;
+                blockCalls = blockCallsForced;
+
+                lock (_regimeLock)
+                {
+                    _regimeTier       = tier;
+                    _sizingMultiplier = sizingMult;
+                    _blockCalls       = blockCalls;
+                }
+
+                row.ForceRegime = null;
+
+                _logger.LogInformation(
+                    "SystemStateService: applied manual regime override to {Tier}", tier);
+            }
+
             row.RegimeTier       = tier;
             row.SizingMultiplier = sizingMult;
             row.BlockCalls       = blockCalls;
@@ -139,6 +192,7 @@ public class SystemStateService : BackgroundService
             row.VixDelta         = vixDelta;
             row.ChopScore        = chopScore;
             row.IbkrConnected    = _ibkr.IsConnected;
+            row.SignalRConnected  = _signalRConnected;
             row.AccountBalance   = _tradeGuard.CachedBalance;
             row.OpenValue        = _tradeGuard.CachedOpenValue;
             row.WorkerHeartbeat  = DateTimeOffset.UtcNow;
