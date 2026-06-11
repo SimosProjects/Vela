@@ -37,6 +37,16 @@ public class SystemStateService : BackgroundService
     private volatile bool _signalRConnected;
     private readonly Lock _regimeLock = new();
 
+    // Tracks the last-known pause state so the event only fires on change
+    private bool _isPaused;
+
+    /// <summary>
+    /// Fired whenever the pause state read from the database differs from the
+    /// last-known value. Subscribers update their own state; this service does
+    /// not hold a reference to any execution component.
+    /// </summary>
+    public event Action<bool>? PauseStateChanged;
+
     public SystemStateService(
         IServiceScopeFactory scopeFactory,
         IbkrConnectionService ibkr,
@@ -163,7 +173,6 @@ public class SystemStateService : BackgroundService
 
                 _marketRegime.SetRegimeTier(forcedTier, sizingForced, blockCallsForced);
 
-                // Update the local snapshot so this heartbeat write reflects the override
                 tier       = forcedTier.ToString();
                 sizingMult = sizingForced;
                 blockCalls = blockCallsForced;
@@ -179,6 +188,18 @@ public class SystemStateService : BackgroundService
 
                 _logger.LogInformation(
                     "SystemStateService: applied manual regime override to {Tier}", tier);
+            }
+
+            // Propagate pause state to execution layer if it changed since last heartbeat.
+            // Fired before the DB write so execution reflects the stored state immediately.
+            var isPaused = row.IsPaused;
+            if (isPaused != _isPaused)
+            {
+                _isPaused = isPaused;
+                PauseStateChanged?.Invoke(isPaused);
+                _logger.LogInformation(
+                    "SystemStateService: trading {State}",
+                    isPaused ? "paused" : "resumed");
             }
 
             row.RegimeTier       = tier;
@@ -235,6 +256,9 @@ public class SystemStateService : BackgroundService
                 _vixDelta         = row.VixDelta;
                 _chopScore        = row.ChopScore;
             }
+
+            // Sync initial pause state so the first heartbeat does not fire a spurious event
+            _isPaused = row.IsPaused;
 
             _logger.LogInformation(
                 "SystemStateService: restored regime {Tier} from database", row.RegimeTier);
