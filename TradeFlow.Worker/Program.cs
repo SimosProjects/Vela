@@ -19,6 +19,9 @@ builder.Services
     .AddOptions<IbkrOptions>()
     .Bind(builder.Configuration.GetSection("Ibkr"))
     .ValidateDataAnnotations()
+    .Validate(
+        o => !ibkrEnabled || !string.IsNullOrWhiteSpace(o.AccountId),
+        "Ibkr:AccountId must be set when IBKR_ENABLED=true.")
     .ValidateOnStart();
 
 builder.Services
@@ -32,6 +35,9 @@ builder.Services
     .Bind(builder.Configuration.GetSection(RiskEngineOptions.SectionName))
     .ValidateDataAnnotations()
     .ValidateOnStart();
+
+// Cross-field invariants that DataAnnotations cannot express, enforced at startup.
+builder.Services.AddSingleton<IValidateOptions<RiskEngineOptions>, RiskEngineOptionsValidator>();
 
 builder.Services
     .AddOptions<PollingOptions>()
