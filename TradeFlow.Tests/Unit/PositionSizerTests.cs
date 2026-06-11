@@ -311,6 +311,11 @@ public class PositionSizerTests
         var regime = new MarketRegimeService(NullLogger<MarketRegimeService>.Instance);
         regime.SetRegime(5, 2, RegimeTier.Bearish, 0.25m, true, 520m, 540m, 480m);
 
+        // BlockCalls is driven by _blockCallsOverride, not _blockCalls.
+        // SetRegime signals the intent but SetBlockCallsOverride is the explicit gate —
+        // matching how SystemStateService seeds it via the BlockCallsOverrideChanged event.
+        regime.SetBlockCallsOverride(true);
+
         regime.Tier.Should().Be(RegimeTier.Bearish);
         regime.SizingMultiplier.Should().Be(0.25m);
         regime.BlockCalls.Should().BeTrue();

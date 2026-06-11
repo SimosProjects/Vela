@@ -13,7 +13,7 @@ import { MarketClosedBanner }  from '../components/banners/MarketClosedBanner.js
 import { PausedBanner }        from '../components/banners/PausedBanner.jsx';
 import { LogPanel }            from '../components/LogPanel.jsx';
 
-export function DesktopLayout({ data, paused, onTogglePause, onForceClose, lastUpdated }) {
+export function DesktopLayout({ data, paused, blockCalls, regimeBlocksCalls, onTogglePause, onToggleBlockCalls, onForceClose, lastUpdated }) {
   const { timestamp, positions, closedToday, regime, account, riskConfig, traders, system } = data;
   const marketOpen = system?.marketOpen ?? true;
   const { width }  = useWindowSize();
@@ -45,9 +45,11 @@ export function DesktopLayout({ data, paused, onTogglePause, onForceClose, lastU
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <RegimePanel regime={regime} />
             <ControlsPanel
-              blockCalls={regime?.blockCalls ?? false}
+              blockCalls={blockCalls}
+              regimeBlocksCalls={regimeBlocksCalls}
               paused={paused}
               onTogglePause={onTogglePause}
+              onToggleBlockCalls={onToggleBlockCalls}
             />
             <RiskConfig config={riskConfig} />
             <AlertSourcePanel system={system} />

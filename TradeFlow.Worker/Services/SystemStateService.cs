@@ -13,7 +13,7 @@ namespace TradeFlow.Worker.Services;
 /// </summary>
 public class SystemStateService : BackgroundService
 {
-    private const int HeartbeatIntervalSeconds = 30;
+    private const int HeartbeatIntervalSeconds = 5;
     private const int StartupDelayMs = 3000;
 
     private readonly IServiceScopeFactory _scopeFactory;
@@ -37,8 +37,9 @@ public class SystemStateService : BackgroundService
     private volatile bool _signalRConnected;
     private readonly Lock _regimeLock = new();
 
-    // Tracks the last-known pause state so the event only fires on change
+    // Tracks last-known values so events only fire on change
     private bool _isPaused;
+    private bool _blockCallsOverride;
 
     /// <summary>
     /// Fired whenever the pause state read from the database differs from the
@@ -46,6 +47,12 @@ public class SystemStateService : BackgroundService
     /// not hold a reference to any execution component.
     /// </summary>
     public event Action<bool>? PauseStateChanged;
+
+    /// <summary>
+    /// Fired whenever the block calls override read from the database differs
+    /// from the last-known value. Wired to MarketRegimeService at the composition root.
+    /// </summary>
+    public event Action<bool>? BlockCallsOverrideChanged;
 
     public SystemStateService(
         IServiceScopeFactory scopeFactory,
@@ -197,14 +204,26 @@ public class SystemStateService : BackgroundService
             {
                 _isPaused = isPaused;
                 PauseStateChanged?.Invoke(isPaused);
-                _logger.LogInformation(
-                    "SystemStateService: trading {State}",
-                    isPaused ? "paused" : "resumed");
+                _logger.LogWarning(
+                    "Dashboard: trading {State} — new entries will be {Action}",
+                    isPaused ? "PAUSED" : "RESUMED",
+                    isPaused ? "rejected" : "accepted");
+            }
+
+            // Propagate block calls override to regime service if it changed.
+            var blockCallsOverride = row.BlockCallsOverride;
+            if (blockCallsOverride != _blockCallsOverride)
+            {
+                _blockCallsOverride = blockCallsOverride;
+                BlockCallsOverrideChanged?.Invoke(blockCallsOverride);
+                _logger.LogWarning(
+                    "Dashboard: call entries {State} via manual override",
+                    blockCallsOverride ? "BLOCKED" : "unblocked");
             }
 
             row.RegimeTier       = tier;
             row.SizingMultiplier = sizingMult;
-            row.BlockCalls       = blockCalls;
+            row.BlockCalls       = blockCalls; // regime-driven only — override is a separate column
             row.SpyPrice         = spyPrice;
             row.Ma20             = ma20;
             row.Ma50             = ma50;
@@ -243,11 +262,16 @@ public class SystemStateService : BackgroundService
             if (row is null || row.RegimeTier == "Unknown")
                 return;
 
+            // Derive blockCalls from tier + config rather than the stored value.
+            // The stored block_calls column can be stale if a previous startup wrote
+            // a default before MarketRegimeService was properly restored.
+            var derivedBlockCalls = row.RegimeTier == "Bearish" && _riskOptions.RegimeBearishBlockCalls;
+
             lock (_regimeLock)
             {
                 _regimeTier       = row.RegimeTier;
                 _sizingMultiplier = row.SizingMultiplier;
-                _blockCalls       = row.BlockCalls;
+                _blockCalls       = derivedBlockCalls;
                 _spyPrice         = row.SpyPrice;
                 _ma20             = row.Ma20;
                 _ma50             = row.Ma50;
@@ -257,8 +281,34 @@ public class SystemStateService : BackgroundService
                 _chopScore        = row.ChopScore;
             }
 
-            // Sync initial pause state so the first heartbeat does not fire a spurious event
-            _isPaused = row.IsPaused;
+            // Restore regime to MarketRegimeService so the risk engine reflects the
+            // correct tier and call-blocking state immediately, without waiting for
+            // the 9:20am market conditions assessment.
+            if (Enum.TryParse<RegimeTier>(_regimeTier, out var restoredTier))
+                _marketRegime.SetRegimeTier(restoredTier, _sizingMultiplier, derivedBlockCalls);
+
+            // Seed the block calls override from the regime on startup so the dashboard
+            // toggle initialises correctly. User can freely change it during the session.
+            // Only writes to DB if the stored override doesn't already match the regime.
+            if (row.BlockCallsOverride != derivedBlockCalls)
+            {
+                await db.SystemState
+                    .Where(s => s.Id == 1)
+                    .ExecuteUpdateAsync(
+                        s => s.SetProperty(x => x.BlockCallsOverride, derivedBlockCalls), ct);
+
+                _blockCallsOverride = derivedBlockCalls;
+                BlockCallsOverrideChanged?.Invoke(derivedBlockCalls);
+
+                _logger.LogInformation(
+                    "SystemStateService: block calls override seeded to {Value} from {Tier} regime on startup",
+                    derivedBlockCalls, row.RegimeTier);
+            }
+            else
+            {
+                // DB already matches — sync local tracking without writing
+                _blockCallsOverride = row.BlockCallsOverride;
+            }
 
             _logger.LogInformation(
                 "SystemStateService: restored regime {Tier} from database", row.RegimeTier);

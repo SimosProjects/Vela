@@ -45,8 +45,9 @@ public record AccountResponse(
 /// <summary>
 /// System health derived from system_state timestamps.
 /// WorkerRunning: heartbeat within the last 60 seconds.
-/// XtradesConnected: last alert ingested within the last 2 minutes.
+/// XtradesConnected: live SignalR connection state written by the Worker.
 /// MarketOpen: derived from current Eastern Time.
+/// BlockCallsOverride: dashboard-driven call block, independent of regime.
 /// </summary>
 public record SystemStatusResponse(
     bool IbkrConnected,
@@ -54,6 +55,7 @@ public record SystemStatusResponse(
     bool WorkerRunning,
     bool MarketOpen,
     bool IsPaused,
+    bool BlockCallsOverride,
     DateTimeOffset? WorkerHeartbeat,
     DateTimeOffset? LastAlertAt
 );

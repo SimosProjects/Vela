@@ -224,11 +224,13 @@ if (ibkrEnabled)
     await reconciliation.RunAsync();
 }
 
-// Wire pause state propagation at the composition root.
-// SystemStateService fires PauseStateChanged when is_paused flips in the database.
-// BrokerExecutionService reacts without either service knowing about the other.
+// Wire cross-service state propagation at the composition root.
+// SystemStateService fires events when DB values change; subscribers react
+// without either service holding a direct reference to the other.
 var systemState = host.Services.GetRequiredService<SystemStateService>();
-var execution   = host.Services.GetRequiredService<BrokerExecutionService>();
+var execution = host.Services.GetRequiredService<BrokerExecutionService>();
+var regime = host.Services.GetRequiredService<MarketRegimeService>();
 systemState.PauseStateChanged += isPaused => execution.IsPaused = isPaused;
+systemState.BlockCallsOverrideChanged += regime.SetBlockCallsOverride;
 
 host.Run();

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using TradeFlow.Worker.Data;
@@ -11,9 +12,11 @@ using TradeFlow.Worker.Data;
 namespace TradeFlow.Worker.Data.Migrations
 {
     [DbContext(typeof(TradeFlowDbContext))]
-    partial class TradeFlowDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260611043612_AddBlockCallsOverrideToSystemState")]
+    partial class AddBlockCallsOverrideToSystemState
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

@@ -10,6 +10,7 @@ public class MarketRegimeService
     private volatile int _chopScore = 0;
     private volatile RegimeTier _tier = RegimeTier.Bullish;
     private volatile bool _blockCalls = false;
+    private volatile bool _blockCallsOverride = false;
     private decimal _ma20 = 0m;
     private decimal _ma50 = 0m;
     private decimal _ma200 = 0m;
@@ -38,9 +39,16 @@ public class MarketRegimeService
 
     /// <summary>
     /// When true, call option entries are blocked for the session.
-    /// Set in a Bearish regime when BlockCallsInBearish config is enabled.
+    /// Controlled entirely by the dashboard toggle. The regime seeds the initial value
+    /// on startup but the user can freely override it in either direction.
     /// </summary>
-    public bool BlockCalls => _blockCalls;
+    public bool BlockCalls => _blockCallsOverride;
+
+    /// <summary>
+    /// Whether the dashboard has manually overridden call blocking.
+    /// Independent of the regime-driven block — survives regime changes.
+    /// </summary>
+    public bool BlockCallsOverride => _blockCallsOverride;
 
     /// <summary>SPY 20-day moving average as of this morning's open.</summary>
     public decimal Ma20 { get { lock (_maLock) return _ma20; } }
@@ -105,6 +113,19 @@ public class MarketRegimeService
         _logger.LogInformation(
             "Market regime manually overridden — Tier: {Tier} | Sizing: {Multiplier:P0} | BlockCalls: {BlockCalls}",
             tier, sizingMultiplier, blockCalls);
+    }
+
+    /// <summary>
+    /// Applies a manual block calls override from the dashboard, independent of regime tier.
+    /// When true, call entries are rejected regardless of the current regime.
+    /// Cleared by toggling off from the dashboard.
+    /// </summary>
+    public void SetBlockCallsOverride(bool blockCalls)
+    {
+        _blockCallsOverride = blockCalls;
+        _logger.LogInformation(
+            "Block calls override {State} via dashboard",
+            blockCalls ? "enabled" : "disabled");
     }
 }
 
