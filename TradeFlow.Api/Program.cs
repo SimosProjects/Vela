@@ -64,6 +64,14 @@ app.MapAlertEndpoints();
 app.MapDashboardEndpoints();
 app.MapFallbackToFile("index.html");
 
+// Warm up the database connection pool so the first dashboard poll doesn't
+// hit a cold pool and throw OperationCanceledException.
+using (var warmupScope = app.Services.CreateScope())
+{
+    var db = warmupScope.ServiceProvider.GetRequiredService<TradeFlowDbContext>();
+    await db.Database.CanConnectAsync();
+}
+
 app.Run();
 
 namespace TradeFlow.Api

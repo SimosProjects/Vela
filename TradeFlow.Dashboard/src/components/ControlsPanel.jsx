@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { B } from '../styles/theme.js';
 import { Card } from './shared/index.js';
 
@@ -33,17 +32,10 @@ function Toggle({ on, onChange }) {
   );
 }
 
-/// Session Controls panel, Block Calls toggle and Pause Trading button.
-/// paused and onTogglePause are fully controlled from App.jsx via the API.
-/// blockCalls local state is temporary until block calls backend is wired.
-export function ControlsPanel({ blockCalls: blockCallsProp = false, paused, onTogglePause, onToggleBlockCalls }) {
-  const [blockCalls, setBlockCalls] = useState(blockCallsProp);
-
-  const handleBlockCalls = () => {
-    setBlockCalls(v => !v);
-    onToggleBlockCalls?.();
-  };
-
+/// Session Controls panel — fully controlled from App.jsx.
+/// blockCalls: the override flag (toggle controls this).
+/// regimeBlocksCalls: whether the regime seeded the initial ON state (for sublabel only).
+export function ControlsPanel({ blockCalls = false, regimeBlocksCalls = false, paused = false, onTogglePause, onToggleBlockCalls }) {
   return (
     <Card>
       <div style={{
@@ -57,17 +49,19 @@ export function ControlsPanel({ blockCalls: blockCallsProp = false, paused, onTo
         Session Controls
       </div>
 
-      {/* Block Calls row */}
+      {/* Block Calls toggle — toggle is the single source of truth */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
         <div>
           <div style={{ fontSize: 12, fontWeight: 600, color: blockCalls ? B.am : B.tx }}>
             Block call entries
           </div>
           <div style={{ fontSize: 11, color: B.mu, marginTop: 1 }}>
-            {blockCalls ? 'Calls rejected this session' : 'Calls allowed'}
+            {blockCalls
+              ? regimeBlocksCalls ? 'Active — seeded by Bearish regime' : 'Manual override active'
+              : 'Calls allowed'}
           </div>
         </div>
-        <Toggle on={blockCalls} onChange={handleBlockCalls} />
+        <Toggle on={blockCalls} onChange={onToggleBlockCalls} />
       </div>
 
       {blockCalls && (
@@ -86,7 +80,7 @@ export function ControlsPanel({ blockCalls: blockCallsProp = false, paused, onTo
 
       <div style={{ height: '0.5px', background: B.bd, margin: '12px 0' }} />
 
-      {/* Pause Trading button, fully controlled, no local state */}
+      {/* Pause Trading button */}
       <button
         onClick={onTogglePause}
         style={{

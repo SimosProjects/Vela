@@ -29,6 +29,7 @@ public class SystemState
 
     // System status, updated every 30 seconds
     public bool IsPaused { get; set; }
+    public bool BlockCallsOverride { get; set; }
     public bool IbkrConnected { get; set; }
     public bool SignalRConnected { get; set; }
     public DateTimeOffset? WorkerHeartbeat { get; set; }
