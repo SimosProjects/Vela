@@ -255,7 +255,25 @@ public class BrokerExecutionService
             // Tighten trail if post-fill slippage exceeds the configured warning threshold.
             // Must run before RegisterOpen so the updated StopOrderId is stored in TradeGuard and DB.
             result = await TightenTrailOnElevatedSlippageAsync(order, result, alertedPrice, ct);
-
+ 
+            // Both OCA and standalone trail attempts were rejected at IBKR (e.g. SPX cash-settled
+            // margin rules). The fill happened and will be tracked, but the position has no stop.
+            if (result.StopOrderId is null)
+            {
+                _logger.LogError(
+                    "No stop protection for {Symbol} OrderId {OrderId} — all trail stop attempts " +
+                    "rejected by IBKR. Position is open and unprotected. Manual stop required.",
+                    order.Symbol, result.OrderId);
+ 
+                await _discord.NotifyCriticalAsync(
+                    $"⚠️ No Stop Protection — {order.Symbol}",
+                    $"**{order.Symbol}** filled at ${result.FillPrice:F2} × {result.FillQuantity} " +
+                    "but all trail stop attempts were rejected by IBKR.\n" +
+                    "Position is open without stop protection.\n" +
+                    "Place a manual stop in IBKR immediately.",
+                    ct);
+            }
+ 
             _guard.RegisterOpen(order, result);
             reservationActive = false;
 
