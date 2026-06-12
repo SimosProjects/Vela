@@ -62,6 +62,14 @@ public class IbkrEWrapper : EWrapper
                     tcs.TrySetResult(new OrderFill(status, (decimal)avgFillPrice, (int)filled));
                     _orderCallbacks.Remove(orderId);
                 }
+                else if (status is "Cancelled" or "Inactive")
+                {
+                    // IBKR cancelled the order (e.g. price-protection rejection resolved before
+                    // the fill window expires). Resolves PlaceOrderAsync immediately so it does
+                    // not sit at the timeout before returning a Cancelled result.
+                    tcs.TrySetResult(new OrderFill(status, 0m, 0));
+                    _orderCallbacks.Remove(orderId);
+                }
             }
         }
     }
@@ -433,6 +441,13 @@ public class IbkrEWrapper : EWrapper
                 _logger.LogWarning("IBKR Order cancelled [202] Id {Id}: {Message}", id, errorMsg);
             else
                 _logger.LogDebug("IBKR Order cancelled [202] Id {Id}", id);
+
+            // When IBKR rejects a limit order for price-protection reasons it includes the
+            // current market price in the message. Parse it and store as a structured reason
+            // so BrokerExecutionService can retry with a market-anchored limit without an
+            // extra roundtrip. Also resolves the order callback immediately instead of waiting
+            // for the fill window to expire.
+            TryHandlePriceProtectionRejection(id, errorMsg);
         }
         else if (errorCode == 404)
         {
@@ -511,6 +526,46 @@ public class IbkrEWrapper : EWrapper
             {
                 entry.Tcs.TrySetResult(entry.Bars);
                 _historicalDataCallbacks.Remove(reqId);
+            }
+        }
+    }
+
+    // -- Helpers --
+
+    // Parses the current market price from IBKR's price-protection [202] rejection message.
+    // Format: "...current market price of 267.2..."
+    // Stores the price as "PRICE_PROTECTION:267.2" in _rejectionReasons and resolves the
+    // order TCS immediately so PlaceOrderAsync returns without sitting at the fill window timeout.
+    private void TryHandlePriceProtectionRejection(int orderId, string errorMsg)
+    {
+        const string marker = "current market price of ";
+        var markerIdx = errorMsg.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (markerIdx < 0) return;
+
+        var priceStart = markerIdx + marker.Length;
+        var priceEnd   = priceStart;
+
+        while (priceEnd < errorMsg.Length &&
+               (char.IsDigit(errorMsg[priceEnd]) || errorMsg[priceEnd] == '.'))
+            priceEnd++;
+
+        var priceStr = errorMsg[priceStart..priceEnd].TrimEnd('.');
+
+        if (!decimal.TryParse(priceStr, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out var marketPrice) ||
+            marketPrice <= 0)
+            return;
+
+        lock (_lock)
+        {
+            _rejectionReasons[orderId] = $"PRICE_PROTECTION:{marketPrice}";
+
+            // Resolve the order TCS immediately, orderStatus("Cancelled") may arrive slightly
+            // later, but TrySetResult is idempotent so the second call is a no-op.
+            if (_orderCallbacks.TryGetValue(orderId, out var tcs))
+            {
+                tcs.TrySetResult(new OrderFill("Cancelled", 0m, 0));
+                _orderCallbacks.Remove(orderId);
             }
         }
     }

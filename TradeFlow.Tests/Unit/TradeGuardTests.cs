@@ -74,7 +74,8 @@ public class TradeGuardTests
         var result = await _guard.CheckAsync(order);
 
         result.Should().NotBeNull();
-        result.Should().Contain("Max positions per symbol reached");
+        result!.Reason.Should().Contain("Max positions per symbol reached");
+        result.IsRoutine.Should().BeFalse("confirmed open position is a real cap, not a concurrent-path duplicate");
     }
 
     [Fact]
@@ -87,7 +88,7 @@ public class TradeGuardTests
 
         result.Should().NotBeNull();
         // Either the cap or the balance check fires depending on which limit is hit first
-        result.Should().MatchRegex("Daily exposure cap|Insufficient");
+        result!.Reason.Should().MatchRegex("Daily exposure cap|Insufficient");
     }
 
     [Fact]
@@ -118,7 +119,7 @@ public class TradeGuardTests
         var result = await _guard.CheckAsync(order);
 
         result.Should().NotBeNull();
-        result.Should().Contain("Daily exposure cap");
+        result!.Reason.Should().Contain("Daily exposure cap");
     }
 
     [Fact]
@@ -158,7 +159,26 @@ public class TradeGuardTests
         var result = await _guard.CheckAsync(avgOrder);
 
         result.Should().NotBeNull();
-        result.Should().Contain("Already averaged");
+        result!.Reason.Should().Contain("Already averaged");
+    }
+
+    [Fact]
+    public async Task CheckAsync_RoutineBlock_WhenPendingReservationOnlyNoPosopen()
+    {
+        // Simulate the polling+SignalR race: one path reserves a slot but has not yet
+        // called RegisterOpen. The concurrent path should be blocked with IsRoutine=true.
+        var order = BuildOrder();
+
+        // First path passes CheckAsync, reserves a slot but has not called RegisterOpen yet
+        var firstBlock = await _guard.CheckAsync(order);
+        firstBlock.Should().BeNull("first path should pass");
+
+        // Second path hits the pending reservation
+        var secondBlock = await _guard.CheckAsync(order);
+
+        secondBlock.Should().NotBeNull();
+        secondBlock!.IsRoutine.Should().BeTrue("pending-reservation duplicate is expected concurrent-path behaviour");
+        secondBlock.Reason.Should().Contain("concurrent path");
     }
 
     [Fact]
@@ -261,7 +281,8 @@ public class TradeGuardTests
         var result = await _guard.CheckAsync(optionOrder);
 
         result.Should().NotBeNull();
-        result.Should().Contain("TSLA");
-        result.Should().Contain("Max positions per symbol reached");
+        result!.Reason.Should().Contain("TSLA");
+        result.Reason.Should().Contain("Max positions per symbol reached");
+        result.IsRoutine.Should().BeFalse("a confirmed stock position blocking an option entry is a real cap");
     }
 }

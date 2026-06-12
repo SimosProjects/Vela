@@ -25,7 +25,7 @@ public class IbkrBrokerService : IBrokerService
     private Action<string, decimal, TradeOutcome>? _brokerFillHandler;
 
     // Fill window for limit orders before the unfilled portion is cancelled
-    private const int LimitOrderFillWindowSeconds = 7;
+    private const int LimitOrderFillWindowSeconds = 10;
 
     private static readonly TimeZoneInfo EasternTime =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
@@ -359,12 +359,40 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(fillWindowSeconds));
 
-            // Only resolves when IBKR confirms status "Filled" — see IbkrEWrapper.
+            // Only resolves when IBKR confirms status "Filled".
             var state = await tcs.Task.WaitAsync(cts.Token);
-
-            // Normal fill — exec details TCS no longer needed
+ 
+            // IBKR cancelled the order before the fill window expired (e.g. price-protection
+            // rejection). Return without placing trail stop or OCA group.
+            // Small delay before reading the rejection reason: orderStatus("Cancelled") fires
+            // slightly before the [202] error callback that carries the market price.
+            if (state.Status is not "Filled")
+            {
+                _connection.Client.cancelOrder(tempStopId);
+                _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
+ 
+                await Task.Delay(300, ct);
+ 
+                var priceProtectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
+                _logger.LogWarning(
+                    "IBKR order cancelled before fill for {Symbol} — Reason: {Reason}",
+                    order.Symbol, priceProtectionReason ?? "no reason provided");
+ 
+                return new BrokerOrderResult(
+                    OrderId:         orderId.ToString(),
+                    StopOrderId:     null,
+                    TargetOrderId:   null,
+                    FillPrice:       0m,
+                    FillQuantity:    0,
+                    FillAmount:      0m,
+                    Status:          OrderStatus.Cancelled,
+                    FilledAt:        DateTimeOffset.UtcNow,
+                    RejectionReason: priceProtectionReason);
+            }
+ 
+            // Normal fill, exec details TCS no longer needed
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
-
+ 
             _logger.LogDebug(
                 "IBKR entry filled. OrderId: {OrderId} Status: {Status} — replacing stop with OCA trail",
                 orderId, state.Status);

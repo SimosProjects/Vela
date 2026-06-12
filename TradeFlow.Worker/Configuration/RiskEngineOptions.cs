@@ -53,8 +53,16 @@ public class RiskEngineOptions
 
     // 0 = disabled. Rejects alerts where PricePaid exceeds ActualPriceAtTimeOfAlert by more than this %.
     // Catches already-running trades before any IBKR interaction.
+    // Applied to options entries. For stocks use StockAlertStalenessMaxSlippagePct.
     [Range(0, 100, ErrorMessage = "AlertStalenessMaxSlippagePct must be between 0 and 100.")]
     public decimal AlertStalenessMaxSlippagePct { get; init; } = 25.0m;
+
+    // 0 = disabled (falls back to AlertStalenessMaxSlippagePct).
+    // Stocks move less than options; a tighter threshold rejects entries where the
+    // price has already moved away from the alerted level before we can fill.
+    // The goal is to enter near the alerted price or not at all.
+    [Range(0, 100, ErrorMessage = "StockAlertStalenessMaxSlippagePct must be between 0 and 100.")]
+    public decimal StockAlertStalenessMaxSlippagePct { get; init; } = 2.0m;
 
     // Maximum acceptable fill price above PricePaid per risk tier.
     // Used to compute the limit order ceiling: PricePaid * (1 + threshold / 100).
