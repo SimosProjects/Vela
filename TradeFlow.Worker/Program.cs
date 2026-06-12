@@ -1,3 +1,4 @@
+using Npgsql;
 using TradeFlow.Worker;
 using TradeFlow.Worker.Engine;
 using TradeFlow.Worker.Metrics;
@@ -5,9 +6,15 @@ using TradeFlow.Worker.Metrics;
 AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 
 var builder = Host.CreateApplicationBuilder(args);
-builder.Services.AddSerilog((services, config) =>
+
+// Read connection string before Serilog setup so WorkerLogSink can capture it via closure.
+var connectionString = builder.Configuration.GetConnectionString("TradeFlow")
+    ?? throw new InvalidOperationException("TradeFlow connection string is not configured.");
+
+builder.Services.AddSerilog((_, config) =>
     config.ReadFrom.Configuration(builder.Configuration)
-          .Enrich.FromLogContext());
+          .Enrich.FromLogContext()
+          .WriteTo.Sink(new WorkerLogSink(connectionString)));
 
 // Configuration
 var token = Environment.GetEnvironmentVariable("XTRADES_TOKEN")
@@ -46,9 +53,6 @@ builder.Services
     .ValidateOnStart();
 
 // Database
-var connectionString = builder.Configuration.GetConnectionString("TradeFlow")
-    ?? throw new InvalidOperationException("TradeFlow connection string is not configured.");
-
 builder.Services.AddDbContext<TradeFlowDbContext>(options =>
 {
     options.UseNpgsql(connectionString);
@@ -159,6 +163,17 @@ if (ibkrEnabled)
 
 var host = builder.Build();
 
+// Clear worker_logs so the dashboard log panel starts fresh each session.
+// Runs synchronously before the host starts so no race with the dashboard poll.
+try
+{
+    await using var logConn = new NpgsqlConnection(connectionString);
+    await logConn.OpenAsync();
+    await using var logCmd = new NpgsqlCommand("DELETE FROM worker_logs", logConn);
+    await logCmd.ExecuteNonQueryAsync();
+}
+catch { /* table absent on very first run; WorkerLogSink creates it */ }
+
 // Startup sequence: connect to Gateway, wait for session ready, sync order IDs,
 // then reload TradeGuard state from DB
 if (ibkrEnabled)
@@ -193,24 +208,24 @@ using (var scope = host.Services.CreateScope())
     var guard = host.Services.GetRequiredService<TradeGuard>();
 
     var positions = await repo.GetAllAsync();
- 
+
     // Manual positions are tracking-only, they must not enter TradeGuard.
     // BrokerExecutionService and PositionMonitorService only manage positions in TradeGuard,
     // so manual positions are never accidentally acted on.
     var managedPositions = positions.Where(p => !p.IsManual).ToList();
- 
+
     if (managedPositions.Count > 0)
     {
         var orderIds = managedPositions
             .Select(p => p.OrderId)
             .ToHashSet();
- 
+
         var xScores = await db.TradeMetrics
             .Where(t => orderIds.Contains(t.Id))
             .ToDictionaryAsync(t => t.Id, t => t.XScore ?? 0m);
- 
+
         guard.LoadFromDatabase(managedPositions, xScores);
- 
+
         // Re-register stop/target callbacks for restored positions so broker-side
         // trail stop and target fills are detected correctly after a restart
         if (ibkrEnabled)
