@@ -63,6 +63,16 @@ public class CsvTradeLoggerTests : IDisposable
         header.Should().Contain("Status");
     }
 
+    [Fact]
+    public void Constructor_HeadersContainOrderIdColumn()
+    {
+        var optionsHeader = File.ReadAllLines(Path.Combine(_tempDir, "options_trades.csv"))[0];
+        var stocksHeader  = File.ReadAllLines(Path.Combine(_tempDir, "stocks_trades.csv"))[0];
+
+        optionsHeader.Should().Contain("OrderId");
+        stocksHeader.Should().Contain("OrderId");
+    }
+
     // -- OpenTrade tests --
 
     [Fact]
@@ -114,6 +124,18 @@ public class CsvTradeLoggerTests : IDisposable
         content.Should().Contain("SUMMARY");
         content.Should().Contain("Total Trades");
         content.Should().Contain("Open");
+    }
+
+    [Fact]
+    public async Task OpenTradeAsync_WritesOrderIdInRow()
+    {
+        var trade = BuildOpenOptionsTrade();
+        await _logger.OpenTradeAsync(trade);
+
+        var content = await File.ReadAllTextAsync(
+            Path.Combine(_tempDir, "options_trades.csv"));
+
+        content.Should().Contain(trade.OrderId);
     }
 
     // -- CloseTrade tests --
@@ -186,6 +208,84 @@ public class CsvTradeLoggerTests : IDisposable
 
         content.Should().Contain("TSLA");
         content.Should().Contain("AAPL");
+    }
+
+    [Fact]
+    public async Task CloseTradeAsync_MatchesByOrderId_ClosesCorrectRowWhenTwoOpenSameSymbol()
+    {
+        // Root-cause scenario: two AMD entries on the same day — fuzzy match would pick
+        // the wrong row because symbol and direction are identical. OrderId match fixes this.
+        var trade1 = BuildOpenOptionsTrade("AMD", "AMD260620C00150000");
+        var trade2 = BuildOpenOptionsTrade("AMD", "AMD260620C00150000");
+        // trade2 opened at a slightly higher price so the rows are distinguishable in the file
+        trade2 = trade2 with { EntryPrice = 5.50m, EntryAmount = 1_100m };
+
+        await _logger.OpenTradeAsync(trade1);
+        await _logger.OpenTradeAsync(trade2);
+
+        // Close only trade2 by OrderId
+        var closedTrade2 = trade2 with
+        {
+            Status    = TradeStatus.Closed,
+            ExitPrice = 9.90m,
+            ExitAmount = 1_980m,
+            PnL = 880m,
+            PnLPercent = 80m,
+            Result = TradeOutcome.XtradesExit,
+            ClosedAt = DateTimeOffset.UtcNow
+        };
+        await _logger.CloseTradeAsync(closedTrade2);
+
+        var lines = await File.ReadAllLinesAsync(Path.Combine(_tempDir, "options_trades.csv"));
+        var dataLines = lines
+            .Skip(1)
+            .Where(l => !l.StartsWith(",,") && !string.IsNullOrWhiteSpace(l))
+            .ToList();
+
+        var openRows   = dataLines.Where(l => l.Contains(",Open,")).ToList();
+        var closedRows = dataLines.Where(l => l.Contains(",Closed,")).ToList();
+
+        openRows.Should().HaveCount(1, "trade1 should still be open");
+        closedRows.Should().HaveCount(1, "only trade2 should be closed");
+
+        openRows[0].Should().Contain(trade1.OrderId);
+        closedRows[0].Should().Contain(trade2.OrderId);
+    }
+
+    [Fact]
+    public async Task CloseTradeAsync_FallsBackToFuzzyMatch_ForPreMigrationRowWithNoOrderId()
+    {
+        // Simulate a row written before OrderId column was added (empty OrderId).
+        var trade = BuildOpenOptionsTrade() with { OrderId = "" };
+        await _logger.OpenTradeAsync(trade);
+
+        var closedTrade = trade with
+        {
+            Status = TradeStatus.Closed,
+            ExitPrice = 7.50m,
+            ExitAmount = 1_500m,
+            PnL = 510m,
+            PnLPercent = 51.5m,
+            Result = TradeOutcome.XtradesExit,
+            ClosedAt = DateTimeOffset.UtcNow
+        };
+        await _logger.CloseTradeAsync(closedTrade);
+
+        var content = await File.ReadAllTextAsync(
+            Path.Combine(_tempDir, "options_trades.csv"));
+
+        // Fuzzy match should have found and closed the row
+        content.Should().Contain("Closed");
+        content.Should().Contain("7.50");
+ 
+        // Check data rows only — the summary block contains ",,Open,0,Closed,1" which would
+        // be a false positive if we check the full file content for ",Open,"
+        var dataLines = (await File.ReadAllLinesAsync(Path.Combine(_tempDir, "options_trades.csv")))
+            .Skip(1)
+            .Where(l => !l.StartsWith(",,") && !string.IsNullOrWhiteSpace(l))
+            .ToList();
+        dataLines.Should().AllSatisfy(l => l.Should().NotContain(",Open,"),
+            "the open row should have been rewritten to Closed");
     }
 
     // -- Helpers --
