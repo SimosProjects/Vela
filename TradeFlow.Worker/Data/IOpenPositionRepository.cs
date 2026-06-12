@@ -1,4 +1,3 @@
-using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Data;
 
@@ -78,6 +77,7 @@ public class OpenPositionRepository : IOpenPositionRepository
         {
             _logger.LogError(ex, "Failed to save open position for {Symbol} OrderId: {OrderId}",
                 position.Symbol, position.OrderId);
+            throw;
         }
         finally
         {
@@ -97,6 +97,7 @@ public class OpenPositionRepository : IOpenPositionRepository
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to delete open position OrderId: {OrderId}", orderId);
+            throw;
         }
     }
 
@@ -113,6 +114,7 @@ public class OpenPositionRepository : IOpenPositionRepository
         {
             _logger.LogError(ex,
                 "Failed to update quantity for open position OrderId: {OrderId}", orderId);
+            throw;
         }
     }
 
@@ -149,16 +151,17 @@ public class OpenPositionRepository : IOpenPositionRepository
             await _db.OpenPositions
                 .Where(p => p.OrderId == orderId)
                 .ExecuteUpdateAsync(s => s
-                    .SetProperty(p => p.Quantity,     newQuantity)
-                    .SetProperty(p => p.EntryPrice,   newEntryPrice)
-                    .SetProperty(p => p.EntryAmount,  newEntryAmount)
-                    .SetProperty(p => p.StopOrderId,  newStopOrderId)
-                    .SetProperty(p => p.HasAveraged,  true), ct);
+                    .SetProperty(p => p.Quantity,    newQuantity)
+                    .SetProperty(p => p.EntryPrice,  newEntryPrice)
+                    .SetProperty(p => p.EntryAmount, newEntryAmount)
+                    .SetProperty(p => p.StopOrderId, newStopOrderId)
+                    .SetProperty(p => p.HasAveraged, true), ct);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex,
                 "Failed to update averaged position OrderId: {OrderId}", orderId);
+            throw;
         }
     }
 }
