@@ -1,3 +1,5 @@
+using Npgsql;
+using NpgsqlTypes;
 using TradeFlow.Api.Models;
 
 namespace TradeFlow.Api;
@@ -40,6 +42,9 @@ public static class DashboardEndpoints
 
         group.MapPost("/regime", OverrideRegime).WithName("OverrideRegime")
              .WithSummary("Queues a manual regime override. Applied by the Worker within 30 seconds.");
+
+        group.MapGet("/logs", GetLogs).WithName("GetWorkerLogs")
+             .WithSummary("Returns today's Worker log entries, newest first, max 100.");
     }
 
     // -- Handlers --
@@ -267,6 +272,44 @@ public static class DashboardEndpoints
             forceRegime = normalised,
             message     = $"Regime override to {normalised} queued — will apply within 30 seconds."
         });
+    }
+
+    private static async Task<IResult> GetLogs(TradeFlowDbContext db, CancellationToken ct)
+    {
+        // TodayStartUtc() returns DateTimeOffset — use directly, not .UtcDateTime.
+        // In Npgsql legacy timestamp mode, DateTime with Kind=Utc is rejected by timestamptz.
+        var todayStart = TodayStartUtc();
+        var logs       = new List<WorkerLogResponse>();
+
+        try
+        {
+            var conn = (NpgsqlConnection)db.Database.GetDbConnection();
+            if (conn.State != System.Data.ConnectionState.Open)
+                await conn.OpenAsync(ct);
+
+            await using var cmd = new NpgsqlCommand(
+                "SELECT logged_at, level, message FROM worker_logs " +
+                "WHERE logged_at >= $1 ORDER BY logged_at DESC LIMIT 20",
+                conn);
+            cmd.Parameters.Add(new NpgsqlParameter
+            {
+                Value        = todayStart,
+                NpgsqlDbType = NpgsqlDbType.TimestampTz
+            });
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+                logs.Add(new WorkerLogResponse(
+                    reader.GetFieldValue<DateTimeOffset>(0),
+                    reader.GetString(1),
+                    reader.GetString(2)));
+        }
+        catch
+        {
+            // worker_logs table absent until first Worker run — return empty list
+        }
+
+        return Results.Ok(logs);
     }
 
     // -- Helpers --

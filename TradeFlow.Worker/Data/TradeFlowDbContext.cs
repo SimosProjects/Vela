@@ -5,7 +5,7 @@ namespace TradeFlow.Worker.Data;
 /// <summary>
 /// Entity Framework Core DbContext for the TradeFlow application,
 /// representing the database session and providing access to the Alerts, TradeMetrics,
-/// and OpenPositions tables.
+/// OpenPositions, SystemState, and WorkerLogs tables.
 /// </summary>
 public class TradeFlowDbContext : DbContext
 {
@@ -155,6 +155,19 @@ public class TradeFlowDbContext : DbContext
             entity.Property(s => s.AccountBalance).HasColumnName("account_balance");
             entity.Property(s => s.OpenValue).HasColumnName("open_value");
             entity.Property(s => s.UpdatedAt).HasColumnName("updated_at");
+        });
+
+        modelBuilder.Entity<WorkerLog>(entity =>
+        {
+            // worker_logs is created and maintained by WorkerLogSink, not EF migrations.
+            entity.ToTable("worker_logs", t => t.ExcludeFromMigrations());
+            entity.HasKey(l => l.Id);
+
+            entity.Property(l => l.Id).HasColumnName("id");
+            entity.Property(l => l.LoggedAt).HasColumnName("logged_at");
+            entity.Property(l => l.Level).HasColumnName("level");
+            entity.Property(l => l.Message).HasColumnName("message");
+            entity.Property(l => l.Exception).HasColumnName("exception");
         });
     }
 }

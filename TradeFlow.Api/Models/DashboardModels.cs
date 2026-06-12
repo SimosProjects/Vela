@@ -99,3 +99,10 @@ public record ClosedTradeResponse(
     string? Outcome,
     DateTimeOffset? ClosedAt
 );
+
+/// <summary>Worker log entry returned by GET /api/dashboard/logs.</summary>
+public record WorkerLogResponse(
+    DateTimeOffset LoggedAt,
+    string Level,
+    string Message
+);

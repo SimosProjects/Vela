@@ -13,7 +13,7 @@ namespace TradeFlow.Worker.Services;
 /// </summary>
 public class SystemStateService : BackgroundService
 {
-    private const int HeartbeatIntervalSeconds = 5;
+    private const int HeartbeatIntervalSeconds = 3;
     private const int StartupDelayMs = 3000;
 
     private readonly IServiceScopeFactory _scopeFactory;
