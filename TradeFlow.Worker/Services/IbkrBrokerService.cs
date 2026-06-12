@@ -442,24 +442,19 @@ public class IbkrBrokerService : IBrokerService
             var fillQty    = state.FilledQuantity > 0 ? state.FilledQuantity : order.Quantity;
             var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
 
-            var ocaGroup    = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
             var trailStopId = orderId + 2;
-            var trailOrder  = BuildOcaTrailOrder(trailStopId, fillQty, order.TrailPercent, ocaGroup);
-
-            _connection.Client.placeOrder(trailStopId, contract, trailOrder);
-
-            // TODO: re-add LMT target order to OCA group once IBKR Level 3 options
-            // approval is granted (~July 2026). Removed due to Level 2 restriction.
-
+ 
+            var finalStopId = await PlaceTrailWithFallbackAsync(
+                order.Symbol, orderId.ToString(), trailStopId, contract,
+                fillQty, order.TrailPercent, ct);
+ 
             _logger.LogDebug(
-                "IBKR OCA group placed — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
-                fillQty, order.TrailPercent, ocaGroup);
-
-            RegisterStopOrderCallbacks(orderId, trailStopId, null);
-
+                "IBKR trail placed — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | StopId: {StopId}",
+                fillQty, order.TrailPercent, finalStopId ?? "NONE");
+ 
             return new BrokerOrderResult(
                 OrderId:       orderId.ToString(),
-                StopOrderId:   trailStopId.ToString(),
+                StopOrderId:   finalStopId,
                 TargetOrderId: null,
                 FillPrice:     fillPrice,
                 FillQuantity:  fillQty,
@@ -544,23 +539,21 @@ public class IbkrBrokerService : IBrokerService
                     _connection.Client.cancelPositions();
                 }
 
-                var ocaGroup    = $"OCA_{orderId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
                 var trailStopId = orderId + 2;
-                var trailOrder  = BuildOcaTrailOrder(trailStopId, actualLateFillQty, order.TrailPercent, ocaGroup);
-
-                _connection.Client.placeOrder(trailStopId, contract, trailOrder);
-
+ 
+                var lateFinalStopId = await PlaceTrailWithFallbackAsync(
+                    order.Symbol, orderId.ToString(), trailStopId, contract,
+                    actualLateFillQty, order.TrailPercent, ct);
+ 
                 _logger.LogDebug(
-                    "IBKR OCA group placed for late fill — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | OCA: {Oca}",
-                    actualLateFillQty, order.TrailPercent, ocaGroup);
-
-                RegisterStopOrderCallbacks(orderId, trailStopId, null);
+                    "IBKR trail placed for late fill — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | StopId: {StopId}",
+                    actualLateFillQty, order.TrailPercent, lateFinalStopId ?? "NONE");
 
                 var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
 
                 return new BrokerOrderResult(
                     OrderId:       orderId.ToString(),
-                    StopOrderId:   trailStopId.ToString(),
+                    StopOrderId:   lateFinalStopId,
                     TargetOrderId: null,
                     FillPrice:     lateFillPrice,
                     FillQuantity:  actualLateFillQty,
@@ -960,30 +953,26 @@ public class IbkrBrokerService : IBrokerService
 
         await Task.Delay(300, ct);
 
-        var contract    = BuildContract(order);
-        var newStopId   = GetNextOrderId();
-        var ocaGroup    = $"OCA_{newStopId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
-        var trailOrder  = BuildOcaTrailOrder(newStopId, quantity, newTrailPercent, ocaGroup);
-
-        _connection.Client.placeOrder(newStopId, contract, trailOrder);
-
-        // Re-wire exec callbacks so broker-side fills on the new stop still route correctly
-        if (!string.IsNullOrEmpty(entryOrderId))
+        var contract  = BuildContract(order);
+        var newStopId = GetNextOrderId();
+ 
+        var replacedStopId = await PlaceTrailWithFallbackAsync(
+            order.Symbol, entryOrderId, newStopId, contract, quantity, newTrailPercent, ct);
+ 
+        if (replacedStopId is null)
         {
-            lock (_stopMapLock)
-            {
-                _stopOrderMap[newStopId] = (entryOrderId, TradeOutcome.StoppedOut);
-            }
-
-            _connection.Wrapper.RegisterExecDetailsCallback(newStopId, fillPrice =>
-                OnStopOrderFilled(newStopId, fillPrice));
+            _logger.LogError(
+                "Trail stop replacement failed for {Symbol} — all attempts rejected. " +
+                "Position is unprotected. Manual stop required.",
+                order.Symbol);
+            return null;
         }
-
+ 
         _logger.LogDebug(
             "IBKR trail stop replaced for {Symbol} — {OldId} → {NewId} trail: {Trail}%",
-            order.Symbol, existingStopOrderId, newStopId, newTrailPercent);
-
-        return newStopId.ToString();
+            order.Symbol, existingStopOrderId, replacedStopId, newTrailPercent);
+ 
+        return replacedStopId;
     }
 
     // -- Helpers --
@@ -1160,8 +1149,115 @@ public class IbkrBrokerService : IBrokerService
             Transmit        = true,
         };
 
-    // TODO: restore when IBKR Level 3 options approval is granted (~July 2026)
-    // private static Order BuildOcaLimitOrder(int orderId, int quantity, double limitPrice, string ocaGroup) => ...
+    // Standalone trailing stop without an OCA group. Used as fallback when the OCA trail
+    // is rejected for cash-settled index options (e.g. SPX) that have different margin rules.
+    private static Order BuildStandaloneTrailOrder(int orderId, int quantity, double trailPercent) =>
+        new()
+        {
+            OrderId         = orderId,
+            Action          = "SELL",
+            OrderType       = "TRAIL",
+            TrailingPercent = trailPercent,
+            TotalQuantity   = quantity,
+            Tif             = "GTC",
+            Transmit        = true,
+        };
+ 
+    // Places an OCA trail stop and waits up to 300ms for an immediate 201 rejection.
+    // If rejected, retries as a standalone trail stop (no OCA group), the fallback path
+    // for cash-settled index options whose sell-side OCA orders are rejected by IBKR.
+    // Returns the accepted stop order ID, or null if both attempts are rejected.
+    private async Task<string?> PlaceTrailWithFallbackAsync(
+        string symbol,
+        string entryOrderId,
+        int trailStopId,
+        Contract contract,
+        int quantity,
+        double trailPercent,
+        CancellationToken ct)
+    {
+        var ocaGroup   = $"OCA_{trailStopId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+        var trailOrder = BuildOcaTrailOrder(trailStopId, quantity, trailPercent, ocaGroup);
+ 
+        var rejectionTcs = new TaskCompletionSource<string?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _connection.Wrapper.RegisterStopRejectionCallback(trailStopId, rejectionTcs);
+        _connection.Client.placeOrder(trailStopId, contract, trailOrder);
+ 
+        string? rejection = null;
+        try
+        {
+            using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            checkCts.CancelAfter(TimeSpan.FromMilliseconds(300));
+            rejection = await rejectionTcs.Task.WaitAsync(checkCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // No rejection in 300ms, OCA trail accepted
+            _connection.Wrapper.UnregisterStopRejectionCallback(trailStopId);
+        }
+ 
+        if (rejection is null)
+        {
+            RegisterTrailCallbacks(entryOrderId, trailStopId);
+            return trailStopId.ToString();
+        }
+ 
+        // OCA rejected, retry as standalone trail (no OCA group)
+        _logger.LogWarning(
+            "OCA trail stop rejected for {Symbol} StopId {StopId} — retrying as standalone trail. " +
+            "Reason: {Reason}",
+            symbol, trailStopId, rejection);
+ 
+        var standaloneId  = GetNextOrderId();
+        var standalone    = BuildStandaloneTrailOrder(standaloneId, quantity, trailPercent);
+ 
+        var standaloneTcs = new TaskCompletionSource<string?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _connection.Wrapper.RegisterStopRejectionCallback(standaloneId, standaloneTcs);
+        _connection.Client.placeOrder(standaloneId, contract, standalone);
+ 
+        string? standaloneRejection = null;
+        try
+        {
+            using var retryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            retryCts.CancelAfter(TimeSpan.FromMilliseconds(300));
+            standaloneRejection = await standaloneTcs.Task.WaitAsync(retryCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // Standalone accepted
+            _connection.Wrapper.UnregisterStopRejectionCallback(standaloneId);
+        }
+ 
+        if (standaloneRejection is null)
+        {
+            RegisterTrailCallbacks(entryOrderId, standaloneId);
+            _logger.LogInformation(
+                "Standalone trail stop placed for {Symbol} StopId {StopId} (OCA fallback).",
+                symbol, standaloneId);
+            return standaloneId.ToString();
+        }
+ 
+        _logger.LogError(
+            "All trail stop attempts rejected for {Symbol} — position is unprotected. " +
+            "Reason: {Reason}",
+            symbol, standaloneRejection);
+        return null;
+    }
+ 
+    // Registers exec callbacks for a trail stop using a string entry order ID.
+    // String version required for ReplaceTrailStopAsync where entryOrderId is a string.
+    private void RegisterTrailCallbacks(string entryOrderId, int stopId)
+    {
+        lock (_stopMapLock)
+        {
+            _stopOrderMap[stopId] = (entryOrderId, TradeOutcome.StoppedOut);
+        }
+ 
+        _connection.Wrapper.RegisterExecDetailsCallback(stopId, fillPrice =>
+            OnStopOrderFilled(stopId, fillPrice));
+    }
 
     private static Order BuildCloseOrder(int orderId, TradeRecord trade) =>
         new()

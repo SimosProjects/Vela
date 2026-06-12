@@ -10,7 +10,6 @@ namespace TradeFlow.Worker.Services;
 public class IbkrEWrapper : EWrapper
 {
     private readonly ILogger<IbkrEWrapper> _logger;
-
     private readonly Dictionary<int, TaskCompletionSource<OrderFill>> _orderCallbacks = new();
     private readonly Dictionary<int, TaskCompletionSource<string>> _accountCallbacks = new();
     private readonly Dictionary<string, TaskCompletionSource<(decimal Price, int Quantity)>> _positionCallbacks = new();
@@ -27,6 +26,10 @@ public class IbkrEWrapper : EWrapper
 
     // Batch position snapshot, accumulates all positions until positionEnd fires
     private readonly List<IbkrPosition> _allPositionsBuffer = new();
+    // Stop rejection callbacks keyed by stop order ID. Resolves when IBKR fires error 201
+    // for that order ID, enabling PlaceTrailWithFallbackAsync to detect immediate OCA rejections
+    // on cash-settled options (e.g. SPX) and retry as a standalone trail stop.
+    private readonly Dictionary<int, TaskCompletionSource<string?>> _stopRejectionCallbacks = new();
     private TaskCompletionSource<List<IbkrPosition>>? _allPositionsTcs;
      
     // Batch open orders snapshot, accumulates all orders until openOrderEnd fires
@@ -408,6 +411,24 @@ public class IbkrEWrapper : EWrapper
     }
 
     /// <summary>
+    /// Registers a callback that resolves when IBKR rejects the given order with error 201.
+    /// Used by IbkrBrokerService to detect immediate OCA trail stop rejections so a standalone
+    /// retry can be placed before PlaceOrderAsync returns.
+    /// </summary>
+    public void RegisterStopRejectionCallback(int orderId, TaskCompletionSource<string?> tcs)
+    {
+        lock (_lock) { _stopRejectionCallbacks[orderId] = tcs; }
+    }
+ 
+    /// <summary>
+    /// Removes a stop rejection callback after the check window expires without a rejection.
+    /// </summary>
+    public void UnregisterStopRejectionCallback(int orderId)
+    {
+        lock (_lock) { _stopRejectionCallbacks.Remove(orderId); }
+    }
+
+    /// <summary>
     /// Registers a callback that resolves when IBKR confirms the order is filled.
     /// </summary>
     public TaskCompletionSource<OrderFill> RegisterOrderCallback(int orderId)
@@ -485,7 +506,19 @@ public class IbkrEWrapper : EWrapper
         }
         else if (errorCode == 201)
         {
-            lock (_lock) { _rejectionReasons[id] = errorMsg; }
+            lock (_lock)
+            {
+                _rejectionReasons[id] = errorMsg;
+ 
+                // Resolve any waiting stop rejection callback so PlaceTrailWithFallbackAsync
+                // can detect the rejection and retry as a standalone trail stop.
+                if (_stopRejectionCallbacks.TryGetValue(id, out var stopRejTcs))
+                {
+                    stopRejTcs.TrySetResult(errorMsg);
+                    _stopRejectionCallbacks.Remove(id);
+                }
+            }
+ 
             _logger.LogWarning(
                 "IBKR Order rejected [201] Id {Id} — order will not execute. " +
                 "If this is a target or stop order, the position may be unprotected. Reason: {Message}",
