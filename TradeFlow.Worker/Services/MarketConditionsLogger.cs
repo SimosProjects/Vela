@@ -22,7 +22,9 @@ public class MarketConditionsLogger
     private readonly RiskEngineOptions _riskOptions;
     private readonly MarketRegimeService _regime;
     private readonly SystemStateService _systemState;
-
+    private decimal _openingSpyPrice = 0m;
+    private decimal _openingVix = 0m;
+    private DateOnly _openingDate = DateOnly.MinValue;
     private static readonly TimeZoneInfo EasternTime =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
@@ -150,14 +152,66 @@ public class MarketConditionsLogger
             // 200MA = master switch. 50MA = weekly ceiling. 20MA = daily trigger.
             var (tier, sizingMultiplier, blockCalls) = DetermineRegimeTier(
                 spy.Price, spy.Ma20, spy.Ma50, spy.Ma200, vix.Price);
-
+ 
+            var todayET          = DateOnly.FromDateTime(
+                TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
+            var isFirstCallToday = _openingDate < todayET;
+ 
+            if (isFirstCallToday)
+            {
+                // 9:20am assessment, record opening baseline for intraday shock detection
+                _openingSpyPrice = spy.Price;
+                _openingVix      = vix.Price;
+                _openingDate     = todayET;
+            }
+            else if (_openingSpyPrice > 0)
+            {
+                // Intraday checkpoint, check for a mid-session shock that warrants a one-tier
+                // step-down even if the MA cascade has not yet moved to a worse tier.
+                var spySessionDrop  = (_openingSpyPrice - spy.Price) / _openingSpyPrice * 100;
+                var vixSessionSpike = _openingVix > 0
+                    ? (vix.Price - _openingVix) / _openingVix * 100 : 0;
+ 
+                var spyShock = _riskOptions.RegimeSpyShockDownPct > 0
+                    && spySessionDrop  >= (decimal)_riskOptions.RegimeSpyShockDownPct;
+                var vixShock = _riskOptions.RegimeVixShockSpikePct > 0
+                    && vixSessionSpike >= (decimal)_riskOptions.RegimeVixShockSpikePct;
+ 
+                if ((spyShock || vixShock) && tier != RegimeTier.Bearish)
+                {
+                    var previousTier = tier;
+                    tier = tier switch
+                    {
+                        RegimeTier.Bullish => RegimeTier.Choppy,
+                        _                  => RegimeTier.Bearish
+                    };
+                    sizingMultiplier = tier switch
+                    {
+                        RegimeTier.Choppy  => (decimal)_riskOptions.RegimeChoppySizingPct,
+                        _                  => (decimal)_riskOptions.RegimeBearishSizingPct
+                    };
+                    blockCalls = tier == RegimeTier.Bearish && _riskOptions.RegimeBearishBlockCalls;
+ 
+                    _logger.LogWarning(
+                        "Intraday market shock — tier stepped from {Previous} to {New} | " +
+                        "SPY session drop: {SpyDrop:F1}% (threshold {SpyThreshold:F1}%) | " +
+                        "VIX session spike: {VixSpike:F1}% (threshold {VixThreshold:F1}%)",
+                        previousTier, tier,
+                        spySessionDrop,  _riskOptions.RegimeSpyShockDownPct,
+                        vixSessionSpike, _riskOptions.RegimeVixShockSpikePct);
+                }
+            }
+ 
             _regime.SetRegime(
                 chopScore, _riskOptions.ChopMinSignals,
                 tier, sizingMultiplier, blockCalls,
-                spy.Ma20, spy.Ma50, spy.Ma200);
-
+                spy.Ma20, spy.Ma50, spy.Ma200,
+                isIntradayCheck: !isFirstCallToday);
+ 
+            // Pass the EFFECTIVE regime values (post downgrade-only) so the heartbeat
+            // stores what is actually active, not just what was computed.
             _systemState.UpdateRegime(
-                tier.ToString(), sizingMultiplier, blockCalls,
+                _regime.Tier.ToString(), _regime.SizingMultiplier, _regime.RegimeBlockCalls,
                 spy.Price, spy.Ma20, spy.Ma50, spy.Ma200,
                 vix.Price, (decimal)vixDeltaPct, chopScore);
 
@@ -209,7 +263,7 @@ public class MarketConditionsLogger
     // -- Helpers --
 
     // Determines the three-tier regime using the MA cascade:
-    //   200MA = master switch (below = cap at Choppy minimum)
+    //   200MA = master switch (below = cap at Choppy, never full Bullish regardless of daily signals)
     //   50MA  = weekly ceiling (below = no Bullish sizing even on up days)
     //   20MA  = daily trigger (primary sizing and call gate)
     //   VIX   = confirmation layer
@@ -223,32 +277,33 @@ public class MarketConditionsLogger
         var vixBearish          = (decimal)_riskOptions.RegimeVixBearishThreshold;
         var vixChoppy           = (decimal)_riskOptions.RegimeVixChoppyThreshold;
         var below50Pct          = (decimal)_riskOptions.RegimeSpyBelow50MaPct;
-
-        // Master switch: SPY below 200MA = never full size regardless of daily signals
+ 
+        // Master switch: SPY below 200MA caps at Choppy — never Bullish regardless of daily signals.
+        // Requires VIX confirmation to escalate to Bearish.
         var belowMa200 = ma200 > 0 && spyPrice < ma200;
-
-        // Weekly ceiling: SPY below 50MA = maximum Choppy sizing
+ 
+        // Weekly ceiling: SPY below 50MA = no Bullish sizing even on up days
         var belowMa50 = ma50 > 0 && spyPrice < ma50;
-
-        // Below configurable % threshold of 50MA triggers Bearish tier
+ 
+        // Below configurable % threshold of 50MA triggers Bearish tier directly
         var wellBelowMa50 = below50Pct > 0 && ma50 > 0 &&
                             (ma50 - spyPrice) / ma50 * 100 >= below50Pct;
-
+ 
         // Daily trigger: SPY below 20MA
         var belowMa20 = ma20 > 0 && spyPrice < ma20;
-
-        if (belowMa200 || wellBelowMa50 || (belowMa50 && belowMa20 && vix >= vixBearish))
+ 
+        // Bearish: significantly below 50MA, or below 50MA + below 20MA + elevated VIX
+        if (wellBelowMa50 || (belowMa50 && belowMa20 && vix >= vixBearish))
             return (RegimeTier.Bearish, bearishMultiplier, blockCallsInBearish);
-
+ 
         if (belowMa20 && vix >= vixBearish)
             return (RegimeTier.Bearish, bearishMultiplier, blockCallsInBearish);
-
-        if (belowMa50 || (belowMa20 && vix >= vixChoppy) || vix >= vixChoppy)
+ 
+        // Choppy: below 200MA (master switch), below 50MA, below 20MA with elevated VIX,
+        // or VIX above the choppy threshold regardless of price action
+        if (belowMa200 || belowMa50 || (belowMa20 && vix >= vixChoppy) || vix >= vixChoppy)
             return (RegimeTier.Choppy, choppyMultiplier, false);
-
-        if (belowMa200)
-            return (RegimeTier.Choppy, choppyMultiplier, false);
-
+ 
         return (RegimeTier.Bullish, bullishMultiplier, false);
     }
 

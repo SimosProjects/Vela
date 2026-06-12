@@ -37,11 +37,17 @@ public class SystemStateService : BackgroundService
     private volatile bool _signalRConnected;
     private readonly Lock _regimeLock = new();
 
-    // Tracks last-known values so events only fire on change
+    // Tracks last-known override values so events only fire on change
     private bool _isPaused;
     private bool _blockCallsOverride;
     private bool _blockHighOverride;
     private bool _blockLottoOverride;
+
+    // True once the user has explicitly toggled BlockCalls from the dashboard this session.
+    // When false, the override was seeded automatically from the regime and the system is
+    // allowed to auto-clear it if the computed regime no longer requires blocking.
+    // Reset to false on every Worker startup via LoadRegimeFromDatabaseAsync.
+    private bool _blockCallsSetManually = false;
 
     /// <summary>
     /// Fired whenever the pause state read from the database differs from the
@@ -86,8 +92,10 @@ public class SystemStateService : BackgroundService
 
     /// <summary>
     /// Stores the current market regime in memory. Persisted to the database
-    /// on the next heartbeat cycle within 30 seconds.
+    /// on the next heartbeat cycle within 5 seconds.
     /// Called by MarketConditionsLogger immediately after SetRegime.
+    /// Pass the EFFECTIVE regime values (after the downgrade-only rule), not the computed ones,
+    /// so the heartbeat uses the locked-in tier for display while BlockCalls reflects reality.
     /// </summary>
     public void UpdateRegime(
         string tier,
@@ -118,7 +126,7 @@ public class SystemStateService : BackgroundService
 
     /// <summary>
     /// Stores the current SignalR connection state in memory. Persisted to the
-    /// database on the next heartbeat cycle within 30 seconds.
+    /// database on the next heartbeat cycle within 5 seconds.
     /// Called by SignalRListenerService on connect, reconnect, and disconnect.
     /// </summary>
     public void UpdateSignalRConnected(bool connected)
@@ -211,8 +219,24 @@ public class SystemStateService : BackgroundService
                     "SystemStateService: applied manual regime override to {Tier}", tier);
             }
 
+            // Auto-clear the BlockCalls override when the regime no longer requires blocking
+            // and the user has not manually set the toggle this session. This handles the case
+            // where the regime seeds BlockCalls ON at startup (e.g. Bearish) but improves
+            // mid-session to Choppy or Bullish, calls should unblock automatically rather than
+            // requiring manual dashboard intervention.
+            // Note: blockCalls here is the COMPUTED regime value (not the locked-in tier),
+            // so it reflects genuine conditions even while the tier is held conservatively.
+            if (!blockCalls && _blockCallsOverride && !_blockCallsSetManually)
+            {
+                row.BlockCallsOverride  = false;
+                _blockCallsOverride     = false;
+                BlockCallsOverrideChanged?.Invoke(false);
+                _logger.LogInformation(
+                    "Block calls override auto-cleared — {Tier} regime no longer requires blocking",
+                    tier);
+            }
+
             // Propagate pause state to execution layer if it changed since last heartbeat.
-            // Fired before the DB write so execution reflects the stored state immediately.
             var isPaused = row.IsPaused;
             if (isPaused != _isPaused)
             {
@@ -225,10 +249,13 @@ public class SystemStateService : BackgroundService
             }
 
             // Propagate block calls override to regime service if it changed.
+            // Any DB change detected here is treated as a user action, preventing subsequent
+            // auto-clears from undoing the user's explicit choice this session.
             var blockCallsOverride = row.BlockCallsOverride;
             if (blockCallsOverride != _blockCallsOverride)
             {
-                _blockCallsOverride = blockCallsOverride;
+                _blockCallsOverride    = blockCallsOverride;
+                _blockCallsSetManually = true;
                 BlockCallsOverrideChanged?.Invoke(blockCallsOverride);
                 _logger.LogWarning(
                     "Dashboard: call entries {State} via manual override",
@@ -259,7 +286,7 @@ public class SystemStateService : BackgroundService
 
             row.RegimeTier       = tier;
             row.SizingMultiplier = sizingMult;
-            row.BlockCalls       = blockCalls; // regime-driven only — override is a separate column
+            row.BlockCalls       = blockCalls;
             row.SpyPrice         = spyPrice;
             row.Ma20             = ma20;
             row.Ma50             = ma50;
@@ -298,9 +325,6 @@ public class SystemStateService : BackgroundService
             if (row is null || row.RegimeTier == "Unknown")
                 return;
 
-            // Derive blockCalls from tier + config rather than the stored value.
-            // The stored block_calls column can be stale if a previous startup wrote
-            // a default before MarketRegimeService was properly restored.
             var derivedBlockCalls = row.RegimeTier == "Bearish" && _riskOptions.RegimeBearishBlockCalls;
 
             lock (_regimeLock)
@@ -317,15 +341,12 @@ public class SystemStateService : BackgroundService
                 _chopScore        = row.ChopScore;
             }
 
-            // Restore regime to MarketRegimeService so the risk engine reflects the
-            // correct tier and call-blocking state immediately, without waiting for
-            // the 9:20am market conditions assessment.
             if (Enum.TryParse<RegimeTier>(_regimeTier, out var restoredTier))
                 _marketRegime.SetRegimeTier(restoredTier, _sizingMultiplier, derivedBlockCalls);
 
-            // Seed the block calls override from the regime on startup so the dashboard
-            // toggle initialises correctly. User can freely change it during the session.
-            // Only writes to DB if the stored override doesn't already match the regime.
+            // Seed the block calls override from the regime on startup.
+            // The _blockCallsSetManually flag is explicitly reset here so auto-clear
+            // can fire correctly during the new session if the regime improves.
             if (row.BlockCallsOverride != derivedBlockCalls)
             {
                 await db.SystemState
@@ -333,7 +354,8 @@ public class SystemStateService : BackgroundService
                     .ExecuteUpdateAsync(
                         s => s.SetProperty(x => x.BlockCallsOverride, derivedBlockCalls), ct);
 
-                _blockCallsOverride = derivedBlockCalls;
+                _blockCallsOverride    = derivedBlockCalls;
+                _blockCallsSetManually = false;
                 BlockCallsOverrideChanged?.Invoke(derivedBlockCalls);
 
                 _logger.LogInformation(
@@ -342,10 +364,10 @@ public class SystemStateService : BackgroundService
             }
             else
             {
-                _blockCallsOverride = row.BlockCallsOverride;
+                _blockCallsOverride    = row.BlockCallsOverride;
+                _blockCallsSetManually = false;
             }
 
-            // Seed high risk and lotto overrides — both active in Choppy and Bearish regimes.
             var isChoppyOrBearish = row.RegimeTier is "Choppy" or "Bearish";
 
             if (row.BlockHighOverride != isChoppyOrBearish)
