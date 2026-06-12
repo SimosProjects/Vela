@@ -100,8 +100,8 @@ builder.Services.AddSingleton(sp =>
     {
         new EntryOnlyRule(),
         new ApprovedOrHighScoreRule(riskOptions.ApprovedTraders, riskOptions.MinXScore),
-        new NoHighRiskRule(!riskOptions.AllowHigh, () => regime.IsChoppy, () => regime.ChopScore),
-        new NoLottoRule(!riskOptions.AllowLotto,   () => regime.IsChoppy, () => regime.ChopScore),
+        new NoHighRiskRule(() => regime.BlockHigh),
+        new NoLottoRule(() => regime.BlockLotto),
     };
 
     if (riskOptions.RegimeBearishBlockCalls)
@@ -243,5 +243,7 @@ var execution = host.Services.GetRequiredService<BrokerExecutionService>();
 var regime = host.Services.GetRequiredService<MarketRegimeService>();
 systemState.PauseStateChanged += isPaused => execution.IsPaused = isPaused;
 systemState.BlockCallsOverrideChanged += regime.SetBlockCallsOverride;
+systemState.BlockHighOverrideChanged  += blockHigh  => regime.SetBlockHighOverride(blockHigh);
+systemState.BlockLottoOverrideChanged += blockLotto => regime.SetBlockLottoOverride(blockLotto);
 
 host.Run();

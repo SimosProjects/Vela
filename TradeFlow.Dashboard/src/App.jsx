@@ -15,54 +15,58 @@ function useIsMobile() {
   return isMobile;
 }
 
+// Shared hook for a session toggle that seeds from a regime-derived value on page load.
+// Once the user explicitly clicks, userHasToggled = true and polling stops overriding it.
+function useSessionToggle(regimeValue, apiPath, responseKey) {
+  const [value, setValue]           = useState(false);
+  const [userHasToggled, setToggled] = useState(false);
+
+  const syncFromRegime = (regimeVal) => {
+    if (!userHasToggled && regimeVal !== undefined) setValue(regimeVal);
+  };
+
+  const toggle = async () => {
+    setToggled(true);
+    try {
+      const res  = await fetch(apiPath, { method: 'POST' });
+      const body = await res.json();
+      setValue(body[responseKey]);
+    } catch {
+      // Network error — next poll will correct
+    }
+  };
+
+  return [value, toggle, syncFromRegime];
+}
+
 export default function App() {
   const isMobile = useIsMobile();
-  const [paused, setPaused]                       = useState(false);
-  const [blockCallsOverride, setBlockCallsOverride] = useState(false);
-  const [userHasToggledCalls, setUserHasToggledCalls] = useState(false);
-  const [modalPosition, setModalPosition]         = useState(null);
-  const { data, lastUpdated, error } = usePolling(10000);
+  const [paused, setPaused]           = useState(false);
+  const [userHasToggledPause]         = useState(false);
+  const [modalPosition, setModalPosition] = useState(null);
+  const { data, lastUpdated, error }  = usePolling(10000);
+
+  const [blockCalls, onToggleBlockCalls, syncBlockCalls]   = useSessionToggle(null, '/api/dashboard/block-calls', 'blockCallsOverride');
+  const [blockHigh,  onToggleBlockHigh,  syncBlockHigh]    = useSessionToggle(null, '/api/dashboard/block-high',  'blockHighOverride');
+  const [blockLotto, onToggleBlockLotto, syncBlockLotto]   = useSessionToggle(null, '/api/dashboard/block-lotto', 'blockLottoOverride');
 
   // Sync paused from API on each poll
   useEffect(() => {
-    if (data.system?.isPaused !== undefined)
-      setPaused(data.system.isPaused);
+    if (data.system?.isPaused !== undefined) setPaused(data.system.isPaused);
   }, [data.system?.isPaused]);
 
-  // Block calls display: if the user hasn't explicitly toggled this session,
-  // show the regime-driven state on every poll. Once the user toggles, they
-  // control it freely until the dashboard is reloaded.
-  useEffect(() => {
-    if (userHasToggledCalls) return;
-    if (data.regime?.blockCalls !== undefined)
-      setBlockCallsOverride(data.regime.blockCalls);
-  }, [data.regime?.blockCalls, userHasToggledCalls]);
+  // Sync all three toggles from regime on each poll (unless user has overridden this session)
+  useEffect(() => { syncBlockCalls(data.regime?.blockCalls ?? false); },  [data.regime?.blockCalls]);
+  useEffect(() => { syncBlockHigh(data.system?.blockHighOverride ?? false); },  [data.system?.blockHighOverride]);
+  useEffect(() => { syncBlockLotto(data.system?.blockLottoOverride ?? false); }, [data.system?.blockLottoOverride]);
 
   const onTogglePause = async () => {
     try {
       const res  = await fetch('/api/dashboard/pause', { method: 'POST' });
       const body = await res.json();
       setPaused(body.isPaused);
-    } catch {
-      // Network error — leave local state as-is; next poll will correct it
-    }
+    } catch { }
   };
-
-  const onToggleBlockCalls = async () => {
-    setUserHasToggledCalls(true);
-    try {
-      const res  = await fetch('/api/dashboard/block-calls', { method: 'POST' });
-      const body = await res.json();
-      setBlockCallsOverride(body.blockCallsOverride);
-    } catch {
-      // Network error — leave local state as-is; next poll will correct it
-    }
-  };
-
-  // regime.blockCalls = regime-driven indicator (Bearish + config) — for the note only.
-  // blockCallsOverride = the actual user-controlled flag — drives the toggle.
-  // On startup the Worker seeds blockCallsOverride from the regime so they start aligned.
-  const regimeBlocksCalls = data.regime?.blockCalls ?? false;
 
   const handleConfirmClose = () => {
     // TODO: POST /api/dashboard/positions/{modalPosition.id}/close
@@ -70,14 +74,20 @@ export default function App() {
     setModalPosition(null);
   };
 
+  const regimeBlocksCalls = data.regime?.blockCalls ?? false;
+
   const layoutProps = {
     data,
     paused,
-    blockCalls: blockCallsOverride,  // toggle shows and controls the override flag only
-    regimeBlocksCalls,               // note in ControlsPanel shows regime as source when relevant
+    blockCalls,
+    regimeBlocksCalls,
+    blockHigh,
+    blockLotto,
     lastUpdated,
     onTogglePause,
     onToggleBlockCalls,
+    onToggleBlockHigh,
+    onToggleBlockLotto,
     onForceClose: pos => setModalPosition(pos),
   };
 

@@ -1,51 +1,42 @@
 namespace TradeFlow.AlertPoC.RiskEngine;
 
 /// <summary>
-/// Rejects high risk alerts when high risk trading is disabled via config or when the
-/// morning market regime classified the session as choppy.
+/// Rejects high risk alerts when the session-level block is active.
 /// High risk is defined as any options alert expiring within the current trading week
-/// but beyond 1DTE, Xtrades sometimes mislabels these as standard.
-/// Lotto (0DTE/1DTE) is handled separately by NoLottoRule and is not blocked here.
-/// Config flag acts as a permanent override; the isChoppy delegate is the dynamic daily layer.
+/// but beyond 1DTE. Xtrades sometimes mislabels these as standard.
+/// Lotto (0DTE/1DTE) is handled separately by NoLottoRule.
+/// The isBlocked delegate is driven by the dashboard toggle, seeded from the regime
+/// on startup (Choppy or Bearish seeds ON; Bullish seeds OFF).
 /// </summary>
 public class NoHighRiskRule : IRiskRule
 {
-    private readonly bool _configDisabled;
-    private readonly Func<bool> _isChoppy;
-    private readonly Func<int> _chopScore;
+    private readonly Func<bool> _isBlocked;
 
     private static readonly TimeZoneInfo EasternTime =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
-    public NoHighRiskRule(bool configDisabled, Func<bool> isChoppy, Func<int> chopScore)
+    public NoHighRiskRule(Func<bool> isBlocked)
     {
-        _configDisabled = configDisabled;
-        _isChoppy       = isChoppy;
-        _chopScore      = chopScore;
+        _isBlocked = isBlocked;
     }
 
     public RuleResult Evaluate(Alert alert)
     {
         var isHigh = alert.Risk?.ToLowerInvariant() == "high" || IsDateBasedHigh(alert);
-
         if (!isHigh)
             return RuleResult.Pass("Not a high risk trade");
 
-        if (_configDisabled)
+        if (_isBlocked())
             return RuleResult.Fail(
                 IsDateBasedHigh(alert) && alert.Risk?.ToLowerInvariant() != "high"
-                    ? "Rejected - this-week expiry option classified as high risk (AllowHigh=false)"
-                    : "Rejected - high risk trades are disabled (AllowHigh=false)");
-
-        if (_isChoppy())
-            return RuleResult.Fail(
-                $"Rejected - high risk trades disabled (choppy market, chop score {_chopScore()}/4)");
+                    ? "Rejected — this-week expiry option classified as high risk (session block active)"
+                    : "Rejected — high risk trades are blocked this session");
 
         return RuleResult.Pass("High risk trade permitted");
     }
 
     // Returns true if this options alert expires this trading week but beyond 1DTE.
-    // 0DTE and 1DTE are lotto territory and are excluded here, NoLottoRule handles those.
+    // 0DTE and 1DTE are lotto territory — NoLottoRule handles those.
     private static bool IsDateBasedHigh(Alert alert)
     {
         if (alert.Type?.ToLowerInvariant() != "options") return false;
@@ -57,12 +48,9 @@ public class NoHighRiskRule : IRiskRule
         var expiryDate = DateOnly.FromDateTime(expiry.DateTime);
         var weekEnd    = GetFridayOfWeek(todayEt);
 
-        // Beyond 1DTE but still within this trading week
         return expiryDate > todayEt.AddDays(1) && expiryDate <= weekEnd;
     }
 
-    // Returns the Friday of the week containing the given date.
-    // Saturday wraps forward to the next Friday.
     private static DateOnly GetFridayOfWeek(DateOnly date)
     {
         var day = (int)date.DayOfWeek;

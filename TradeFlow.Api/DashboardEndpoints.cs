@@ -32,6 +32,12 @@ public static class DashboardEndpoints
         group.MapPost("/block-calls", ToggleBlockCalls).WithName("ToggleBlockCalls")
              .WithSummary("Flips block_calls_override in system_state. Applied by the Worker within 30 seconds.");
 
+        group.MapPost("/block-high", ToggleBlockHigh).WithName("ToggleBlockHigh")
+             .WithSummary("Flips block_high_override in system_state. Applied by the Worker within 30 seconds.");
+
+        group.MapPost("/block-lotto", ToggleBlockLotto).WithName("ToggleBlockLotto")
+             .WithSummary("Flips block_lotto_override in system_state. Applied by the Worker within 30 seconds.");
+
         group.MapPost("/regime", OverrideRegime).WithName("OverrideRegime")
              .WithSummary("Queues a manual regime override. Applied by the Worker within 30 seconds.");
     }
@@ -95,6 +101,8 @@ public static class DashboardEndpoints
             MarketOpen:         marketOpen,
             IsPaused:           state?.IsPaused ?? false,
             BlockCallsOverride: state?.BlockCallsOverride ?? false,
+            BlockHighOverride:  state?.BlockHighOverride ?? false,
+            BlockLottoOverride: state?.BlockLottoOverride ?? false,
             WorkerHeartbeat:    state?.WorkerHeartbeat,
             LastAlertAt:        lastAlertAt
         );
@@ -201,6 +209,36 @@ public static class DashboardEndpoints
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.BlockCallsOverride, newOverride), ct);
 
         return Results.Ok(new { blockCallsOverride = newOverride });
+    }
+
+    private static async Task<IResult> ToggleBlockHigh(TradeFlowDbContext db, CancellationToken ct)
+    {
+        var state = await db.SystemState.FirstOrDefaultAsync(s => s.Id == 1, ct);
+        if (state is null)
+            return Results.NotFound("system_state row not yet initialised — is the Worker running?");
+
+        var newOverride = !state.BlockHighOverride;
+
+        await db.SystemState
+            .Where(s => s.Id == 1)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.BlockHighOverride, newOverride), ct);
+
+        return Results.Ok(new { blockHighOverride = newOverride });
+    }
+
+    private static async Task<IResult> ToggleBlockLotto(TradeFlowDbContext db, CancellationToken ct)
+    {
+        var state = await db.SystemState.FirstOrDefaultAsync(s => s.Id == 1, ct);
+        if (state is null)
+            return Results.NotFound("system_state row not yet initialised — is the Worker running?");
+
+        var newOverride = !state.BlockLottoOverride;
+
+        await db.SystemState
+            .Where(s => s.Id == 1)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.BlockLottoOverride, newOverride), ct);
+
+        return Results.Ok(new { blockLottoOverride = newOverride });
     }
 
     private static async Task<IResult> OverrideRegime(
