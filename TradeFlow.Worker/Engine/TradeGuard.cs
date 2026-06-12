@@ -436,6 +436,26 @@ public class TradeGuard
     }
 
     /// <summary>
+    /// Reverts the HasAveraged flag on a position after an averaging DB write fails.
+    /// Called by BrokerExecutionService when UpdateAverageAsync throws so the position
+    /// can be averaged again on the next alert rather than being permanently locked out.
+    /// </summary>
+    public void RevertAverage(string userName, string? contractSymbol, string symbol)
+    {
+        var matchKey = BuildMatchKey(userName, contractSymbol, symbol);
+        lock (_lock)
+        {
+            if (_openTrades.TryGetValue(matchKey, out var trade))
+            {
+                trade.HasAveraged = false;
+                _logger.LogInformation(
+                    "TradeGuard: HasAveraged reverted for {Symbol} — averaging DB write failed.",
+                    symbol);
+            }
+        }
+    }
+
+    /// <summary>
     /// Removes a position from TradeGuard by order ID.
     /// Used by StartupReconciliationService when a DB position has no matching IBKR position.
     /// </summary>

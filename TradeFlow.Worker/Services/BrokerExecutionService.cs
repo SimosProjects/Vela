@@ -263,58 +263,105 @@ public class BrokerExecutionService
                 order.UserName, order.OptionsContractSymbol, order.Symbol)!;
 
             // Populate entry execution quality metrics for CSV logging
-            trade.LatencyMs   = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds;
+            trade.LatencyMs = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds;
             trade.SlippagePct = alertedPrice > 0
                 ? (result.FillPrice - alertedPrice) / alertedPrice * 100
                 : null;
 
-            using (var scope = _scopeFactory.CreateScope())
+            try
             {
-                var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
-
-                if (isAverage)
+                using (var scope = _scopeFactory.CreateScope())
                 {
-                    // Find the existing position and update it rather than inserting a second row.
-                    // Recalculates weighted average entry price and combined quantity to match IBKR,
-                    // which merges repeated buys of the same symbol into one position.
-                    var existing = await repo.GetBySymbolAndUserAsync(trade.Symbol, trade.UserName, ct);
-
-                    if (existing is not null)
+                    var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+ 
+                    if (isAverage)
                     {
-                        var combinedQty        = existing.Quantity + trade.Quantity;
-                        var weightedEntryPrice = (existing.EntryPrice * existing.Quantity +
-                                                 trade.EntryPrice * trade.Quantity) / combinedQty;
-                        var combinedAmount     = existing.EntryAmount + trade.EntryAmount;
-
-                        await repo.UpdateAverageAsync(
-                            existing.OrderId,
-                            combinedQty,
-                            weightedEntryPrice,
-                            combinedAmount,
-                            trade.StopOrderId,
-                            ct);
-
-                        _logger.LogInformation(
-                            "Average entry merged — {Symbol} qty {OldQty}+{NewQty}={CombinedQty} " +
-                            "avg price ${AvgPrice:F2}",
-                            trade.Symbol, existing.Quantity, trade.Quantity,
-                            combinedQty, weightedEntryPrice);
+                        var existing = await repo.GetBySymbolAndUserAsync(trade.Symbol, trade.UserName, ct);
+ 
+                        if (existing is not null)
+                        {
+                            var combinedQty        = existing.Quantity + trade.Quantity;
+                            var weightedEntryPrice = (existing.EntryPrice * existing.Quantity +
+                                                     trade.EntryPrice * trade.Quantity) / combinedQty;
+                            var combinedAmount     = existing.EntryAmount + trade.EntryAmount;
+ 
+                            await repo.UpdateAverageAsync(
+                                existing.OrderId,
+                                combinedQty,
+                                weightedEntryPrice,
+                                combinedAmount,
+                                trade.StopOrderId,
+                                ct);
+ 
+                            _logger.LogInformation(
+                                "Average entry merged — {Symbol} qty {OldQty}+{NewQty}={CombinedQty} " +
+                                "avg price ${AvgPrice:F2}",
+                                trade.Symbol, existing.Quantity, trade.Quantity,
+                                combinedQty, weightedEntryPrice);
+                        }
+                        else
+                        {
+                            // No existing row found — fall back to insert
+                            _logger.LogWarning(
+                                "Average entry for {Symbol} — no existing position found, inserting as new.",
+                                trade.Symbol);
+                            await repo.SaveAsync(BuildOpenPosition(trade), ct);
+                        }
                     }
                     else
                     {
-                        // No existing row found — fall back to insert
-                        _logger.LogWarning(
-                            "Average entry for {Symbol} — no existing position found, inserting as new.",
-                            trade.Symbol);
                         await repo.SaveAsync(BuildOpenPosition(trade), ct);
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                if (isAverage)
+                {
+                    // The original position is still valid, only the average failed to persist.
+                    // Revert HasAveraged so the position can be averaged again on the next alert.
+                    _guard.RevertAverage(order.UserName, order.OptionsContractSymbol, order.Symbol);
+ 
+                    _logger.LogError(ex,
+                        "open_positions write FAILED on average entry for {Symbol}. " +
+                        "HasAveraged reverted. The average fill occurred at IBKR but is not tracked.",
+                        trade.Symbol);
+ 
+                    await _discord.NotifyCriticalAsync(
+                        $"⚠️ Average Entry Write Failed — {trade.Symbol}",
+                        $"Average fill for **{trade.Symbol}** succeeded at IBKR " +
+                        $"(${result.FillPrice:F2} × {result.FillQuantity}) " +
+                        $"but could not be saved to the database. " +
+                        $"The original position remains tracked. Error: {ex.Message}",
+                        ct);
+                }
                 else
                 {
-                    await repo.SaveAsync(BuildOpenPosition(trade), ct);
+                    // Position is in TradeGuard but not DB. Remove it now, if we don't, the next
+                    // restart will reload from DB (empty), TradeGuard will have no record of it,
+                    // and the position will be open at IBKR without any stop or exit handling.
+                    _guard.RemovePosition(trade.OrderId);
+ 
+                    _logger.LogError(ex,
+                        "CRITICAL: open_positions write FAILED for {Symbol} OrderId {OrderId}. " +
+                        "Position removed from TradeGuard. Fill occurred at IBKR but is now untracked.",
+                        trade.Symbol, trade.OrderId);
+ 
+                    await _discord.NotifyCriticalAsync(
+                        $"🚨 Position Write Failed — {trade.Symbol}",
+                        $"**{trade.Symbol}** filled at IBKR " +
+                        $"(${result.FillPrice:F2} × {result.FillQuantity}) " +
+                        $"but could not be saved to the database.\n" +
+                        $"The position has been removed from TradeFlow tracking.\n" +
+                        $"Error: {ex.Message}\n" +
+                        "Immediate manual review required — " +
+                        "position may be open at IBKR without TradeFlow stop protection.",
+                        ct);
                 }
+ 
+                return;
             }
-
+ 
             await _csv.OpenTradeAsync(trade, ct);
 
             _logger.LogInformation(
