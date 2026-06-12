@@ -27,18 +27,24 @@ public class CsvTradeLogger
         "Symbol,Contract,Direction,Strike,Expiration," +
         "Contracts,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %," +
         "Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %," +
-        "Status,Result,UserName,XScore,DiscordRank,P&L,P&L %";
+        "Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId";
 
     private static readonly string StocksHeader =
         "Date Opened,Time Opened,Date Closed,Time Closed," +
         "Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %," +
         "Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %," +
-        "Status,Result,UserName,XScore,DiscordRank,P&L,P&L %";
+        "Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId";
 
     // XScore column index per trade type, used to recover the value from existing rows
     // when LoadFromDatabase resets it to 0 on Worker restart.
-    private const int OptionsXScoreCol = 21;
-    private const int StocksXScoreCol  = 17;
+    private const int OptionsXScoreCol  = 21;
+    private const int StocksXScoreCol   = 17;
+
+    // OrderId column index per trade type, used for reliable row matching on close.
+    // Rows written before this column was added have no value here and fall back to
+    // the fuzzy symbol+direction/quantity match for backward compatibility.
+    private const int OptionsOrderIdCol = 25;
+    private const int StocksOrderIdCol  = 21;
 
     public CsvTradeLogger(
         IConfiguration config,
@@ -98,7 +104,9 @@ public class CsvTradeLogger
     }
 
     /// <summary>
-    /// Finds the matching open row by symbol and rewrites it with exit data, then updates the summary.
+    /// Finds the matching open row and rewrites it with exit data, then updates the summary.
+    /// Matches by OrderId first (reliable). Falls back to fuzzy symbol+direction/quantity match
+    /// for rows written before the OrderId column was added.
     /// </summary>
     public async Task CloseTradeAsync(TradeRecord trade, CancellationToken ct = default)
     {
@@ -182,7 +190,7 @@ public class CsvTradeLogger
     // -- Helpers --
 
     // Reads all closed trades from a single CSV file for today and sums their P&L.
-    // Options pnlIdx=22, Stocks pnlIdx=18 — both shifted by 1 to account for XScore column.
+    // Options pnlIdx=23, Stocks pnlIdx=19 — indices stable; OrderId is appended after P&L%.
     private static async Task<decimal> ReadTodayPnLFromFileAsync(
         string path,
         TradeType tradeType,
@@ -371,7 +379,8 @@ public class CsvTradeLogger
                 t.UserName ?? "",
                 xScore,
                 rank,
-                "", "");
+                "", "",
+                t.OrderId ?? "");
         }
         else
         {
@@ -391,7 +400,8 @@ public class CsvTradeLogger
                 t.UserName ?? "",
                 xScore,
                 rank,
-                "", "");
+                "", "",
+                t.OrderId ?? "");
         }
     }
 
@@ -432,7 +442,8 @@ public class CsvTradeLogger
                 xScore,
                 rank,
                 $"{pnlSign}{t.PnL:F2}",
-                $"{pnlSign}{t.PnLPercent:F2}%");
+                $"{pnlSign}{t.PnLPercent:F2}%",
+                t.OrderId ?? "");
         }
         else
         {
@@ -457,7 +468,8 @@ public class CsvTradeLogger
                 xScore,
                 rank,
                 $"{pnlSign}{t.PnL:F2}",
-                $"{pnlSign}{t.PnLPercent:F2}%");
+                $"{pnlSign}{t.PnLPercent:F2}%",
+                t.OrderId ?? "");
         }
     }
 
@@ -486,6 +498,7 @@ public class CsvTradeLogger
 
         var exitPriceCol = trade.TradeType == TradeType.Options ? 14 : 10;
         var xScoreCol    = trade.TradeType == TradeType.Options ? OptionsXScoreCol : StocksXScoreCol;
+        var orderIdCol   = trade.TradeType == TradeType.Options ? OptionsOrderIdCol : StocksOrderIdCol;
 
         for (var i = 0; i < lines.Length; i++)
         {
@@ -494,37 +507,57 @@ public class CsvTradeLogger
 
             var cols = lines[i].Split(',');
 
-            if (cols.Length > 4 &&
-                cols[4] == trade.Symbol &&
-                (trade.TradeType == TradeType.Options
+            // Match by OrderId first, reliable for rows written with this version.
+            // Rows written before the OrderId column was added have no value here and
+            // fall through to the fuzzy match for backward compatibility.
+            var matchedByOrderId = !string.IsNullOrEmpty(trade.OrderId)
+                && cols.Length > orderIdCol
+                && cols[orderIdCol] == trade.OrderId;
+ 
+            // Fuzzy match applies only to pre-migration rows that have no OrderId.
+            // A row that already carries an OrderId must be matched by that OrderId
+            // falling through to fuzzy would close the wrong row when multiple open
+            // positions share the same symbol and direction.
+            var rowHasOrderId  = cols.Length > orderIdCol && !string.IsNullOrEmpty(cols[orderIdCol]);
+            var matchedByFuzzy = !matchedByOrderId
+                && !rowHasOrderId
+                && cols.Length > 4
+                && cols[4] == trade.Symbol
+                && (trade.TradeType == TradeType.Options
                     ? cols[6] == (trade.Direction ?? "")
-                    : cols[5] == trade.Quantity.ToString()) &&
-                cols.Length > exitPriceCol && string.IsNullOrEmpty(cols[exitPriceCol]))
+                    : cols[5] == trade.Quantity.ToString())
+                && cols.Length > exitPriceCol
+                && string.IsNullOrEmpty(cols[exitPriceCol]);
+
+            if (!matchedByOrderId && !matchedByFuzzy) continue;
+
+            if (matchedByFuzzy)
+                _logger.LogDebug(
+                    "CSV close: matched {Symbol} by fuzzy key (pre-migration row without OrderId)",
+                    trade.Symbol);
+
+            // Recover entry metrics from the open row when not carried in TradeGuard.
+            if (trade.LatencyMs is null && cols.Length > 12 &&
+                int.TryParse(cols[12], out var ms))
+                trade.LatencyMs = ms;
+
+            if (trade.SlippagePct is null && cols.Length > 13 &&
+                decimal.TryParse(cols[13].TrimEnd('%').TrimStart('+'),
+                    NumberStyles.Any, CultureInfo.InvariantCulture, out var sp))
+                trade.SlippagePct = sp;
+
+            // Preserve the xScore from the open row when LoadFromDatabase reset it to 0.
+            if (trade.XScore == 0m && cols.Length > xScoreCol &&
+                decimal.TryParse(cols[xScoreCol], NumberStyles.Any,
+                    CultureInfo.InvariantCulture, out var existingXScore) &&
+                existingXScore > 0m)
             {
-                if (trade.LatencyMs is null && cols.Length > 12 &&
-                    int.TryParse(cols[12], out var ms))
-                    trade.LatencyMs = ms;
-
-                if (trade.SlippagePct is null && cols.Length > 13 &&
-                    decimal.TryParse(cols[13].TrimEnd('%').TrimStart('+'),
-                        NumberStyles.Any, CultureInfo.InvariantCulture, out var sp))
-                    trade.SlippagePct = sp;
-
-                // Preserve the xScore from the open row when LoadFromDatabase reset it to 0.
-                // Xtrades sometimes omits xScore in specific alerts; if it was correctly
-                // recorded on entry, carry it forward rather than overwriting with 0.
-                if (trade.XScore == 0m && cols.Length > xScoreCol &&
-                    decimal.TryParse(cols[xScoreCol], NumberStyles.Any,
-                        CultureInfo.InvariantCulture, out var existingXScore) &&
-                    existingXScore > 0m)
-                {
-                    trade.XScore = existingXScore;
-                }
-
-                lines[i] = BuildClosedRow(trade);
-                updated  = true;
-                break;
+                trade.XScore = existingXScore;
             }
+
+            lines[i] = BuildClosedRow(trade);
+            updated  = true;
+            break;
         }
 
         if (!updated)
