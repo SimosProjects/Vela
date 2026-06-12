@@ -40,6 +40,8 @@ public class SystemStateService : BackgroundService
     // Tracks last-known values so events only fire on change
     private bool _isPaused;
     private bool _blockCallsOverride;
+    private bool _blockHighOverride;
+    private bool _blockLottoOverride;
 
     /// <summary>
     /// Fired whenever the pause state read from the database differs from the
@@ -53,6 +55,18 @@ public class SystemStateService : BackgroundService
     /// from the last-known value. Wired to MarketRegimeService at the composition root.
     /// </summary>
     public event Action<bool>? BlockCallsOverrideChanged;
+
+    /// <summary>
+    /// Fired whenever the block high risk override read from the database differs
+    /// from the last-known value. Wired to MarketRegimeService at the composition root.
+    /// </summary>
+    public event Action<bool>? BlockHighOverrideChanged;
+
+    /// <summary>
+    /// Fired whenever the block lotto override read from the database differs
+    /// from the last-known value. Wired to MarketRegimeService at the composition root.
+    /// </summary>
+    public event Action<bool>? BlockLottoOverrideChanged;
 
     public SystemStateService(
         IServiceScopeFactory scopeFactory,
@@ -221,6 +235,28 @@ public class SystemStateService : BackgroundService
                     blockCallsOverride ? "BLOCKED" : "unblocked");
             }
 
+            // Propagate block high override if it changed.
+            var blockHighOverride = row.BlockHighOverride;
+            if (blockHighOverride != _blockHighOverride)
+            {
+                _blockHighOverride = blockHighOverride;
+                BlockHighOverrideChanged?.Invoke(blockHighOverride);
+                _logger.LogWarning(
+                    "Dashboard: high risk entries {State} via manual override",
+                    blockHighOverride ? "BLOCKED" : "unblocked");
+            }
+
+            // Propagate block lotto override if it changed.
+            var blockLottoOverride = row.BlockLottoOverride;
+            if (blockLottoOverride != _blockLottoOverride)
+            {
+                _blockLottoOverride = blockLottoOverride;
+                BlockLottoOverrideChanged?.Invoke(blockLottoOverride);
+                _logger.LogWarning(
+                    "Dashboard: lotto entries {State} via manual override",
+                    blockLottoOverride ? "BLOCKED" : "unblocked");
+            }
+
             row.RegimeTier       = tier;
             row.SizingMultiplier = sizingMult;
             row.BlockCalls       = blockCalls; // regime-driven only — override is a separate column
@@ -306,8 +342,48 @@ public class SystemStateService : BackgroundService
             }
             else
             {
-                // DB already matches — sync local tracking without writing
                 _blockCallsOverride = row.BlockCallsOverride;
+            }
+
+            // Seed high risk and lotto overrides — both active in Choppy and Bearish regimes.
+            var isChoppyOrBearish = row.RegimeTier is "Choppy" or "Bearish";
+
+            if (row.BlockHighOverride != isChoppyOrBearish)
+            {
+                await db.SystemState
+                    .Where(s => s.Id == 1)
+                    .ExecuteUpdateAsync(
+                        s => s.SetProperty(x => x.BlockHighOverride, isChoppyOrBearish), ct);
+
+                _blockHighOverride = isChoppyOrBearish;
+                BlockHighOverrideChanged?.Invoke(isChoppyOrBearish);
+
+                _logger.LogInformation(
+                    "SystemStateService: block high override seeded to {Value} from {Tier} regime on startup",
+                    isChoppyOrBearish, row.RegimeTier);
+            }
+            else
+            {
+                _blockHighOverride = row.BlockHighOverride;
+            }
+
+            if (row.BlockLottoOverride != isChoppyOrBearish)
+            {
+                await db.SystemState
+                    .Where(s => s.Id == 1)
+                    .ExecuteUpdateAsync(
+                        s => s.SetProperty(x => x.BlockLottoOverride, isChoppyOrBearish), ct);
+
+                _blockLottoOverride = isChoppyOrBearish;
+                BlockLottoOverrideChanged?.Invoke(isChoppyOrBearish);
+
+                _logger.LogInformation(
+                    "SystemStateService: block lotto override seeded to {Value} from {Tier} regime on startup",
+                    isChoppyOrBearish, row.RegimeTier);
+            }
+            else
+            {
+                _blockLottoOverride = row.BlockLottoOverride;
             }
 
             _logger.LogInformation(

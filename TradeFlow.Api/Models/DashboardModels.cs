@@ -56,6 +56,8 @@ public record SystemStatusResponse(
     bool MarketOpen,
     bool IsPaused,
     bool BlockCallsOverride,
+    bool BlockHighOverride,
+    bool BlockLottoOverride,
     DateTimeOffset? WorkerHeartbeat,
     DateTimeOffset? LastAlertAt
 );

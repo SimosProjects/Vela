@@ -11,6 +11,8 @@ public class MarketRegimeService
     private volatile RegimeTier _tier = RegimeTier.Bullish;
     private volatile bool _blockCalls = false;
     private volatile bool _blockCallsOverride = false;
+    private volatile bool _blockHighOverride = false;
+    private volatile bool _blockLottoOverride = false;
     private decimal _ma20 = 0m;
     private decimal _ma50 = 0m;
     private decimal _ma200 = 0m;
@@ -39,15 +41,24 @@ public class MarketRegimeService
 
     /// <summary>
     /// When true, call option entries are blocked for the session.
-    /// Controlled entirely by the dashboard toggle. The regime seeds the initial value
-    /// on startup but the user can freely override it in either direction.
+    /// Controlled entirely by the dashboard toggle. The regime seeds the initial
+    /// value on startup but the user can freely override it in either direction.
     /// </summary>
     public bool BlockCalls => _blockCallsOverride;
 
     /// <summary>
-    /// Whether the dashboard has manually overridden call blocking.
-    /// Independent of the regime-driven block — survives regime changes.
+    /// When true, high risk entries (expiring this week beyond 1DTE) are blocked.
+    /// Seeded from regime on startup (Choppy or Bearish = true). User-controllable.
     /// </summary>
+    public bool BlockHigh => _blockHighOverride;
+
+    /// <summary>
+    /// When true, lotto entries (0DTE/1DTE) are blocked for the session.
+    /// Seeded from regime on startup (Choppy or Bearish = true). User-controllable.
+    /// </summary>
+    public bool BlockLotto => _blockLottoOverride;
+
+    /// <summary>Whether the dashboard has manually overridden call blocking.</summary>
     public bool BlockCallsOverride => _blockCallsOverride;
 
     /// <summary>SPY 20-day moving average as of this morning's open.</summary>
@@ -118,7 +129,6 @@ public class MarketRegimeService
     /// <summary>
     /// Applies a manual block calls override from the dashboard, independent of regime tier.
     /// When true, call entries are rejected regardless of the current regime.
-    /// Cleared by toggling off from the dashboard.
     /// </summary>
     public void SetBlockCallsOverride(bool blockCalls)
     {
@@ -126,6 +136,30 @@ public class MarketRegimeService
         _logger.LogInformation(
             "Block calls override {State} via dashboard",
             blockCalls ? "enabled" : "disabled");
+    }
+
+    /// <summary>
+    /// Applies a manual high risk block override from the dashboard.
+    /// When true, high risk entries (this-week expiry beyond 1DTE) are rejected.
+    /// </summary>
+    public void SetBlockHighOverride(bool blockHigh)
+    {
+        _blockHighOverride = blockHigh;
+        _logger.LogInformation(
+            "Block high risk override {State} via dashboard",
+            blockHigh ? "enabled" : "disabled");
+    }
+
+    /// <summary>
+    /// Applies a manual lotto block override from the dashboard.
+    /// When true, lotto entries (0DTE/1DTE) are rejected.
+    /// </summary>
+    public void SetBlockLottoOverride(bool blockLotto)
+    {
+        _blockLottoOverride = blockLotto;
+        _logger.LogInformation(
+            "Block lotto override {State} via dashboard",
+            blockLotto ? "enabled" : "disabled");
     }
 }
 

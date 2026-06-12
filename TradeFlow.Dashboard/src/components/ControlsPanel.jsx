@@ -32,10 +32,27 @@ function Toggle({ on, onChange }) {
   );
 }
 
-/// Session Controls panel — fully controlled from App.jsx.
-/// blockCalls: the override flag (toggle controls this).
-/// regimeBlocksCalls: whether the regime seeded the initial ON state (for sublabel only).
-export function ControlsPanel({ blockCalls = false, regimeBlocksCalls = false, paused = false, onTogglePause, onToggleBlockCalls }) {
+function ToggleRow({ label, sublabel, on, onChange }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+      <div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: on ? B.am : B.tx }}>{label}</div>
+        <div style={{ fontSize: 11, color: B.mu, marginTop: 1 }}>{sublabel}</div>
+      </div>
+      <Toggle on={on} onChange={onChange} />
+    </div>
+  );
+}
+
+/// Session Controls panel — all three toggles fully controlled from App.jsx.
+/// regimeBlocksCalls: whether Bearish regime drove the initial block calls state (for sublabel).
+export function ControlsPanel({
+  blockCalls = false, regimeBlocksCalls = false,
+  blockHigh  = false,
+  blockLotto = false,
+  paused     = false,
+  onTogglePause, onToggleBlockCalls, onToggleBlockHigh, onToggleBlockLotto,
+}) {
   return (
     <Card>
       <div style={{
@@ -49,34 +66,38 @@ export function ControlsPanel({ blockCalls = false, regimeBlocksCalls = false, p
         Session Controls
       </div>
 
-      {/* Block Calls toggle — toggle is the single source of truth */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-        <div>
-          <div style={{ fontSize: 12, fontWeight: 600, color: blockCalls ? B.am : B.tx }}>
-            Block call entries
-          </div>
-          <div style={{ fontSize: 11, color: B.mu, marginTop: 1 }}>
-            {blockCalls
-              ? regimeBlocksCalls ? 'Active — seeded by Bearish regime' : 'Manual override active'
-              : 'Calls allowed'}
-          </div>
-        </div>
-        <Toggle on={blockCalls} onChange={onToggleBlockCalls} />
-      </div>
+      <ToggleRow
+        label="Block call entries"
+        sublabel={blockCalls
+          ? regimeBlocksCalls ? 'Active — seeded by Bearish regime' : 'Manual override active'
+          : 'Calls allowed'}
+        on={blockCalls}
+        onChange={onToggleBlockCalls}
+      />
 
       {blockCalls && (
-        <div style={{
-          marginTop: 8,
-          padding: '5px 8px',
-          borderRadius: 4,
-          background: 'rgba(210,153,34,0.07)',
-          border: `1px solid rgba(210,153,34,0.22)`,
-          fontSize: 11,
-          color: B.am,
-        }}>
+        <div style={{ marginTop: 6, padding: '4px 8px', borderRadius: 4, background: 'rgba(210,153,34,0.07)', border: `1px solid rgba(210,153,34,0.22)`, fontSize: 11, color: B.am }}>
           ⚠ New call entries will be rejected by the risk engine
         </div>
       )}
+
+      <div style={{ height: '0.5px', background: B.bd, margin: '10px 0' }} />
+
+      <ToggleRow
+        label="Block high risk"
+        sublabel={blockHigh ? 'This-week expiry entries blocked' : 'High risk allowed'}
+        on={blockHigh}
+        onChange={onToggleBlockHigh}
+      />
+
+      <div style={{ height: '0.5px', background: B.bd, margin: '10px 0' }} />
+
+      <ToggleRow
+        label="Block lotto (0DTE/1DTE)"
+        sublabel={blockLotto ? '0DTE and 1DTE entries blocked' : 'Lotto allowed'}
+        on={blockLotto}
+        onChange={onToggleBlockLotto}
+      />
 
       <div style={{ height: '0.5px', background: B.bd, margin: '12px 0' }} />
 
@@ -101,13 +122,7 @@ export function ControlsPanel({ blockCalls = false, regimeBlocksCalls = false, p
           transition: 'all 0.15s',
         }}
       >
-        <span style={{
-          width: 7,
-          height: 7,
-          borderRadius: '50%',
-          background: paused ? B.rd : B.gr,
-          flexShrink: 0,
-        }} />
+        <span style={{ width: 7, height: 7, borderRadius: '50%', background: paused ? B.rd : B.gr, flexShrink: 0 }} />
         {paused ? 'RESUME TRADING' : 'PAUSE TRADING'}
       </button>
 

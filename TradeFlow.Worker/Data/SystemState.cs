@@ -26,17 +26,14 @@ public class SystemState
     // Consumed and cleared by SystemStateService on its next heartbeat tick.
     [System.ComponentModel.DataAnnotations.Schema.Column("force_regime")]
     public string? ForceRegime { get; set; }
-
-    // System status, updated every 30 seconds
     public bool IsPaused { get; set; }
     public bool BlockCallsOverride { get; set; }
+    public bool BlockHighOverride  { get; set; }
+    public bool BlockLottoOverride { get; set; }
     public bool IbkrConnected { get; set; }
     public bool SignalRConnected { get; set; }
     public DateTimeOffset? WorkerHeartbeat { get; set; }
-
-    // Account snapshot, updated every 30 seconds
     public decimal? AccountBalance { get; set; }
     public decimal? OpenValue { get; set; }
-
     public DateTimeOffset UpdatedAt { get; set; }
 }

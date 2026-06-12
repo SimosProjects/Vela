@@ -13,7 +13,13 @@ import { MarketClosedBanner }  from '../components/banners/MarketClosedBanner.js
 import { PausedBanner }        from '../components/banners/PausedBanner.jsx';
 import { LogPanel }            from '../components/LogPanel.jsx';
 
-export function DesktopLayout({ data, paused, blockCalls, regimeBlocksCalls, onTogglePause, onToggleBlockCalls, onForceClose, lastUpdated }) {
+export function DesktopLayout({
+  data, paused,
+  blockCalls, regimeBlocksCalls,
+  blockHigh, blockLotto,
+  onTogglePause, onToggleBlockCalls, onToggleBlockHigh, onToggleBlockLotto,
+  onForceClose, lastUpdated,
+}) {
   const { timestamp, positions, closedToday, regime, account, riskConfig, traders, system } = data;
   const marketOpen = system?.marketOpen ?? true;
   const { width }  = useWindowSize();
@@ -47,11 +53,19 @@ export function DesktopLayout({ data, paused, blockCalls, regimeBlocksCalls, onT
             <ControlsPanel
               blockCalls={blockCalls}
               regimeBlocksCalls={regimeBlocksCalls}
+              blockHigh={blockHigh}
+              blockLotto={blockLotto}
               paused={paused}
               onTogglePause={onTogglePause}
               onToggleBlockCalls={onToggleBlockCalls}
+              onToggleBlockHigh={onToggleBlockHigh}
+              onToggleBlockLotto={onToggleBlockLotto}
             />
-            <RiskConfig config={riskConfig} />
+            <RiskConfig
+              config={riskConfig}
+              blockHigh={blockHigh}
+              blockLotto={blockLotto}
+            />
             <AlertSourcePanel system={system} />
             <BrokerPanel system={system} />
             <TraderRoster traders={traders} minXScore={riskConfig.minXScore} />
