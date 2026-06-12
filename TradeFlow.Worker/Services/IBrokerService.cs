@@ -28,11 +28,26 @@ public interface IBrokerService
         CancellationToken ct = default);
 
     /// <summary>
-    /// Returns the full snapshot of all positions currently held in the IBKR account.
-    /// Used by startup reconciliation to detect shorts and verify DB positions against reality.
-    /// Returns an empty list if the broker is unavailable or the request times out.
+    /// Returns a snapshot of all positions currently held in the IBKR account.
+    /// TimedOut=true means Gateway did not respond — the caller must not treat an empty
+    /// position list as confirmation the account is flat. TimedOut=false with an empty list
+    /// means Gateway confirmed no positions are held.
     /// </summary>
-    Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct = default);
+    Task<PositionsSnapshot> GetAllPositionsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns a snapshot of all open orders in the IBKR account.
+    /// TimedOut=true means Gateway did not respond within the timeout window.
+    /// TimedOut=false with an empty list means no open orders exist.
+    /// </summary>
+    Task<OrdersSnapshot> GetAllOpenOrdersAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns true if the given order ID was placed and is tracked by TradeFlow this session.
+    /// Used by StartupReconciliationService to classify open orders as managed vs unknown.
+    /// Always returns false in NullBrokerService (no orders placed in simulation).
+    /// </summary>
+    bool IsKnownOrder(int orderId);
 
     /// <summary>
     /// Returns the current market price for any symbol using a snapshot quote.
@@ -73,7 +88,6 @@ public interface IBrokerService
     /// <summary>
     /// Cancels an existing trail stop and places a new one with a tighter trail percentage.
     /// Called when post-fill slippage is elevated, to protect the position more aggressively.
-    /// The new stop uses the same entry order mapping so broker-side fills are still routed correctly.
     /// Returns the new stop order ID, or null if the replacement fails.
     /// </summary>
     Task<string?> ReplaceTrailStopAsync(
@@ -97,13 +111,11 @@ public interface IBrokerService
 
     /// <summary>
     /// Subscribes a handler that fires when a broker-side stop or target order fills.
-    /// The handler receives the entry order ID, fill price, and trade outcome.
     /// </summary>
     void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler);
 
     /// <summary>
     /// Fetches daily OHLCV bars for a stock symbol from the broker's historical data feed.
-    /// Used by MarketConditionsLogger to compute moving averages and ADX without Yahoo Finance.
     /// Returns an empty list if the broker is unavailable or data cannot be retrieved.
     /// </summary>
     Task<List<HistoricalBar>> GetHistoricalBarsAsync(
@@ -111,6 +123,19 @@ public interface IBrokerService
         int barCount,
         CancellationToken ct = default);
 }
+
+/// <summary>
+/// Snapshot of all positions held in the IBKR account.
+/// TimedOut=true indicates Gateway did not respond, callers must not treat an empty
+/// Positions list as confirmation the account is flat in this case.
+/// </summary>
+public record PositionsSnapshot(List<IbkrPosition> Positions, bool TimedOut);
+
+/// <summary>
+/// Snapshot of all open orders in the IBKR account.
+/// TimedOut=true indicates Gateway did not respond within the timeout window.
+/// </summary>
+public record OrdersSnapshot(List<IbkrOpenOrder> Orders, bool TimedOut);
 
 /// <summary>
 /// A single position held in the IBKR account, returned by GetAllPositionsAsync.
@@ -122,3 +147,16 @@ public record IbkrPosition(
     string? LocalSymbol,
     int Quantity,
     decimal AvgCost);
+
+/// <summary>
+/// A single open order in the IBKR account, returned by GetAllOpenOrdersAsync.
+/// </summary>
+public record IbkrOpenOrder(
+    int OrderId,
+    string Symbol,
+    string SecType,
+    string? LocalSymbol,
+    string Action,
+    string OrderType,
+    double Quantity,
+    string Status);

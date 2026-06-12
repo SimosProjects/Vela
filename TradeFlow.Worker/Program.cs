@@ -153,6 +153,10 @@ builder.Services.AddHostedService<PositionMonitorService>();
 builder.Services.AddHostedService<AlertPollingService>();
 builder.Services.AddHostedService<SignalRListenerService>();
 
+// Periodic position reconciliation, IBKR only, runs every 30 min during market hours
+if (ibkrEnabled)
+    builder.Services.AddHostedService<PeriodicReconciliationService>();
+
 var host = builder.Build();
 
 // Startup sequence: connect to Gateway, wait for session ready, sync order IDs,
@@ -189,24 +193,30 @@ using (var scope = host.Services.CreateScope())
     var guard = host.Services.GetRequiredService<TradeGuard>();
 
     var positions = await repo.GetAllAsync();
-    if (positions.Count > 0)
+ 
+    // Manual positions are tracking-only, they must not enter TradeGuard.
+    // BrokerExecutionService and PositionMonitorService only manage positions in TradeGuard,
+    // so manual positions are never accidentally acted on.
+    var managedPositions = positions.Where(p => !p.IsManual).ToList();
+ 
+    if (managedPositions.Count > 0)
     {
-        var orderIds = positions
+        var orderIds = managedPositions
             .Select(p => p.OrderId)
             .ToHashSet();
-
+ 
         var xScores = await db.TradeMetrics
             .Where(t => orderIds.Contains(t.Id))
             .ToDictionaryAsync(t => t.Id, t => t.XScore ?? 0m);
-
-        guard.LoadFromDatabase(positions, xScores);
-
+ 
+        guard.LoadFromDatabase(managedPositions, xScores);
+ 
         // Re-register stop/target callbacks for restored positions so broker-side
         // trail stop and target fills are detected correctly after a restart
         if (ibkrEnabled)
         {
             var broker = host.Services.GetRequiredService<IbkrBrokerService>();
-            broker.ReRegisterStopCallbacks(positions);
+            broker.ReRegisterStopCallbacks(managedPositions);
         }
     }
 }
