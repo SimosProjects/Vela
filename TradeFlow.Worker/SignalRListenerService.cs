@@ -318,32 +318,35 @@ public class SignalRListenerService : BackgroundService
                 riskResult.Approved ? "APPROVED" : $"REJECTED: {riskResult.Reason}");
         }
 
+        // Dedup check before execution: if the alert ID already exists in the DB, the polling
+        // path already processed this alert. Skip execution entirely to prevent a second
+        // market sell on the same exit from creating a ghost short.
+        using var scope = _scopeFactory.CreateScope();
+        var repository = scope.ServiceProvider.GetRequiredService<IAlertRepository>();
+        var entity     = AlertMapper.ToEntity(normalized, riskResult);
+ 
+        var existingIds = await repository.GetExistingAlertIdsAsync([entity.Id], stoppingToken);
+        if (existingIds.Contains(entity.Id))
+        {
+            _logger.LogDebug(
+                "SignalR alert {Id} already processed by polling path — skipping duplicate.",
+                entity.Id);
+            return;
+        }
+ 
         if (riskResult.Approved)
         {
             await _discord.NotifyApprovedAlertAsync(normalized, classification, stoppingToken);
-
+ 
             if (normalized.Side?.ToLower() is "bto")
                 await _execution.HandleEntryAsync(normalized, classification, isAverage: false, stoppingToken);
             else if (normalized.Side?.ToLower() is "avg")
                 await _execution.HandleEntryAsync(normalized, classification, isAverage: true, stoppingToken);
         }
-
+ 
         if (normalized.Side?.ToLower() is "stc" or "btc")
             await _execution.HandleExitAsync(normalized, stoppingToken);
-
-        using var scope = _scopeFactory.CreateScope();
-        var repository = scope.ServiceProvider.GetRequiredService<IAlertRepository>();
-
-        var entity = AlertMapper.ToEntity(normalized, riskResult);
-
-        var existingIds = await repository.GetExistingAlertIdsAsync([entity.Id], stoppingToken);
-
-        if (existingIds.Contains(entity.Id))
-        {
-            _logger.LogDebug("SignalR alert {Id} already exists. Skipping.", entity.Id);
-            return;
-        }
-
+ 
         await repository.SaveManyAsync([entity], stoppingToken);
     }
 
