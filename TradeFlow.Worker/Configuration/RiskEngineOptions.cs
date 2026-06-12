@@ -184,4 +184,16 @@ public class RiskEngineOptions
     // regardless of 20MA position. 0 = disabled.
     [Range(0, 10)]
     public double RegimeSpyBelow50MaPct { get; init; } = 0.0;
+
+    // SPY intraday drop percentage from the session open that triggers a one-tier step-down
+    // at the next checkpoint, independent of the MA cascade. 0 = disabled.
+    // Example: 2.0 means SPY dropping 2% from 9:20am forces Bullish → Choppy or Choppy → Bearish.
+    [Range(0, 20)]
+    public double RegimeSpyShockDownPct { get; init; } = 2.0;
+
+    // VIX intraday spike percentage from the session open that triggers a one-tier step-down
+    // at the next checkpoint, independent of the MA cascade. 0 = disabled.
+    // Example: 20.0 means VIX spiking 20% from 9:20am opening level forces a tier step-down.
+    [Range(0, 100)]
+    public double RegimeVixShockSpikePct { get; init; } = 20.0;
 }
