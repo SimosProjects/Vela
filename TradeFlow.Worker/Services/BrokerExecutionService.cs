@@ -73,25 +73,33 @@ public class BrokerExecutionService
             return;
         }
 
-        if (_riskOptions.AlertStalenessMaxSlippagePct > 0 && alertedPrice > 0)
+        // Stock entries use a tighter staleness threshold, the intent is to enter near
+        // the alerted price or not at all. Options tolerate a wider window since they
+        // move faster and the limit order provides the real price protection.
+        var isStockEntry = classification.Category == AlertCategory.StockEntry;
+        var maxStaleness = isStockEntry && _riskOptions.StockAlertStalenessMaxSlippagePct > 0
+            ? _riskOptions.StockAlertStalenessMaxSlippagePct
+            : _riskOptions.AlertStalenessMaxSlippagePct;
+
+        if (maxStaleness > 0 && alertedPrice > 0)
         {
             var priceAtAlertTime = alert.ActualPriceAtTimeOfAlert ?? 0m;
             if (priceAtAlertTime > 0)
             {
                 var staleness = (alertedPrice - priceAtAlertTime) / priceAtAlertTime * 100;
-                if (staleness > _riskOptions.AlertStalenessMaxSlippagePct)
+                if (staleness > maxStaleness)
                 {
                     _logger.LogWarning(
                         "Alert staleness check failed for {Symbol} — PricePaid ${Paid:F2} " +
-                        "vs alert price ${AlertPrice:F2} ({Staleness:F1}%) exceeds max {Max:F1}%",
+                        "vs alert price ${AlertPrice:F2} ({Staleness:F1}%) exceeds {TradeType} max {Max:F1}%",
                         alert.Symbol, alertedPrice, priceAtAlertTime,
-                        staleness, _riskOptions.AlertStalenessMaxSlippagePct);
+                        staleness, isStockEntry ? "stock" : "options", maxStaleness);
                     return;
                 }
 
                 _logger.LogDebug(
-                    "Alert staleness check passed for {Symbol} — {Staleness:F1}% within {Max:F1}% limit",
-                    alert.Symbol, staleness, _riskOptions.AlertStalenessMaxSlippagePct);
+                    "Alert staleness check passed for {Symbol} — {Staleness:F1}% within {TradeType} limit {Max:F1}%",
+                    alert.Symbol, staleness, isStockEntry ? "stock" : "options", maxStaleness);
             }
         }
 
@@ -107,9 +115,13 @@ public class BrokerExecutionService
         var blocked = await _guard.CheckAsync(order, ct);
         if (blocked is not null)
         {
-            _logger.LogWarning(
-                "TradeGuard blocked order for {Symbol}: {Reason}",
-                alert.Symbol, blocked);
+            if (blocked.IsRoutine)
+                _logger.LogDebug(
+                    "TradeGuard: {Reason}", blocked.Reason);
+            else
+                _logger.LogWarning(
+                    "TradeGuard blocked order for {Symbol}: {Reason}",
+                    alert.Symbol, blocked.Reason);
             return;
         }
 
@@ -134,11 +146,32 @@ public class BrokerExecutionService
 
             if (result.Status == OrderStatus.Rejected || result.Status == OrderStatus.Cancelled)
             {
-                _logger.LogWarning(
-                    "Broker rejected order for {Symbol} — {Reason}",
-                    alert.Symbol,
-                    result.RejectionReason ?? result.Status.ToString());
-                return;
+                // IBKR price-protection rejection on a stock limit order — retry once with a
+                // limit anchored to the market price IBKR reported in the rejection message.
+                // No extra roundtrip: the market price is extracted from the rejection itself.
+                if (result.Status == OrderStatus.Cancelled &&
+                    order.LimitPrice.HasValue &&
+                    TryParsePriceProtectionMarketPrice(result.RejectionReason, out var marketPrice))
+                {
+                    result = await RetryWithMarketAnchoredLimitAsync(
+                        order, result, alertedPrice, marketPrice, ct);
+
+                    if (result.Status == OrderStatus.Rejected || result.Status == OrderStatus.Cancelled)
+                    {
+                        _logger.LogWarning(
+                            "Broker rejected retry order for {Symbol} — {Reason}",
+                            alert.Symbol, result.RejectionReason ?? result.Status.ToString());
+                        return;
+                    }
+                    // Fall through to normal fill recording
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Broker rejected order for {Symbol} — {Reason}",
+                        alert.Symbol, result.RejectionReason ?? result.Status.ToString());
+                    return;
+                }
             }
 
             if (result.Status == OrderStatus.Pending)
@@ -173,13 +206,25 @@ public class BrokerExecutionService
                 };
 
                 var (positionPrice, positionQty) = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
-
+ 
+                if (positionPrice <= 0 || positionQty <= 0)
+                {
+                    // First check returned nothing, IBKR may not have propagated the fill yet.
+                    // Retry once after a short delay before concluding no fill.
+                    _logger.LogWarning(
+                        "Position not confirmed for {Symbol} on first check — waiting 5s and retrying.",
+                        alert.Symbol);
+ 
+                    await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                    (positionPrice, positionQty) = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
+                }
+ 
                 if (positionPrice <= 0 || positionQty <= 0)
                 {
                     _logger.LogWarning(
-                        "Gateway shows no long position for {Symbol} after timeout (price={Price} qty={Qty}) — " +
-                        "order not recorded.",
-                        alert.Symbol, positionPrice, positionQty);
+                        "Position not confirmed in Gateway for {Symbol} after timeout — " +
+                        "order not recorded to prevent ghost position.",
+                        alert.Symbol);
                     return;
                 }
 
@@ -558,60 +603,121 @@ public class BrokerExecutionService
 
     // -- Helpers --
 
-    private async Task<BrokerOrderResult> TightenTrailOnElevatedSlippageAsync(
-            TradeOrder order,
-            BrokerOrderResult result,
-            decimal alertedPrice,
-            CancellationToken ct)
+    // Parses the market price stored by IbkrEWrapper when IBKR fires a price-protection [202]
+    // rejection. Format: "PRICE_PROTECTION:267.2"
+    private static bool TryParsePriceProtectionMarketPrice(string? reason, out decimal marketPrice)
+    {
+        marketPrice = 0m;
+        const string prefix = "PRICE_PROTECTION:";
+        if (reason is null || !reason.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        return decimal.TryParse(reason[prefix.Length..], System.Globalization.NumberStyles.Any,
+            System.Globalization.CultureInfo.InvariantCulture, out marketPrice) && marketPrice > 0;
+    }
+
+    // Recalculates the stock limit relative to the market price IBKR reported in its rejection
+    // and retries PlaceOrderAsync once. The new limit is capped at the original alert-price
+    // ceiling so we still reject if the stock has moved too far from the alerted level.
+    private async Task<BrokerOrderResult> RetryWithMarketAnchoredLimitAsync(
+        TradeOrder order,
+        BrokerOrderResult originalResult,
+        decimal alertedPrice,
+        decimal marketPrice,
+        CancellationToken ct)
+    {
+        // Back-calculate effective slippage pct from the original limit so the retry works
+        // correctly for all risk tiers (stock, options standard/high/lotto) without needing
+        // to know which tier's config value to apply.
+        var effectiveSlippagePct = alertedPrice > 0
+            ? (order.LimitPrice!.Value - alertedPrice) / alertedPrice * 100m
+            : 0m;
+ 
+        var adjustedLimit = Math.Round(
+            marketPrice * (1m + effectiveSlippagePct / 100m), 2);
+ 
+        // The original limit IS the alert ceiling — it was set as alertPrice × (1 + slippage%).
+        // If the market moved up, adjustedLimit > original limit, meaning price ran away.
+        // Only retry when the market dropped and we can get a tighter, acceptable fill.
+        var alertCeiling = order.LimitPrice!.Value;
+ 
+        if (adjustedLimit > alertCeiling)
         {
-            if (_riskOptions.PostFillSlippageWarningPct <= 0
-                || _riskOptions.HighSlippageTrailPct <= 0
-                || alertedPrice <= 0
-                || result.StopOrderId is null)
-                return result;
-
-            var slippagePct = (result.FillPrice - alertedPrice) / alertedPrice * 100;
-
-            if (slippagePct <= (decimal)_riskOptions.PostFillSlippageWarningPct)
-                return result;
-
-            // Take the tighter of the configured high-slippage trail and the current trail.
-            // HighSlippageTrailPct targets options (e.g. 25%) but a stock position may already
-            // carry a trail of 10-20%. Replacing with 25% would loosen the stop rather than
-            // tighten it, so we cap at whichever percentage is already more protective.
-            var newTrailPct = Math.Min(order.TrailPercent, _riskOptions.HighSlippageTrailPct);
-
-            if (newTrailPct >= order.TrailPercent)
-            {
-                _logger.LogDebug(
-                    "Elevated slippage for {Symbol} — current trail {Trail}% is already tighter " +
-                    "than high-slippage trail {HighTrail}%, no replacement needed.",
-                    order.Symbol, order.TrailPercent, _riskOptions.HighSlippageTrailPct);
-                return result;
-            }
-
             _logger.LogWarning(
-                "Elevated post-fill slippage for {Symbol} — {Slippage:F1}% above alert price. " +
-                "Tightening trail from {OldTrail}% to {NewTrail}%.",
-                order.Symbol, slippagePct, order.TrailPercent, newTrailPct);
-
-            var newStopId = await _broker.ReplaceTrailStopAsync(
-                result.StopOrderId,
-                result.FillQuantity,
-                order,
-                newTrailPct,
-                ct);
-
-            if (newStopId is null)
-            {
-                _logger.LogWarning(
-                    "Trail stop replacement failed for {Symbol} — original trail remains active.",
-                    order.Symbol);
-                return result;
-            }
-
-            return result with { StopOrderId = newStopId };
+                "Price-protection retry skipped for {Symbol} — adjusted limit ${AdjLimit:F2} " +
+                "exceeds alert ceiling ${Ceiling:F2}, price moved too far from alert.",
+                order.Symbol, adjustedLimit, alertCeiling);
+            return originalResult;
         }
+
+        _logger.LogInformation(
+            "Retrying {Symbol} with market-anchored limit ${NewLimit:F2} " +
+            "(was ${OldLimit:F2}, IBKR market ${Market:F2})",
+            order.Symbol, adjustedLimit, order.LimitPrice!.Value, marketPrice);
+
+        try
+        {
+            return await _broker.PlaceOrderAsync(order with { LimitPrice = adjustedLimit }, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Price-protection retry failed for {Symbol}", order.Symbol);
+            return originalResult;
+        }
+    }
+
+    private async Task<BrokerOrderResult> TightenTrailOnElevatedSlippageAsync(
+        TradeOrder order,
+        BrokerOrderResult result,
+        decimal alertedPrice,
+        CancellationToken ct)
+    {
+        if (_riskOptions.PostFillSlippageWarningPct <= 0
+            || _riskOptions.HighSlippageTrailPct <= 0
+            || alertedPrice <= 0
+            || result.StopOrderId is null)
+            return result;
+
+        var slippagePct = (result.FillPrice - alertedPrice) / alertedPrice * 100;
+
+        if (slippagePct <= (decimal)_riskOptions.PostFillSlippageWarningPct)
+            return result;
+
+        // Take the tighter of the configured high-slippage trail and the current trail.
+        // HighSlippageTrailPct targets options (e.g. 25%) but a stock position may already
+        // carry a trail of 10-20%. Replacing with 25% would loosen the stop rather than
+        // tighten it, so we cap at whichever percentage is already more protective.
+        var newTrailPct = Math.Min(order.TrailPercent, _riskOptions.HighSlippageTrailPct);
+
+        if (newTrailPct >= order.TrailPercent)
+        {
+            _logger.LogDebug(
+                "Elevated slippage for {Symbol} — current trail {Trail}% is already tighter " +
+                "than high-slippage trail {HighTrail}%, no replacement needed.",
+                order.Symbol, order.TrailPercent, _riskOptions.HighSlippageTrailPct);
+            return result;
+        }
+
+        _logger.LogWarning(
+            "Elevated post-fill slippage for {Symbol} — {Slippage:F1}% above alert price. " +
+            "Tightening trail from {OldTrail}% to {NewTrail}%.",
+            order.Symbol, slippagePct, order.TrailPercent, newTrailPct);
+
+        var newStopId = await _broker.ReplaceTrailStopAsync(
+            result.StopOrderId,
+            result.FillQuantity,
+            order,
+            newTrailPct,
+            ct);
+
+        if (newStopId is null)
+        {
+            _logger.LogWarning(
+                "Trail stop replacement failed for {Symbol} — original trail remains active.",
+                order.Symbol);
+            return result;
+        }
+
+        return result with { StopOrderId = newStopId };
+    }
 
     private static OpenPosition BuildOpenPosition(TradeRecord trade) => new()
     {

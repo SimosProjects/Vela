@@ -3,6 +3,13 @@ using TradeFlow.Worker.Models;
 
 namespace TradeFlow.Worker.Engine;
 
+/// <summary>
+/// Returned by CheckAsync when an order is blocked. IsRoutine distinguishes
+/// expected concurrent-path duplicates (polling + SignalR race) from genuine
+/// policy blocks that the operator should act on.
+/// </summary>
+public record TradeGuardBlock(string Reason, bool IsRoutine = false);
+
 // Enforces trading safety rules before any order is placed.
 // Rules checked in order:
 //   1. Symbol already open — prevents doubled exposure on same underlying
@@ -144,33 +151,44 @@ public class TradeGuard
     }
 
     /// <summary>
-    /// Returns null if the order is allowed, or a rejection reason string if blocked.
+    /// Returns null if the order is allowed, or a TradeGuardBlock describing why it was blocked.
+    /// IsRoutine on the block indicates whether this is an expected concurrent-path duplicate
+    /// (polling + SignalR race) rather than a genuine policy violation worth operator attention.
     /// Checks position limits, exposure caps, and the daily loss limit in sequence.
     /// If all checks pass, atomically reserves a slot for this symbol so concurrent
     /// ingestion paths cannot both pass the per-symbol cap before either registers.
     /// The caller must call ReleaseReservation on any failure path before RegisterOpen.
     /// Uses cached balance and open positions value, no IBKR round trips on the hot path.
     /// </summary>
-    public async Task<string?> CheckAsync(TradeOrder order, CancellationToken ct = default)
+    public async Task<TradeGuardBlock?> CheckAsync(TradeOrder order, CancellationToken ct = default)
     {
         // -- Position checks under lock --
-        string? positionBlock = null;
+        TradeGuardBlock? positionBlock = null;
         lock (_lock)
         {
             if (!order.IsAverage)
             {
                 // Count both confirmed open positions and pending reservations to prevent
                 // concurrent paths from both passing the cap before either registers.
-                _pendingReservations.TryGetValue(order.Symbol, out var pendingCount);
-                var symbolCount = _openTrades.Values
+                var openCount = _openTrades.Values
                     .Count(t => string.Equals(
-                        t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase))
-                    + pendingCount;
+                        t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
+                _pendingReservations.TryGetValue(order.Symbol, out var pendingCount);
+                var symbolCount = openCount + pendingCount;
 
                 if (symbolCount >= _maxPositionsPerSymbol)
-                    positionBlock =
-                        $"Max positions per symbol reached for {order.Symbol} " +
-                        $"({symbolCount}/{_maxPositionsPerSymbol})";
+                {
+                    // Distinguish a concurrent-path duplicate (pending reservation, no confirmed
+                    // open position) from a genuine cap on confirmed holdings. Only the latter
+                    // warrants operator attention.
+                    var isRoutineDuplicate = openCount == 0 && pendingCount > 0;
+                    positionBlock = isRoutineDuplicate
+                        ? new TradeGuardBlock(
+                            $"Entry in progress for {order.Symbol} on concurrent path — duplicate blocked",
+                            IsRoutine: true)
+                        : new TradeGuardBlock(
+                            $"Max positions per symbol reached for {order.Symbol} ({symbolCount}/{_maxPositionsPerSymbol})");
+                }
             }
 
             if (positionBlock is null)
@@ -180,13 +198,16 @@ public class TradeGuard
                 if (_openTrades.TryGetValue(matchKey, out var existing))
                 {
                     if (!order.IsAverage)
-                        positionBlock = $"Position already open for {order.Symbol} — use averaging";
+                        positionBlock = new TradeGuardBlock(
+                            $"Position already open for {order.Symbol} — use averaging");
                     else if (existing.HasAveraged)
-                        positionBlock = $"Already averaged into {order.Symbol} — only one average allowed";
+                        positionBlock = new TradeGuardBlock(
+                            $"Already averaged into {order.Symbol} — only one average allowed");
                 }
                 else if (order.IsAverage)
                 {
-                    positionBlock = $"No open position found for {order.Symbol} — cannot average";
+                    positionBlock = new TradeGuardBlock(
+                        $"No open position found for {order.Symbol} — cannot average");
                 }
             }
 
@@ -222,10 +243,10 @@ public class TradeGuard
             if (order.BudgetUsed > deployableRemaining)
             {
                 ReleaseReservation(order);
-                return
+                return new TradeGuardBlock(
                     $"Daily exposure cap reached — need ${order.BudgetUsed:F2}, " +
                     $"deployable ${deployableRemaining:F2} " +
-                    $"(cap ${maxDailyDeployment:F2}, today open ${todayOpenedValue:F2})";
+                    $"(cap ${maxDailyDeployment:F2}, today open ${todayOpenedValue:F2})");
             }
 
             if (order.TradeType == TradeType.Stock && _stockDailyAllocationPct > 0)
@@ -236,10 +257,10 @@ public class TradeGuard
                 if (order.BudgetUsed + todayStockValue > maxStockDeployment)
                 {
                     ReleaseReservation(order);
-                    return
+                    return new TradeGuardBlock(
                         $"Stock daily allocation cap reached — need ${order.BudgetUsed:F2}, " +
                         $"stock deployable ${Math.Max(0, maxStockDeployment - todayStockValue):F2} " +
-                        $"(stock cap ${maxStockDeployment:F2}, stock open today ${todayStockValue:F2})";
+                        $"(stock cap ${maxStockDeployment:F2}, stock open today ${todayStockValue:F2})");
                 }
             }
 
@@ -247,9 +268,9 @@ public class TradeGuard
             if (order.BudgetUsed > available)
             {
                 ReleaseReservation(order);
-                return
+                return new TradeGuardBlock(
                     $"Insufficient available balance — need ${order.BudgetUsed:F2}, " +
-                    $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})";
+                    $"available ${available:F2} (balance ${balance:F2}, open ${openValue:F2})");
             }
         }
 
@@ -270,9 +291,9 @@ public class TradeGuard
                     regimeLabel, todayPnl, effectiveLimit);
 
                 ReleaseReservation(order);
-                return
+                return new TradeGuardBlock(
                     $"Daily loss limit reached ({regimeLabel} regime) — " +
-                    $"today's realized P&L ${todayPnl:F2} (limit ${effectiveLimit:F2})";
+                    $"today's realized P&L ${todayPnl:F2} (limit ${effectiveLimit:F2})");
             }
         }
 
