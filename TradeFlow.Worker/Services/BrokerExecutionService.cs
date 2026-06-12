@@ -384,12 +384,12 @@ public class BrokerExecutionService
         CancellationToken ct = default)
     {
         var alertReceivedAt = DateTimeOffset.UtcNow;
-
+ 
         var trade = _guard.FindOpenTrade(
             alert.UserName ?? "",
             alert.OptionsContractSymbol,
             alert.Symbol ?? "");
-
+ 
         if (trade is null)
         {
             _logger.LogDebug(
@@ -397,7 +397,18 @@ public class BrokerExecutionService
                 alert.Symbol);
             return;
         }
-
+ 
+        // Single-closer election: mark the position as closing before touching the broker.
+        // If another concurrent path (polling + SignalR race) already marked it, abort here
+        // to prevent both submitting market sells and creating a ghost short on the second fill.
+        if (!_guard.TryMarkClosing(alert.UserName ?? "", alert.OptionsContractSymbol, alert.Symbol ?? ""))
+        {
+            _logger.LogInformation(
+                "Exit for {Symbol} already in progress on a concurrent path — skipping duplicate.",
+                alert.Symbol);
+            return;
+        }
+ 
         BrokerOrderResult closeResult;
         try
         {
@@ -405,8 +416,22 @@ public class BrokerExecutionService
         }
         catch (Exception ex)
         {
+            _guard.RevertClosing(alert.UserName ?? "", alert.OptionsContractSymbol, alert.Symbol ?? "");
             _logger.LogError(ex,
                 "Broker ClosePositionAsync failed for {Symbol}, skipping", alert.Symbol);
+            return;
+        }
+ 
+        // A Pending result means ClosePositionAsync double-timed out. The stop is already
+        // cancelled at IBKR but the position may still be open. Do not record a close —
+        // the position remains in TradeGuard and open_positions for reconciliation.
+        if (closeResult.Status == OrderStatus.Pending)
+        {
+            _guard.RevertClosing(alert.UserName ?? "", alert.OptionsContractSymbol, alert.Symbol ?? "");
+            _logger.LogWarning(
+                "Close order timed out for {Symbol} — position may still be open at IBKR. " +
+                "Not recording close to prevent data loss. Manual reconciliation required.",
+                alert.Symbol);
             return;
         }
 
@@ -476,6 +501,16 @@ public class BrokerExecutionService
         _logger.LogInformation(
             "Force closing {Symbol} — Outcome: {Outcome}", trade.Symbol, outcome);
 
+        // Single-closer election: mark before broker call to prevent a concurrent exit alert
+        // from also closing this position while the force-close market sell is in flight.
+        if (!_guard.TryMarkClosing(trade.UserName, trade.OptionsContract, trade.Symbol))
+        {
+            _logger.LogInformation(
+                "Force close for {Symbol} skipped — already being closed on a concurrent path.",
+                trade.Symbol);
+            return;
+        }
+ 
         BrokerOrderResult closeResult;
         try
         {
@@ -483,11 +518,22 @@ public class BrokerExecutionService
         }
         catch (Exception ex)
         {
+            _guard.RevertClosing(trade.UserName, trade.OptionsContract, trade.Symbol);
             _logger.LogError(ex,
                 "Broker ClosePositionAsync failed during force close for {Symbol}", trade.Symbol);
             return;
         }
-
+ 
+        if (closeResult.Status == OrderStatus.Pending)
+        {
+            _guard.RevertClosing(trade.UserName, trade.OptionsContract, trade.Symbol);
+            _logger.LogWarning(
+                "Force close timed out for {Symbol} — position may still be open at IBKR. " +
+                "Not recording close to prevent data loss. Manual reconciliation required.",
+                trade.Symbol);
+            return;
+        }
+ 
         var closedTrade = _guard.RegisterClose(
             trade.UserName,
             trade.OptionsContract,

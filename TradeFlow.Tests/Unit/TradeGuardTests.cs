@@ -285,4 +285,66 @@ public class TradeGuardTests
         result.Reason.Should().Contain("Max positions per symbol reached");
         result.IsRoutine.Should().BeFalse("a confirmed stock position blocking an option entry is a real cap");
     }
+
+    // -- Single-closer election tests --
+ 
+    [Fact]
+    public void TryMarkClosing_ReturnsTrueForOpenPosition()
+    {
+        var order = BuildOrder();
+        _guard.RegisterOpen(order, BuildResult());
+ 
+        var result = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+ 
+        result.Should().BeTrue();
+    }
+ 
+    [Fact]
+    public void TryMarkClosing_ReturnsFalseWhenPositionNotFound()
+    {
+        var result = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+ 
+        result.Should().BeFalse("no position exists to close");
+    }
+ 
+    [Fact]
+    public void TryMarkClosing_ReturnsFalseWhenAlreadyClosing()
+    {
+        var order = BuildOrder();
+        _guard.RegisterOpen(order, BuildResult());
+ 
+        _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+        var secondAttempt = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+ 
+        secondAttempt.Should().BeFalse("concurrent path already claimed the close");
+    }
+ 
+    [Fact]
+    public void RevertClosing_AllowsSubsequentTryMarkClosing()
+    {
+        var order = BuildOrder();
+        _guard.RegisterOpen(order, BuildResult());
+ 
+        _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+        _guard.RevertClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+ 
+        var retryResult = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+ 
+        retryResult.Should().BeTrue("closing mark was reverted — position available again");
+    }
+ 
+    [Fact]
+    public void RegisterClose_ClearsClosingMark()
+    {
+        var order = BuildOrder();
+        _guard.RegisterOpen(order, BuildResult());
+ 
+        _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+        _guard.RegisterClose("TestTrader", "TSLA260620C00450000", "TSLA", 8.20m, TradeOutcome.XtradesExit);
+ 
+        // After RegisterClose the position is gone, TryMarkClosing should return false
+        var afterClose = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
+ 
+        afterClose.Should().BeFalse("position no longer exists after close");
+    }
 }

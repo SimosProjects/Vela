@@ -44,9 +44,13 @@ public class TradeGuard
     // In-memory open positions, keyed by match key (userName + contractSymbol or symbol)
     private readonly Dictionary<string, TradeRecord> _openTrades = new();
 
+    // Tracks positions currently being closed by an exit path. The single-closer election
+    // in BrokerExecutionService calls TryMarkClosing before placing a close order, preventing
+    // concurrent polling + SignalR exit paths from both submitting market sells on the same
+    // position and creating a ghost short on the second fill.
+    private readonly HashSet<string> _closingKeys = new();
+
     // Tracks symbols reserved by CheckAsync but not yet confirmed by RegisterOpen.
-    // Counted alongside _openTrades so concurrent ingestion paths cannot both pass
-    // the per-symbol cap before either has called RegisterOpen.
     private readonly Dictionary<string, int> _pendingReservations = new();
 
     private readonly Lock _lock = new();
@@ -168,8 +172,6 @@ public class TradeGuard
         {
             if (!order.IsAverage)
             {
-                // Count both confirmed open positions and pending reservations to prevent
-                // concurrent paths from both passing the cap before either registers.
                 var openCount = _openTrades.Values
                     .Count(t => string.Equals(
                         t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
@@ -178,9 +180,6 @@ public class TradeGuard
 
                 if (symbolCount >= _maxPositionsPerSymbol)
                 {
-                    // Distinguish a concurrent-path duplicate (pending reservation, no confirmed
-                    // open position) from a genuine cap on confirmed holdings. Only the latter
-                    // warrants operator attention.
                     var isRoutineDuplicate = openCount == 0 && pendingCount > 0;
                     positionBlock = isRoutineDuplicate
                         ? new TradeGuardBlock(
@@ -211,8 +210,6 @@ public class TradeGuard
                 }
             }
 
-            // Reserve the slot atomically while still under the lock.
-            // Cleared by RegisterOpen on success or ReleaseReservation on any failure path.
             if (positionBlock is null && !order.IsAverage)
             {
                 _pendingReservations.TryGetValue(order.Symbol, out var reservedCount);
@@ -338,7 +335,6 @@ public class TradeGuard
                 return;
             }
 
-            // Clear the slot reserved during CheckAsync now that the position is confirmed.
             if (!order.IsAverage && _pendingReservations.TryGetValue(order.Symbol, out var reservedCount))
             {
                 if (reservedCount <= 1)
@@ -377,6 +373,34 @@ public class TradeGuard
                 "TradeGuard: position opened — {Symbol} | open positions: {Count}",
                 order.Symbol, _openTrades.Count);
         }
+    }
+
+    /// <summary>
+    /// Atomically marks a position as closing under the lock. Returns true if the mark
+    /// succeeded and the caller may proceed with the broker close. Returns false if the
+    /// position is already being closed by another concurrent path (polling + SignalR race)
+    /// or no longer exists. The caller must call RevertClosing on any failure path.
+    /// </summary>
+    public bool TryMarkClosing(string userName, string? contractSymbol, string symbol)
+    {
+        var matchKey = BuildMatchKey(userName, contractSymbol, symbol);
+        lock (_lock)
+        {
+            if (!_openTrades.ContainsKey(matchKey)) return false;
+            if (_closingKeys.Contains(matchKey))    return false;
+            _closingKeys.Add(matchKey);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Removes the closing mark set by TryMarkClosing. Called when a broker close fails
+    /// or times out so the position is available for a subsequent close attempt.
+    /// </summary>
+    public void RevertClosing(string userName, string? contractSymbol, string symbol)
+    {
+        var matchKey = BuildMatchKey(userName, contractSymbol, symbol);
+        lock (_lock) { _closingKeys.Remove(matchKey); }
     }
 
     /// <summary>
@@ -431,6 +455,7 @@ public class TradeGuard
             }
 
             _openTrades.Remove(key);
+            _closingKeys.Remove(key);
             _logger.LogInformation(
                 "TradeGuard: removed position OrderId {OrderId} from memory.", orderId);
         }
@@ -463,7 +488,8 @@ public class TradeGuard
     }
 
     /// <summary>
-    /// Called when a position closes. Removes it from open trades and populates exit data.
+    /// Called when a position closes. Removes it from open trades and clears the closing mark.
+    /// Populates exit data on the returned TradeRecord for CSV and Discord logging.
     /// </summary>
     public TradeRecord? RegisterClose(
         string userName,
@@ -497,6 +523,7 @@ public class TradeGuard
             trade.Result     = outcome;
 
             _openTrades.Remove(matchKey);
+            _closingKeys.Remove(matchKey);
             return trade;
         }
     }
