@@ -27,4 +27,5 @@ public class OpenPosition
     public DateTimeOffset OpenedAt { get; set; }
     public bool IsAverage { get; set; }
     public bool HasAveraged { get; set; }
+    public bool IsManual { get; set; }
 }

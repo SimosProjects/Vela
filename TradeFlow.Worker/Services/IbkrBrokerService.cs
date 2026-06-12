@@ -179,13 +179,13 @@ public class IbkrBrokerService : IBrokerService
         }
     }
 
-    public async Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct = default)
+    public async Task<PositionsSnapshot> GetAllPositionsAsync(CancellationToken ct = default)
     {
-        if (!EnsureConnected()) return [];
-
+        if (!EnsureConnected()) return new PositionsSnapshot([], false);
+ 
         var tcs = _connection.Wrapper.RegisterAllPositionsCallback();
         _connection.Client.reqPositions();
-
+ 
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -193,18 +193,54 @@ public class IbkrBrokerService : IBrokerService
             var positions = await tcs.Task.WaitAsync(cts.Token);
             _logger.LogDebug(
                 "IBKR GetAllPositions — {Count} positions received", positions.Count);
-            return positions;
+            return new PositionsSnapshot(positions, false);
         }
         catch (OperationCanceledException)
         {
             _logger.LogWarning("IBKR GetAllPositions timed out.");
             _connection.Wrapper.UnregisterAllPositionsCallback();
-            return [];
+            return new PositionsSnapshot([], true);
         }
         finally
         {
             _connection.Client.cancelPositions();
         }
+    }
+
+    public async Task<OrdersSnapshot> GetAllOpenOrdersAsync(CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return new OrdersSnapshot([], false);
+ 
+        var tcs = _connection.Wrapper.RegisterAllOpenOrdersCallback();
+        // reqAllOpenOrders returns orders from all API sessions, not just the current one.
+        // Trail stop orders placed in previous sessions appear here, which is what we need
+        // to correctly classify managed vs unknown orders at startup.
+        _connection.Client.reqAllOpenOrders();
+ 
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(30));
+            var orders = await tcs.Task.WaitAsync(cts.Token);
+            _logger.LogDebug(
+                "IBKR GetAllOpenOrders — {Count} orders received", orders.Count);
+            return new OrdersSnapshot(orders, false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("IBKR GetAllOpenOrders timed out.");
+            _connection.Wrapper.UnregisterAllOpenOrdersCallback();
+            return new OrdersSnapshot([], true);
+        }
+    }
+ 
+    /// <summary>
+    /// Returns true if the given order ID is tracked in the stop/target order map,
+    /// meaning TradeFlow placed it and is managing it this session.
+    /// </summary>
+    public bool IsKnownOrder(int orderId)
+    {
+        lock (_stopMapLock) { return _stopOrderMap.ContainsKey(orderId); }
     }
 
     /// <summary>

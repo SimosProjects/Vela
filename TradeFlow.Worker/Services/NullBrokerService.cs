@@ -65,14 +65,29 @@ public class NullBrokerService : IBrokerService
     }
 
     /// <summary>
-    /// Returns an empty list, no Gateway available in simulation.
-    /// StartupReconciliationService skips reconciliation when this returns empty.
+    /// Returns an empty snapshot with TimedOut=false, confirming no positions in simulation.
+    /// StartupReconciliationService will proceed normally, DB positions (if any) are treated
+    /// as ghosts since no IBKR account is available to verify against.
     /// </summary>
-    public Task<List<IbkrPosition>> GetAllPositionsAsync(CancellationToken ct = default)
+    public Task<PositionsSnapshot> GetAllPositionsAsync(CancellationToken ct = default)
     {
-        _logger.LogDebug("[NullBroker] GetAllPositions -> empty (simulation)");
-        return Task.FromResult(new List<IbkrPosition>());
+        _logger.LogDebug("[NullBroker] GetAllPositions -> empty snapshot (simulation)");
+        return Task.FromResult(new PositionsSnapshot([], false));
     }
+
+    /// <summary>
+    /// Returns an empty snapshot with TimedOut=false. No orders in simulation.
+    /// </summary>
+    public Task<OrdersSnapshot> GetAllOpenOrdersAsync(CancellationToken ct = default)
+    {
+        _logger.LogDebug("[NullBroker] GetAllOpenOrders -> empty snapshot (simulation)");
+        return Task.FromResult(new OrdersSnapshot([], false));
+    }
+
+    /// <summary>
+    /// Always returns false, NullBrokerService places no real orders so none are tracked.
+    /// </summary>
+    public bool IsKnownOrder(int orderId) => false;
 
     /// <summary>
     /// Returns zero, 0% slippage in simulation.
@@ -109,7 +124,7 @@ public class NullBrokerService : IBrokerService
             FilledAt:      DateTimeOffset.UtcNow));
 
     /// <summary>
-    /// No-op trail stop replacement for testing. Logs the action and returns a fake new stop ID.
+    /// No-op trail stop replacement for testing. Returns a fake new stop ID.
     /// </summary>
     public Task<string?> ReplaceTrailStopAsync(
         string existingStopOrderId,
