@@ -62,7 +62,6 @@ export function DesktopLayout({
               onToggleBlockLotto={onToggleBlockLotto}
             />
             <RiskConfig
-              config={riskConfig}
               blockHigh={blockHigh}
               blockLotto={blockLotto}
             />
