@@ -1,5 +1,4 @@
 using System.Text.Json;
-
 namespace TradeFlow.Worker.Services;
 
 /// <summary>
@@ -18,12 +17,11 @@ public class AlertApiClient : IAlertApiClient
 
     /// <summary>
     /// Fetches the most recent alerts from the Xtrades API.
-    /// Throws <see cref="AlertApiException"/> for any network, HTTP, or
-    /// deserialization failure so callers don't need to know the HTTP details.
+    /// Throws <see cref="AlertApiException"/> for any network, HTTP, or deserialization
+    /// failure so callers don't need to know the HTTP details.
+    /// On 401 or 403 the exception carries the status code so callers can distinguish
+    /// an expired token from a transient error.
     /// </summary>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <param name="pageSize">Number of alerts to fetch. Defaults to 10 for normal polling, use 100 for recovery.</param>
-    /// <returns>List of alerts, or an empty list if none are available.</returns>
     public async Task<List<Alert>> GetAlertsAsync(
         CancellationToken cancellationToken = default,
         int pageSize = 10)
@@ -36,7 +34,6 @@ public class AlertApiClient : IAlertApiClient
             "&AlertType=all";
 
         HttpResponseMessage response;
-
         try
         {
             response = await _httpClient.GetAsync(path, cancellationToken);
@@ -55,9 +52,11 @@ public class AlertApiClient : IAlertApiClient
 
         if (!response.IsSuccessStatusCode)
         {
+            var statusCode = (int)response.StatusCode;
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
             throw new AlertApiException(
-                $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}: {body}");
+                $"HTTP {statusCode} {response.ReasonPhrase}: {body}",
+                statusCode);
         }
 
         // 204 No Content means no alerts are available (expected outside market hours)
@@ -65,7 +64,6 @@ public class AlertApiClient : IAlertApiClient
             return [];
 
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
-
         AlertsResponse? result;
         try
         {
@@ -80,5 +78,65 @@ public class AlertApiClient : IAlertApiClient
 
         // Coalesce across the three candidate field names, whichever is populated wins
         return result?.Alerts ?? result?.Data ?? result?.Items ?? [];
+    }
+
+    /// <summary>
+    /// Verifies that the Xtrades API is reachable and the current token is valid by
+    /// making a lightweight authenticated request. Uses the same configured HTTP client
+    /// as <see cref="GetAlertsAsync"/> so the auth header is always present.
+    /// Throws <see cref="AlertApiException"/> with the HTTP status code on 401 or 403
+    /// so callers can distinguish an expired token from an unreachable service.
+    /// Returns false for other non-success responses and network failures.
+    /// </summary>
+    public async Task<bool> CheckConnectionAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var response = await _httpClient.GetAsync(
+                "/api/v2/alerts?DateSpec=Today&Page=1&PageSize=1&OrderBy=TimeOfEntryAlertEpoch%20desc&AlertType=all",
+                cancellationToken);
+
+            var statusCode = (int)response.StatusCode;
+
+            if (statusCode is 401 or 403)
+                throw new AlertApiException(
+                    $"Xtrades authentication failed ({statusCode}) — token may be expired.",
+                    statusCode);
+
+            return response.IsSuccessStatusCode
+                || response.StatusCode == System.Net.HttpStatusCode.NoContent;
+        }
+        catch (AlertApiException)
+        {
+            throw;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+}
+
+/// <summary>
+/// Thrown by <see cref="AlertApiClient"/> for any network, HTTP, or deserialization
+/// failure when communicating with the Xtrades API. Carries <see cref="StatusCode"/>
+/// for HTTP-level failures so callers can classify 401/403 (expired token) without
+/// string-parsing the message.
+/// </summary>
+public class AlertApiException : Exception
+{
+    /// <summary>
+    /// HTTP status code returned by the server. Zero for non-HTTP failures
+    /// such as network errors, timeouts, or deserialization exceptions.
+    /// </summary>
+    public int StatusCode { get; }
+
+    public AlertApiException(string message, Exception? inner = null)
+        : base(message, inner) { }
+
+    public AlertApiException(string message, int statusCode, Exception? inner = null)
+        : base(message, inner)
+    {
+        StatusCode = statusCode;
     }
 }

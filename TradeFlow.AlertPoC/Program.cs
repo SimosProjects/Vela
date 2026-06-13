@@ -20,7 +20,7 @@ var allowedRanks = new List<string>
 };
 var approvedTraders = new List<string> { "Fibonaccizer", "Theo", "Avalace" };
 
-var client = new AlertApiClient(token);
+var client     = new AlertApiPocClient(token);
 var normalizer = new AlertNormalizer();
 
 var riskEngine = new RiskEngineService([
@@ -29,12 +29,12 @@ var riskEngine = new RiskEngineService([
     new MinXScoreRule(minimumScore: 60.0),
     new ApprovedTraderRule(approvedTraders),
 ]);
-    
+
 using var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
-    e.Cancel = true; // prevent the process from terminating immediately
-    cts.Cancel();    // signal our token so async operations can wind down cleanly
+    e.Cancel = true;
+    cts.Cancel();
     Console.WriteLine("\n[INFO] Cancellation requested — shutting down...");
 };
 
@@ -44,10 +44,8 @@ try
 {
     alerts = await client.GetAlertsAsync(cts.Token);
 }
-catch (AlertApiException ex)
+catch (AlertApiPocException ex)
 {
-    // AlertApiException is our domain boundary — we don't leak HttpClient
-    // or JSON details to the top level, just a clean failure message
     Console.ForegroundColor = ConsoleColor.Red;
     Console.Error.WriteLine($"[ERROR] {ex.Message}");
     Console.ResetColor();
@@ -56,12 +54,11 @@ catch (AlertApiException ex)
 
 Console.WriteLine($"\n[INFO] Alerts received: {alerts.Count}");
 
-// Pipeline: validate -> normalize -> classify -> risk evaluate
 var processed = alerts
-    .Where(normalizer.IsProcessable) // Filter out any alerts missing required properties
-    .Select(normalizer.Normalize)   // Normalize remaining alerts for consistent downstream processing
+    .Where(normalizer.IsProcessable)
+    .Select(normalizer.Normalize)
     .Select(a => (
-        Alert: a, 
+        Alert: a,
         Classification: AlertClassifier.Classify(a),
         RiskResult: riskEngine.Evaluate(a)
         ))
@@ -72,10 +69,8 @@ Console.WriteLine($"[INFO] Approved: {processed.Count(p => p.RiskResult.Approved
 Console.WriteLine($"[INFO] Rejected: {processed.Count(p => !p.RiskResult.Approved)}\n");
 Console.WriteLine(new string('─', 60));
 
-// Cap at 10 for POC readability — the full pipeline will persist all records
 foreach (var (alert, classification, riskResult) in processed.Take(10))
 {
-    // Color-code the console output based on alert category for quick visual scanning.
     Console.ForegroundColor = classification.Category switch
     {
         AlertCategory.CallOptionEntry or
@@ -92,12 +87,11 @@ foreach (var (alert, classification, riskResult) in processed.Take(10))
 
     if (!riskResult.Approved)
     {
-        // Show rejection reason so we can verify rules are firing correctly
         Console.WriteLine($" Reason : {riskResult.Reason}");
         Console.WriteLine($" Trader : {alert.UserName}");
         Console.WriteLine($" Symbol : {alert.Symbol}");
         Console.WriteLine(new string('─', 60));
-        continue; // Skip details for rejected alerts to reduce noise in the POC output
+        continue;
     }
 
     Console.WriteLine($"  ID          : {alert.Id}");
@@ -116,7 +110,6 @@ foreach (var (alert, classification, riskResult) in processed.Take(10))
     Console.WriteLine(new string('─', 60));
 }
 
-// Summarize by result — quick sanity check on the data coming back
 var entries = processed.Count(p => AlertClassifier.IsEntry(p.Classification));
 var wins    = processed.Count(p => p.Alert.Result == "win");
 var losses  = processed.Count(p => p.Alert.Result == "loss");

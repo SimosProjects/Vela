@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using TradeFlow.Worker.Metrics;
+using AlertApiException = TradeFlow.Worker.Services.AlertApiException;
 
 namespace TradeFlow.Worker;
 
@@ -156,6 +157,19 @@ public class AlertPollingService : BackgroundService
         catch (OperationCanceledException)
         {
             throw;
+        }
+        catch (AlertApiException ex) when (ex.StatusCode is 401 or 403)
+        {
+            sw.Stop();
+            _metrics.PollDurationMs.Record(sw.ElapsedMilliseconds,
+                new TagList { { "result", "auth_error" } });
+
+            // Distinct from transient errors — this will repeat every poll interval until resolved.
+            // The operator must update XTRADES_TOKEN and restart the Worker.
+            _logger.LogError(
+                "Xtrades REST API returned {StatusCode} — XTRADES_TOKEN has likely expired or been revoked. " +
+                "No alerts will be received until the token is updated and the Worker is restarted.",
+                ex.StatusCode);
         }
         catch (Exception ex)
         {
