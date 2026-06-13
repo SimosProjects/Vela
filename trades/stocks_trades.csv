@@ -1,9 +1,9 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId
-2026-06-08,14:25:48,,,SHAK,55.0,53.99,2969.45,2899.0,+0.04%,,,,,Open,Open,Kevin Izaguirrre,74.0,,,
-2026-06-08,15:03:41,,,AMD,6.0,490.99,2945.94,2141.0,+0.26%,,,,,Open,Open,Lukasz,65.0,,,
-2026-06-10,14:12:24,,,SOFI,46.0,16.03,737.38,1953.0,+0.19%,,,,,Open,Open,Krazy 👶 🐐,77.0,Top Analyst I,,
-2026-06-11,10:04:58,,,PINS,34,21.47,729.98,1312,+0.09%,,,,,Open,Open,SLAM,78,,,
-2026-06-11,14:49:49,,,BULL,348,6.47,2251.56,1397,+0.31%,,,,,Open,Open,Krazy 👶 🐐,77,Top Analyst I,,
+2026-06-08,14:25:48,,,SHAK,55.0,53.99,2969.45,2899.0,+0.04%,,,,,Open,Open,Kevin Izaguirrre,74.0,,,,3166
+2026-06-08,15:03:41,,,AMD,6.0,490.99,2945.94,2141.0,+0.26%,,,,,Open,Open,Lukasz,65.0,,,,3036
+2026-06-10,14:12:24,,,SOFI,46.0,16.03,737.38,1953.0,+0.19%,,,,,Open,Open,Krazy 👶 🐐,77.0,Top Analyst I,,,3858
+2026-06-11,10:04:58,,,PINS,34,21.47,729.98,1312,+0.09%,,,,,Open,Open,SLAM,78,,,,3920
+2026-06-11,14:49:49,,,BULL,348,6.47,2251.56,1397,+0.31%,,,,,Open,Open,Krazy 👶 🐐,77,Top Analyst I,,,4142
 2026-06-12,11:10:52,,,PURR,255,8.81,2246.55,1497,+0.23%,,,,,Open,Open,Trading Goat,96,,,,4454
 
 ,,SUMMARY
