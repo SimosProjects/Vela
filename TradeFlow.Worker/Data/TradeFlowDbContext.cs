@@ -16,6 +16,11 @@ public class TradeFlowDbContext : DbContext
     public DbSet<TradeMetric> TradeMetrics { get; set; }
     public DbSet<OpenPosition> OpenPositions { get; set; }
     public DbSet<SystemState> SystemState { get; set; }
+    /// <summary>
+    /// Dashboard-saved risk config overrides. Single row (id = 1).
+    /// Populated by POST /api/config/risk; read by GET /api/config/risk.
+    /// </summary>
+    public DbSet<RiskConfigOverride> RiskConfigOverrides { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -168,6 +173,16 @@ public class TradeFlowDbContext : DbContext
             entity.Property(l => l.Level).HasColumnName("level");
             entity.Property(l => l.Message).HasColumnName("message");
             entity.Property(l => l.Exception).HasColumnName("exception");
+        });
+
+        modelBuilder.Entity<RiskConfigOverride>(entity =>
+        {
+            entity.ToTable("risk_config_overrides");
+            entity.HasKey(r => r.Id);
+
+            entity.Property(r => r.Id).HasColumnName("id").ValueGeneratedNever();
+            entity.Property(r => r.ConfigJson).HasColumnName("config_json");
+            entity.Property(r => r.UpdatedAt).HasColumnName("updated_at");
         });
     }
 }

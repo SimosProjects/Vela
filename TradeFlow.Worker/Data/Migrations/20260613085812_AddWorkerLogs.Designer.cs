@@ -12,7 +12,7 @@ using TradeFlow.Worker.Data;
 namespace TradeFlow.Worker.Data.Migrations
 {
     [DbContext(typeof(TradeFlowDbContext))]
-    [Migration("20260612072116_AddWorkerLogs")]
+    [Migration("20260613085812_AddWorkerLogs")]
     partial class AddWorkerLogs
     {
         /// <inheritdoc />
@@ -268,6 +268,26 @@ namespace TradeFlow.Worker.Data.Migrations
                     b.HasKey("OrderId");
 
                     b.ToTable("open_positions", (string)null);
+                });
+
+            modelBuilder.Entity("TradeFlow.Worker.Data.RiskConfigOverride", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("integer")
+                        .HasColumnName("id");
+
+                    b.Property<string>("ConfigJson")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("config_json");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("risk_config_overrides", (string)null);
                 });
 
             modelBuilder.Entity("TradeFlow.Worker.Data.SystemState", b =>
@@ -527,7 +547,7 @@ namespace TradeFlow.Worker.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("level");
 
-                    b.Property<DateTime>("LoggedAt")
+                    b.Property<DateTimeOffset>("LoggedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("logged_at");
 
@@ -538,7 +558,10 @@ namespace TradeFlow.Worker.Data.Migrations
 
                     b.HasKey("Id");
 
-                    b.ToTable("worker_logs", (string)null);
+                    b.ToTable("worker_logs", null, t =>
+                        {
+                            t.ExcludeFromMigrations();
+                        });
                 });
 #pragma warning restore 612, 618
         }
