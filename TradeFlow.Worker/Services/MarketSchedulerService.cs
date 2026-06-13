@@ -21,6 +21,7 @@ public class MarketSchedulerService : BackgroundService
     private readonly IConfiguration _config;
     private readonly RiskEngineOptions _riskOptions;
     private readonly MarketConditionsLogger _marketConditions;
+    private readonly IAlertApiClient _alertApiClient;
 
     private readonly string? _healthWebhookUrl;
     private readonly string? _summaryWebhookUrl;
@@ -47,19 +48,21 @@ public class MarketSchedulerService : BackgroundService
         CsvTradeLogger csv,
         IOptions<RiskEngineOptions> riskOptions,
         MarketConditionsLogger marketConditions,
-        IHttpClientFactory httpClientFactory)
+        IHttpClientFactory httpClientFactory,
+        IAlertApiClient alertApiClient)
     {
-        _discord      = discord;
-        _guard        = guard;
-        _broker       = broker;
-        _execution    = execution;
-        _scopeFactory = scopeFactory;
-        _logger       = logger;
-        _config       = config;
-        _csv          = csv;
-        _riskOptions  = riskOptions.Value;
-        _httpClient   = httpClientFactory.CreateClient("Scheduler");
+        _discord          = discord;
+        _guard            = guard;
+        _broker           = broker;
+        _execution        = execution;
+        _scopeFactory     = scopeFactory;
+        _logger           = logger;
+        _config           = config;
+        _csv              = csv;
+        _riskOptions      = riskOptions.Value;
+        _httpClient       = httpClientFactory.CreateClient("Scheduler");
         _marketConditions = marketConditions;
+        _alertApiClient   = alertApiClient;
 
         _healthWebhookUrl  = Environment.GetEnvironmentVariable("DISCORD_HEALTH_WEBHOOK_URL");
         _summaryWebhookUrl = Environment.GetEnvironmentVariable("DISCORD_SUMMARY_WEBHOOK_URL");
@@ -539,10 +542,16 @@ public class MarketSchedulerService : BackgroundService
 
     private async Task<string> CheckXtradesAsync(CancellationToken ct)
     {
+        // Uses the authenticated Xtrades client so a dead token reports as expired
+        // rather than falsely reporting the service as reachable.
         try
         {
-            var response = await _httpClient.GetAsync("https://app.xtrades.net", ct);
-            return response.IsSuccessStatusCode ? "✅ Reachable" : "⚠️ Degraded";
+            var connected = await _alertApiClient.CheckConnectionAsync(ct);
+            return connected ? "✅ Connected" : "❌ Unreachable";
+        }
+        catch (AlertApiException ex) when (ex.StatusCode is 401 or 403)
+        {
+            return "❌ Token Expired";
         }
         catch
         {

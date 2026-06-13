@@ -57,14 +57,14 @@ public class SignalRListenerService : BackgroundService
         IHttpClientFactory httpClientFactory,
         SystemStateService systemState)
     {
-        _normalizer   = normalizer;
-        _riskEngine   = riskEngine;
-        _scopeFactory = scopeFactory;
-        _logger       = logger;
-        _discord      = discord;
-        _execution    = execution;
+        _normalizer        = normalizer;
+        _riskEngine        = riskEngine;
+        _scopeFactory      = scopeFactory;
+        _logger            = logger;
+        _discord           = discord;
+        _execution         = execution;
         _httpClientFactory = httpClientFactory;
-        _systemState  = systemState;
+        _systemState       = systemState;
 
         _token = Environment.GetEnvironmentVariable("XTRADES_TOKEN")
             ?? throw new InvalidOperationException(
@@ -198,6 +198,15 @@ public class SignalRListenerService : BackgroundService
             {
                 // Watchdog fired — fall through to reconnect
             }
+            catch (AlertApiException ex) when (ex.StatusCode is 401 or 403)
+            {
+                // Negotiate returned 401/403 — token is expired or revoked.
+                // Will retry with backoff but each attempt will fail the same way until resolved.
+                _logger.LogError(
+                    "Xtrades SignalR negotiate returned {StatusCode} — XTRADES_TOKEN has likely expired or been revoked. " +
+                    "No SignalR alerts will be received until the token is updated and the Worker is restarted.",
+                    ex.StatusCode);
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "SignalR connection failed. Will retry with backoff.");
@@ -217,7 +226,9 @@ public class SignalRListenerService : BackgroundService
         _alertChannel.Writer.Complete();
     }
 
-    // Calls the Xtrades negotiate endpoint to get a short-lived Azure SignalR connection URL and access token
+    // Calls the Xtrades negotiate endpoint to get a short-lived Azure SignalR connection URL and access token.
+    // Throws AlertApiException with the HTTP status code on 401/403 so the connection loop
+    // can distinguish an expired token from a transient network failure.
     private async Task<(string HubUrl, string Token)> NegotiateAsync(
         CancellationToken cancellationToken)
     {
@@ -229,13 +240,15 @@ public class SignalRListenerService : BackgroundService
 
         if (!response.IsSuccessStatusCode)
         {
+            var statusCode = (int)response.StatusCode;
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new InvalidOperationException(
-                $"SignalR negotiate failed: HTTP {(int)response.StatusCode} {body}");
+            throw new AlertApiException(
+                $"SignalR negotiate failed: HTTP {statusCode} {body}",
+                statusCode);
         }
 
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        var doc = JsonDocument.Parse(json);
+        var doc  = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
         var url = root.GetProperty("url").GetString()
@@ -293,9 +306,9 @@ public class SignalRListenerService : BackgroundService
             return;
         }
 
-        var normalized      = _normalizer.Normalize(alert);
-        var classification  = AlertClassifier.Classify(normalized);
-        var riskResult      = _riskEngine.Evaluate(normalized);
+        var normalized     = _normalizer.Normalize(alert);
+        var classification = AlertClassifier.Classify(normalized);
+        var riskResult     = _riskEngine.Evaluate(normalized);
 
         var isSideRejection = !riskResult.Approved &&
             (riskResult.Reason?.Contains("stc", StringComparison.OrdinalIgnoreCase) == true ||
@@ -324,7 +337,7 @@ public class SignalRListenerService : BackgroundService
         using var scope = _scopeFactory.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IAlertRepository>();
         var entity     = AlertMapper.ToEntity(normalized, riskResult);
- 
+
         var existingIds = await repository.GetExistingAlertIdsAsync([entity.Id], stoppingToken);
         if (existingIds.Contains(entity.Id))
         {
@@ -333,20 +346,20 @@ public class SignalRListenerService : BackgroundService
                 entity.Id);
             return;
         }
- 
+
         if (riskResult.Approved)
         {
             await _discord.NotifyApprovedAlertAsync(normalized, classification, stoppingToken);
- 
+
             if (normalized.Side?.ToLower() is "bto")
                 await _execution.HandleEntryAsync(normalized, classification, isAverage: false, stoppingToken);
             else if (normalized.Side?.ToLower() is "avg")
                 await _execution.HandleEntryAsync(normalized, classification, isAverage: true, stoppingToken);
         }
- 
+
         if (normalized.Side?.ToLower() is "stc" or "btc")
             await _execution.HandleExitAsync(normalized, stoppingToken);
- 
+
         await repository.SaveManyAsync([entity], stoppingToken);
     }
 
@@ -364,10 +377,10 @@ public class SignalRListenerService : BackgroundService
 
     private async Task RetryWithBackoffAsync(int attempt, CancellationToken stoppingToken)
     {
-        var maxDelay = TimeSpan.FromSeconds(60);
+        var maxDelay    = TimeSpan.FromSeconds(60);
         var baseSeconds = Math.Pow(2, Math.Min(attempt, 6));
-        var jitter = Random.Shared.NextDouble() * 0.3;
-        var delay = TimeSpan.FromSeconds(baseSeconds * (1 + jitter));
+        var jitter      = Random.Shared.NextDouble() * 0.3;
+        var delay       = TimeSpan.FromSeconds(baseSeconds * (1 + jitter));
 
         if (delay > maxDelay) delay = maxDelay;
 
@@ -391,8 +404,8 @@ public class ExponentialBackoffRetryPolicy : IRetryPolicy
             return null;
 
         var baseSeconds = Math.Pow(2, retryContext.PreviousRetryCount);
-        var jitter = Random.Shared.NextDouble() * 0.3;
-        var delay = TimeSpan.FromSeconds(baseSeconds * (1 + jitter));
+        var jitter      = Random.Shared.NextDouble() * 0.3;
+        var delay       = TimeSpan.FromSeconds(baseSeconds * (1 + jitter));
 
         return delay < MaxDelay ? delay : MaxDelay;
     }
