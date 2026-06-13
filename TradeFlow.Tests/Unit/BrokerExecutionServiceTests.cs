@@ -264,45 +264,57 @@ public class BrokerExecutionServiceTests
     }
 
     [Fact]
-    public async Task HandleEntryAsync_Pending_ZeroQty_DoesNotRecordTrade()
+    public async Task HandleEntryAsync_Pending_ZeroQty_RecordsWithEstimatedFill()
     {
+        // Both position checks return (0, 0), gateway timeout. Trade is recorded with
+        // estimated fill rather than silently dropped. StopOrderId is null because no
+        // trail stop was placed; the no-stop Discord critical fires in production.
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
                 OrderId: "1", StopOrderId: null, TargetOrderId: null,
                 FillPrice: 0m, FillQuantity: 0, FillAmount: 0m,
                 Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
-
+ 
         _brokerMock
             .Setup(b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default))
             .ReturnsAsync((0m, 0));
-
+ 
         var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
-
+ 
         await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
-
-        _guard.GetOpenTrades().Should().BeEmpty();
+ 
+        var trades = _guard.GetOpenTrades();
+        trades.Should().HaveCount(1);
+        trades.First().StopOrderId.Should().BeNull();
+        trades.First().EntryPrice.Should().Be(4.95m);
     }
-
+ 
     [Fact]
-    public async Task HandleEntryAsync_Pending_NegativeQty_DoesNotRecordTrade()
+    public async Task HandleEntryAsync_Pending_NegativeQty_RecordsWithEstimatedFill()
     {
+        // Negative quantity (positionQty <= 0) is treated as a timeout, same estimated
+        // fill path as zero qty. Protects against malformed Gateway responses creating
+        // an unrecorded open position at IBKR.
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
                 OrderId: "1", StopOrderId: null, TargetOrderId: null,
                 FillPrice: 0m, FillQuantity: 0, FillAmount: 0m,
                 Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
-
+ 
         _brokerMock
             .Setup(b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default))
             .ReturnsAsync((4.95m, -2));
-
+ 
         var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
-
+ 
         await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
-
-        _guard.GetOpenTrades().Should().BeEmpty();
+ 
+        var trades = _guard.GetOpenTrades();
+        trades.Should().HaveCount(1);
+        trades.First().StopOrderId.Should().BeNull();
+        trades.First().EntryPrice.Should().Be(4.95m);
     }
 
     [Fact]
