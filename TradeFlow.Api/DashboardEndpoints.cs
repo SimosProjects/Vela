@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Npgsql;
 using NpgsqlTypes;
 using TradeFlow.Api.Models;
@@ -44,7 +45,49 @@ public static class DashboardEndpoints
              .WithSummary("Queues a manual regime override. Applied by the Worker within 30 seconds.");
 
         group.MapGet("/logs", GetLogs).WithName("GetWorkerLogs")
-             .WithSummary("Returns today's Worker log entries, newest first, max 100.");
+             .WithSummary("Returns today's Worker log entries, newest first, max 20.");
+
+        group.MapGet("/traders", GetTraders).WithName("GetTraders")
+             .WithSummary("Returns approved, restricted, and blocked traders from RiskEngineOptions.");
+    }
+
+    private static async Task<IResult> GetTraders(TradeFlowDbContext db, CancellationToken ct)
+    {
+        var saved = await db.RiskConfigOverrides.FirstOrDefaultAsync(r => r.Id == 1, ct);
+        if (saved is null) return Results.Ok(new TradersResponse([], [], []));
+
+        try
+        {
+            using var doc = JsonDocument.Parse(saved.ConfigJson);
+            var root      = doc.RootElement;
+
+            var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+
+            var approved = root.TryGetProperty("approvedTraders", out var at)
+                ? at.Deserialize<List<string>>(opts) ?? []
+                : [];
+
+            var allRestricted = root.TryGetProperty("restrictedTraders", out var rt)
+                ? rt.Deserialize<List<RestrictedTraderDto>>(opts) ?? []
+                : [];
+
+            var restricted = allRestricted
+                .Where(t => t.AllotmentPct > 0)
+                .OrderBy(t => t.Name)
+                .ToList();
+
+            var blocked = allRestricted
+                .Where(t => t.AllotmentPct <= 0)
+                .OrderBy(t => t.Name)
+                .Select(t => t.Name)
+                .ToList();
+
+            return Results.Ok(new TradersResponse(approved, restricted, blocked));
+        }
+        catch
+        {
+            return Results.Ok(new TradersResponse([], [], []));
+        }
     }
 
     // -- Handlers --

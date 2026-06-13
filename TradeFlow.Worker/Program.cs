@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Npgsql;
 using TradeFlow.Worker;
 using TradeFlow.Worker.Engine;
@@ -258,6 +260,40 @@ if (ibkrEnabled)
         host.Services.GetRequiredService<ILogger<StartupReconciliationService>>());
 
     await reconciliation.RunAsync();
+}
+
+// Patch trader lists from appsettings into risk_config_overrides so the Api can serve them from DB
+{
+    var riskOpts = host.Services.GetRequiredService<IOptions<RiskEngineOptions>>().Value;
+
+    using var traderScope = host.Services.CreateScope();
+    var traderDb = traderScope.ServiceProvider.GetRequiredService<TradeFlowDbContext>();
+    var existing = await traderDb.RiskConfigOverrides.FirstOrDefaultAsync(r => r.Id == 1);
+
+    var config = existing?.ConfigJson is not null
+        ? JsonNode.Parse(existing.ConfigJson)?.AsObject() ?? new JsonObject()
+        : new JsonObject();
+
+    config["approvedTraders"] = JsonSerializer.SerializeToNode(
+        riskOpts.ApprovedTraders ?? []);
+
+    config["restrictedTraders"] = JsonSerializer.SerializeToNode(
+        (riskOpts.RestrictedTraders ?? new Dictionary<string, int>())
+            .Select(kvp => new { name = kvp.Key, allotmentPct = kvp.Value })
+            .ToList());
+
+    var json = config.ToJsonString();
+    var now  = DateTimeOffset.UtcNow;
+
+    await traderDb.Database.ExecuteSqlAsync(
+        $"""
+        INSERT INTO risk_config_overrides (id, config_json, updated_at)
+        VALUES (1, {json}, {now})
+        ON CONFLICT (id) DO UPDATE
+          SET config_json = EXCLUDED.config_json,
+              updated_at  = EXCLUDED.updated_at
+        """,
+        CancellationToken.None);
 }
 
 // Wire cross-service state propagation at the composition root.
