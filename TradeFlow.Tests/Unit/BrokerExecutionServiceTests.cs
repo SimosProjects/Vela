@@ -28,6 +28,22 @@ public class BrokerExecutionServiceTests
     private readonly BrokerExecutionService _execution;
     private readonly BrokerExecutionService _executionMarketOpen;
 
+    // Builds a BrokerExecutionService with the shared mock dependencies and the given options.
+    // Avoids repeating the 9-argument constructor in every test that needs custom configuration.
+    private BrokerExecutionService BuildService(
+        RiskEngineOptions? options = null,
+        bool marketOpen = true) =>
+        new(
+            _brokerMock.Object,
+            _sizer,
+            _guard,
+            new CsvTradeLogger(TestConfig, NullLogger<CsvTradeLogger>.Instance),
+            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
+            _scopeFactory,
+            NullLogger<BrokerExecutionService>.Instance,
+            Options.Create(options ?? new RiskEngineOptions()),
+            isMarketOpen: () => marketOpen);
+
     public BrokerExecutionServiceTests()
     {
         _brokerMock.Setup(b => b.GetAccountBalanceAsync(default))
@@ -527,26 +543,14 @@ public class BrokerExecutionServiceTests
     public async Task HandleEntryAsync_AlertStaleness_Disabled_Proceeds()
     {
         // AlertStalenessMaxSlippagePct = 0 disables the gate entirely.
-        var options = new RiskEngineOptions { AlertStalenessMaxSlippagePct = 0m };
-        var config  = TestConfig;
-
-        var service = new BrokerExecutionService(
-            _brokerMock.Object,
-            _sizer,
-            _guard,
-            new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
-            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
-            _scopeFactory,
-            NullLogger<BrokerExecutionService>.Instance,
-            Options.Create(options),
-            isMarketOpen: () => true);
-
+        var service = BuildService(new RiskEngineOptions { AlertStalenessMaxSlippagePct = 0m });
+ 
         var alert = BuildAlert(
             pricePaid: 10.00m,
             actualPriceAtTimeOfAlert: 1.00m);
-
+ 
         await service.HandleEntryAsync(alert, CallClassification());
-
+ 
         _brokerMock.Verify(b => b.PlaceOrderAsync(
             It.IsAny<TradeOrder>(), default), Times.Once);
     }
@@ -601,8 +605,7 @@ public class BrokerExecutionServiceTests
             PostFillSlippageWarningPct = 10.0,
             HighSlippageTrailPct       = 25.0
         };
-        var config = TestConfig;
-
+ 
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
@@ -614,22 +617,12 @@ public class BrokerExecutionServiceTests
                 FillAmount:    1_188m,
                 Status:        OrderStatus.Filled,
                 FilledAt:      DateTimeOffset.UtcNow));
-
-        var service = new BrokerExecutionService(
-            _brokerMock.Object,
-            _sizer,
-            _guard,
-            new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
-            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
-            _scopeFactory,
-            NullLogger<BrokerExecutionService>.Instance,
-            Options.Create(options),
-            isMarketOpen: () => true);
-
-        var alert = BuildAlert(pricePaid: 4.95m);
-
+ 
+        var service = BuildService(options);
+        var alert   = BuildAlert(pricePaid: 4.95m);
+ 
         await service.HandleEntryAsync(alert, CallClassification());
-
+ 
         _brokerMock.Verify(b => b.ReplaceTrailStopAsync(
             "STOP-010",
             It.IsAny<int>(),
@@ -648,8 +641,7 @@ public class BrokerExecutionServiceTests
             PostFillSlippageWarningPct = 10.0,
             HighSlippageTrailPct       = 25.0
         };
-        var config = TestConfig;
-
+ 
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
@@ -661,22 +653,12 @@ public class BrokerExecutionServiceTests
                 FillAmount:    1_040m,
                 Status:        OrderStatus.Filled,
                 FilledAt:      DateTimeOffset.UtcNow));
-
-        var service = new BrokerExecutionService(
-            _brokerMock.Object,
-            _sizer,
-            _guard,
-            new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
-            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
-            _scopeFactory,
-            NullLogger<BrokerExecutionService>.Instance,
-            Options.Create(options),
-            isMarketOpen: () => true);
-
-        var alert = BuildAlert(pricePaid: 4.95m);
-
+ 
+        var service = BuildService(options);
+        var alert   = BuildAlert(pricePaid: 4.95m);
+ 
         await service.HandleEntryAsync(alert, CallClassification());
-
+ 
         _brokerMock.Verify(b => b.ReplaceTrailStopAsync(
             It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TradeOrder>(),
             It.IsAny<double>(), default), Times.Never);
@@ -691,8 +673,7 @@ public class BrokerExecutionServiceTests
             PostFillSlippageWarningPct = 10.0,
             HighSlippageTrailPct       = 0.0
         };
-        var config = TestConfig;
-
+ 
         _brokerMock
             .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
             .ReturnsAsync(new BrokerOrderResult(
@@ -704,22 +685,12 @@ public class BrokerExecutionServiceTests
                 FillAmount:    1_980m,
                 Status:        OrderStatus.Filled,
                 FilledAt:      DateTimeOffset.UtcNow));
-
-        var service = new BrokerExecutionService(
-            _brokerMock.Object,
-            _sizer,
-            _guard,
-            new CsvTradeLogger(config, NullLogger<CsvTradeLogger>.Instance),
-            new DiscordNotificationService(NullLogger<DiscordNotificationService>.Instance),
-            _scopeFactory,
-            NullLogger<BrokerExecutionService>.Instance,
-            Options.Create(options),
-            isMarketOpen: () => true);
-
-        var alert = BuildAlert(pricePaid: 4.95m);
-
+ 
+        var service = BuildService(options);
+        var alert   = BuildAlert(pricePaid: 4.95m);
+ 
         await service.HandleEntryAsync(alert, CallClassification());
-
+ 
         _brokerMock.Verify(b => b.ReplaceTrailStopAsync(
             It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TradeOrder>(),
             It.IsAny<double>(), default), Times.Never);

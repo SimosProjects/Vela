@@ -49,6 +49,8 @@ public class BrokerExecutionService
     /// <summary>
     /// Handles a BTO or averaging entry alert by sizing the order, running safety checks,
     /// placing the order with the broker, and logging the result to CSV and Discord.
+    /// Delegates to <see cref="PassesPreEntryChecks"/>, <see cref="ExecuteBrokerEntryAsync"/>,
+    /// <see cref="TightenTrailOnElevatedSlippageAsync"/>, and <see cref="PersistEntryAsync"/>.
     /// Skips silently if the market is closed or any safety check fails.
     /// </summary>
     public async Task HandleEntryAsync(
@@ -60,48 +62,8 @@ public class BrokerExecutionService
         var alertReceivedAt = DateTimeOffset.UtcNow;
         var alertedPrice    = alert.PricePaid ?? 0m;
 
-        if (!_isMarketOpen())
-        {
-            _logger.LogDebug("Market closed, skipping order for {Symbol}", alert.Symbol);
+        if (!PassesPreEntryChecks(alert, classification, alertedPrice))
             return;
-        }
-
-        if (_riskOptions.TradingPaused || IsPaused)
-        {
-            _logger.LogWarning(
-                "Trading is paused — skipping new entry for {Symbol}", alert.Symbol);
-            return;
-        }
-
-        // Stock entries use a tighter staleness threshold, the intent is to enter near
-        // the alerted price or not at all. Options tolerate a wider window since they
-        // move faster and the limit order provides the real price protection.
-        var isStockEntry = classification.Category == AlertCategory.StockEntry;
-        var maxStaleness = isStockEntry && _riskOptions.StockAlertStalenessMaxSlippagePct > 0
-            ? _riskOptions.StockAlertStalenessMaxSlippagePct
-            : _riskOptions.AlertStalenessMaxSlippagePct;
-
-        if (maxStaleness > 0 && alertedPrice > 0)
-        {
-            var priceAtAlertTime = alert.ActualPriceAtTimeOfAlert ?? 0m;
-            if (priceAtAlertTime > 0)
-            {
-                var staleness = (alertedPrice - priceAtAlertTime) / priceAtAlertTime * 100;
-                if (staleness > maxStaleness)
-                {
-                    _logger.LogWarning(
-                        "Alert staleness check failed for {Symbol} — PricePaid ${Paid:F2} " +
-                        "vs alert price ${AlertPrice:F2} ({Staleness:F1}%) exceeds {TradeType} max {Max:F1}%",
-                        alert.Symbol, alertedPrice, priceAtAlertTime,
-                        staleness, isStockEntry ? "stock" : "options", maxStaleness);
-                    return;
-                }
-
-                _logger.LogDebug(
-                    "Alert staleness check passed for {Symbol} — {Staleness:F1}% within {TradeType} limit {Max:F1}%",
-                    alert.Symbol, staleness, isStockEntry ? "stock" : "options", maxStaleness);
-            }
-        }
 
         var order = _sizer.Size(alert, classification, isAverage);
         if (order is null)
@@ -116,12 +78,9 @@ public class BrokerExecutionService
         if (blocked is not null)
         {
             if (blocked.IsRoutine)
-                _logger.LogDebug(
-                    "TradeGuard: {Reason}", blocked.Reason);
+                _logger.LogDebug("TradeGuard: {Reason}", blocked.Reason);
             else
-                _logger.LogWarning(
-                    "TradeGuard blocked order for {Symbol}: {Reason}",
-                    alert.Symbol, blocked.Reason);
+                _logger.LogWarning("TradeGuard blocked order for {Symbol}: {Reason}", alert.Symbol, blocked.Reason);
             return;
         }
 
@@ -132,134 +91,12 @@ public class BrokerExecutionService
         {
             var orderSubmittedAt = DateTimeOffset.UtcNow;
 
-            BrokerOrderResult result;
-            try
-            {
-                result = await _broker.PlaceOrderAsync(order, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex,
-                    "Broker PlaceOrderAsync failed for {Symbol}, skipping", alert.Symbol);
-                return;
-            }
+            var result = await ExecuteBrokerEntryAsync(alert, order, alertedPrice, ct);
+            if (result is null) return;
 
-            if (result.Status == OrderStatus.Rejected || result.Status == OrderStatus.Cancelled)
-            {
-                // IBKR price-protection rejection on a stock limit order — retry once with a
-                // limit anchored to the market price IBKR reported in the rejection message.
-                // No extra roundtrip: the market price is extracted from the rejection itself.
-                if (result.Status == OrderStatus.Cancelled &&
-                    order.LimitPrice.HasValue &&
-                    TryParsePriceProtectionMarketPrice(result.RejectionReason, out var marketPrice))
-                {
-                    result = await RetryWithMarketAnchoredLimitAsync(
-                        order, result, alertedPrice, marketPrice, ct);
-
-                    if (result.Status == OrderStatus.Rejected || result.Status == OrderStatus.Cancelled)
-                    {
-                        _logger.LogWarning(
-                            "Broker rejected retry order for {Symbol} — {Reason}",
-                            alert.Symbol, result.RejectionReason ?? result.Status.ToString());
-                        return;
-                    }
-                    // Fall through to normal fill recording
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "Broker rejected order for {Symbol} — {Reason}",
-                        alert.Symbol, result.RejectionReason ?? result.Status.ToString());
-                    return;
-                }
-            }
-
-            if (result.Status == OrderStatus.Pending)
-            {
-                _logger.LogWarning(
-                    "Order timed out for {Symbol} — verifying position exists in Gateway before recording.",
-                    alert.Symbol);
-
-                await Task.Delay(TimeSpan.FromSeconds(3), ct);
-
-                var verifyRecord = new TradeRecord
-                {
-                    AlertId         = string.Empty,
-                    OrderId         = string.Empty,
-                    StopOrderId     = null,
-                    TargetOrderId   = null,
-                    UserName        = order.UserName,
-                    XScore          = (decimal)(alert.XScore ?? 0),
-                    DiscordRank     = alert.DiscordRank,
-                    Symbol          = order.Symbol,
-                    TradeType       = order.TradeType,
-                    OptionsContract = order.OptionsContractSymbol,
-                    Direction       = order.Direction,
-                    Strike          = order.Strike,
-                    Expiration      = order.Expiration,
-                    Quantity        = order.Quantity,
-                    EntryPrice      = order.EstimatedEntryPrice,
-                    EntryAmount     = order.BudgetUsed,
-                    StopPrice       = order.StopPrice,
-                    TargetPrice     = order.TargetPrice,
-                    OpenedAt        = DateTimeOffset.UtcNow,
-                };
-
-                var (positionPrice, positionQty) = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
- 
-                if (positionPrice <= 0 || positionQty <= 0)
-                {
-                    // Both position checks timed out, state is uncertain. Record with estimated
-                    // values rather than silently dropping; an unrecorded real position is more
-                    // dangerous than a ghost that reconciliation can detect and clean up.
-                    // StopOrderId stays null from the Pending result so the no-stop Discord
-                    // critical fires below via the existing guard.
-                    _logger.LogError(
-                        "Position verification timed out twice for {Symbol} — recording with " +
-                        "estimated fill to prevent untracked IBKR position. " +
-                        "Verify actual fill in IBKR. OrderId: {OrderId}",
-                        alert.Symbol, result.OrderId);
- 
-                    var estimatedMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
-                    result = result with
-                    {
-                        FillPrice    = order.EstimatedEntryPrice,
-                        FillQuantity = order.Quantity,
-                        FillAmount   = order.EstimatedEntryPrice * order.Quantity * estimatedMultiplier,
-                        Status       = OrderStatus.Filled,
-                    };
-                }
-                else
-                {
-                    if (positionQty != order.Quantity)
-                    {
-                        _logger.LogWarning(
-                            "Gateway qty mismatch for {Symbol} — ordered {Ordered} but IBKR holds {Actual}. " +
-                            "Recording actual qty to prevent ghost short on close.",
-                            alert.Symbol, order.Quantity, positionQty);
-                    }
-                    else
-                    {
-                        _logger.LogInformation(
-                            "Gateway confirmed position for {Symbol} — qty {Qty} @ ${Price:F2}.",
-                            alert.Symbol, positionQty, positionPrice);
-                    }
- 
-                    var pendingMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
-                    result = result with
-                    {
-                        FillPrice    = positionPrice,
-                        FillQuantity = positionQty,
-                        FillAmount   = positionPrice * positionQty * pendingMultiplier,
-                        Status       = OrderStatus.Filled,
-                    };
-                }
-            }
-
-            // Tighten trail if post-fill slippage exceeds the configured warning threshold.
             // Must run before RegisterOpen so the updated StopOrderId is stored in TradeGuard and DB.
             result = await TightenTrailOnElevatedSlippageAsync(order, result, alertedPrice, ct);
- 
+
             // Both OCA and standalone trail attempts were rejected at IBKR (e.g. SPX cash-settled
             // margin rules). The fill happened and will be tracked, but the position has no stop.
             if (result.StopOrderId is null)
@@ -268,7 +105,7 @@ public class BrokerExecutionService
                     "No stop protection for {Symbol} OrderId {OrderId} — all trail stop attempts " +
                     "rejected by IBKR. Position is open and unprotected. Manual stop required.",
                     order.Symbol, result.OrderId);
- 
+
                 await _discord.NotifyCriticalAsync(
                     $"⚠️ No Stop Protection — {order.Symbol}",
                     $"**{order.Symbol}** filled at ${result.FillPrice:F2} × {result.FillQuantity} " +
@@ -277,164 +114,12 @@ public class BrokerExecutionService
                     "Place a manual stop in IBKR immediately.",
                     ct);
             }
- 
+
             _guard.RegisterOpen(order, result);
             reservationActive = false;
 
-            var trade = _guard.FindOpenTrade(
-                order.UserName, order.OptionsContractSymbol, order.Symbol)!;
-
-            // Populate entry execution quality metrics for CSV logging
-            trade.LatencyMs = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds;
-            trade.SlippagePct = alertedPrice > 0
-                ? (result.FillPrice - alertedPrice) / alertedPrice * 100
-                : null;
-
-            try
-            {
-                using (var scope = _scopeFactory.CreateScope())
-                {
-                    var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
- 
-                    if (isAverage)
-                    {
-                        var existing = await repo.GetBySymbolAndUserAsync(trade.Symbol, trade.UserName, ct);
- 
-                        if (existing is not null)
-                        {
-                            var combinedQty        = existing.Quantity + trade.Quantity;
-                            var weightedEntryPrice = (existing.EntryPrice * existing.Quantity +
-                                                     trade.EntryPrice * trade.Quantity) / combinedQty;
-                            var combinedAmount     = existing.EntryAmount + trade.EntryAmount;
- 
-                            await repo.UpdateAverageAsync(
-                                existing.OrderId,
-                                combinedQty,
-                                weightedEntryPrice,
-                                combinedAmount,
-                                trade.StopOrderId,
-                                ct);
- 
-                            _logger.LogInformation(
-                                "Average entry merged — {Symbol} qty {OldQty}+{NewQty}={CombinedQty} " +
-                                "avg price ${AvgPrice:F2}",
-                                trade.Symbol, existing.Quantity, trade.Quantity,
-                                combinedQty, weightedEntryPrice);
-                        }
-                        else
-                        {
-                            // No existing row found — fall back to insert
-                            _logger.LogWarning(
-                                "Average entry for {Symbol} — no existing position found, inserting as new.",
-                                trade.Symbol);
-                            await repo.SaveAsync(BuildOpenPosition(trade), ct);
-                        }
-                    }
-                    else
-                    {
-                        await repo.SaveAsync(BuildOpenPosition(trade), ct);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                if (isAverage)
-                {
-                    // The original position is still valid, only the average failed to persist.
-                    // Revert HasAveraged so the position can be averaged again on the next alert.
-                    _guard.RevertAverage(order.UserName, order.OptionsContractSymbol, order.Symbol);
- 
-                    _logger.LogError(ex,
-                        "open_positions write FAILED on average entry for {Symbol}. " +
-                        "HasAveraged reverted. The average fill occurred at IBKR but is not tracked.",
-                        trade.Symbol);
- 
-                    await _discord.NotifyCriticalAsync(
-                        $"⚠️ Average Entry Write Failed — {trade.Symbol}",
-                        $"Average fill for **{trade.Symbol}** succeeded at IBKR " +
-                        $"(${result.FillPrice:F2} × {result.FillQuantity}) " +
-                        $"but could not be saved to the database. " +
-                        $"The original position remains tracked. Error: {ex.Message}",
-                        ct);
-                }
-                else
-                {
-                    // Position is in TradeGuard but not DB. Remove it now, if we don't, the next
-                    // restart will reload from DB (empty), TradeGuard will have no record of it,
-                    // and the position will be open at IBKR without any stop or exit handling.
-                    _guard.RemovePosition(trade.OrderId);
- 
-                    _logger.LogError(ex,
-                        "CRITICAL: open_positions write FAILED for {Symbol} OrderId {OrderId}. " +
-                        "Position removed from TradeGuard. Fill occurred at IBKR but is now untracked.",
-                        trade.Symbol, trade.OrderId);
- 
-                    await _discord.NotifyCriticalAsync(
-                        $"🚨 Position Write Failed — {trade.Symbol}",
-                        $"**{trade.Symbol}** filled at IBKR " +
-                        $"(${result.FillPrice:F2} × {result.FillQuantity}) " +
-                        $"but could not be saved to the database.\n" +
-                        $"The position has been removed from TradeFlow tracking.\n" +
-                        $"Error: {ex.Message}\n" +
-                        "Immediate manual review required — " +
-                        "position may be open at IBKR without TradeFlow stop protection.",
-                        ct);
-                }
- 
-                return;
-            }
- 
-            await _csv.OpenTradeAsync(trade, ct);
-
-            _logger.LogInformation(
-                "ORDER PLACED — {Type} {Symbol} {Direction} × {Qty} @ ${Price:F2} | " +
-                "Stop: ${Stop:F2} | Target: ${Target:F2} | OrderId: {OrderId}",
-                order.TradeType, order.Symbol, order.Direction ?? "—",
-                result.FillQuantity, result.FillPrice,
-                order.StopPrice, order.TargetPrice, result.OrderId);
-
-            await _discord.NotifyOrderPlacedAsync(trade, ct);
-
-            var accountBalance     = await _broker.GetAccountBalanceAsync(ct);
-            var openPositionsValue = await _broker.GetOpenPositionsValueAsync(ct);
-
-            var slippagePct = alertedPrice > 0
-                ? (result.FillPrice - alertedPrice) / alertedPrice * 100
-                : 0m;
-
-            var exposurePct = accountBalance > 0
-                ? (openPositionsValue + order.BudgetUsed) / accountBalance * 100
-                : 0m;
-
-            using var metricScope = _scopeFactory.CreateScope();
-            var metrics = metricScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
-            await metrics.OpenAsync(new TradeMetric
-            {
-                Id                        = result.OrderId,
-                AlertId                   = alert.Id,
-                TraderName                = order.UserName,
-                XScore                    = (decimal?)alert.XScore,
-                DiscordRank               = alert.DiscordRank,
-                Symbol                    = order.Symbol,
-                TradeType                 = order.TradeType.ToString(),
-                Direction                 = order.Direction,
-                OptionsContract           = order.OptionsContractSymbol,
-                IsAverage                 = isAverage,
-                AlertReceivedAt           = alertReceivedAt,
-                OrderSubmittedAt          = orderSubmittedAt,
-                OrderFilledAt             = result.FilledAt,
-                LatencyMs                 = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds,
-                AlertedPrice              = alertedPrice,
-                FillPrice                 = result.FillPrice,
-                SlippagePct               = slippagePct,
-                Quantity                  = result.FillQuantity,
-                EntryAmount               = result.FillAmount,
-                StopPrice                 = order.StopPrice,
-                TargetPrice               = order.TargetPrice,
-                AccountBalanceAtEntry     = accountBalance,
-                OpenPositionsValueAtEntry = openPositionsValue,
-                ExposurePct               = exposurePct,
-            }, ct);
+            var trade = _guard.FindOpenTrade(order.UserName, order.OptionsContractSymbol, order.Symbol)!;
+            await PersistEntryAsync(alert, order, trade, result, alertedPrice, alertReceivedAt, orderSubmittedAt, isAverage, ct);
         }
         finally
         {
@@ -453,12 +138,12 @@ public class BrokerExecutionService
         CancellationToken ct = default)
     {
         var alertReceivedAt = DateTimeOffset.UtcNow;
- 
+
         var trade = _guard.FindOpenTrade(
             alert.UserName ?? "",
             alert.OptionsContractSymbol,
             alert.Symbol ?? "");
- 
+
         if (trade is null)
         {
             _logger.LogDebug(
@@ -466,7 +151,7 @@ public class BrokerExecutionService
                 alert.Symbol);
             return;
         }
- 
+
         // Single-closer election: mark the position as closing before touching the broker.
         // If another concurrent path (polling + SignalR race) already marked it, abort here
         // to prevent both submitting market sells and creating a ghost short on the second fill.
@@ -477,7 +162,7 @@ public class BrokerExecutionService
                 alert.Symbol);
             return;
         }
- 
+
         BrokerOrderResult closeResult;
         try
         {
@@ -490,7 +175,7 @@ public class BrokerExecutionService
                 "Broker ClosePositionAsync failed for {Symbol}, skipping", alert.Symbol);
             return;
         }
- 
+
         // A Pending result means ClosePositionAsync double-timed out. The stop is already
         // cancelled at IBKR but the position may still be open. Do not record a close —
         // the position remains in TradeGuard and open_positions for reconciliation.
@@ -579,7 +264,7 @@ public class BrokerExecutionService
                 trade.Symbol);
             return;
         }
- 
+
         BrokerOrderResult closeResult;
         try
         {
@@ -592,7 +277,7 @@ public class BrokerExecutionService
                 "Broker ClosePositionAsync failed during force close for {Symbol}", trade.Symbol);
             return;
         }
- 
+
         if (closeResult.Status == OrderStatus.Pending)
         {
             _guard.RevertClosing(trade.UserName, trade.OptionsContract, trade.Symbol);
@@ -602,7 +287,7 @@ public class BrokerExecutionService
                 trade.Symbol);
             return;
         }
- 
+
         var closedTrade = _guard.RegisterClose(
             trade.UserName,
             trade.OptionsContract,
@@ -718,6 +403,358 @@ public class BrokerExecutionService
 
     // -- Helpers --
 
+    // Runs market-hours, pause-state, and alert-staleness checks before any broker interaction.
+    // Stock entries use a tighter staleness threshold, the intent is to enter near the alerted
+    // price or not at all. Options tolerate a wider window since the limit order provides the
+    // real price protection.
+    private bool PassesPreEntryChecks(Alert alert, AlertClassification classification, decimal alertedPrice)
+    {
+        if (!_isMarketOpen())
+        {
+            _logger.LogDebug("Market closed, skipping order for {Symbol}", alert.Symbol);
+            return false;
+        }
+
+        if (_riskOptions.TradingPaused || IsPaused)
+        {
+            _logger.LogWarning("Trading is paused — skipping new entry for {Symbol}", alert.Symbol);
+            return false;
+        }
+
+        var isStockEntry = classification.Category == AlertCategory.StockEntry;
+        var maxStaleness = isStockEntry && _riskOptions.StockAlertStalenessMaxSlippagePct > 0
+            ? _riskOptions.StockAlertStalenessMaxSlippagePct
+            : _riskOptions.AlertStalenessMaxSlippagePct;
+
+        if (maxStaleness > 0 && alertedPrice > 0)
+        {
+            var priceAtAlertTime = alert.ActualPriceAtTimeOfAlert ?? 0m;
+            if (priceAtAlertTime > 0)
+            {
+                var staleness = (alertedPrice - priceAtAlertTime) / priceAtAlertTime * 100;
+                if (staleness > maxStaleness)
+                {
+                    _logger.LogWarning(
+                        "Alert staleness check failed for {Symbol} — PricePaid ${Paid:F2} " +
+                        "vs alert price ${AlertPrice:F2} ({Staleness:F1}%) exceeds {TradeType} max {Max:F1}%",
+                        alert.Symbol, alertedPrice, priceAtAlertTime,
+                        staleness, isStockEntry ? "stock" : "options", maxStaleness);
+                    return false;
+                }
+
+                _logger.LogDebug(
+                    "Alert staleness check passed for {Symbol} — {Staleness:F1}% within {TradeType} limit {Max:F1}%",
+                    alert.Symbol, staleness, isStockEntry ? "stock" : "options", maxStaleness);
+            }
+        }
+
+        return true;
+    }
+
+    // Places the entry order and handles all broker-side outcomes: exceptions, Rejected/Cancelled
+    // responses (including the price-protection retry path), and Pending (limit timeout).
+    // Returns null on any non-recoverable failure so HandleEntryAsync can exit cleanly
+    // while the finally block releases the TradeGuard reservation.
+    private async Task<BrokerOrderResult?> ExecuteBrokerEntryAsync(
+        Alert alert,
+        TradeOrder order,
+        decimal alertedPrice,
+        CancellationToken ct)
+    {
+        BrokerOrderResult result;
+        try
+        {
+            result = await _broker.PlaceOrderAsync(order, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Broker PlaceOrderAsync failed for {Symbol}, skipping", alert.Symbol);
+            return null;
+        }
+
+        if (result.Status == OrderStatus.Rejected || result.Status == OrderStatus.Cancelled)
+        {
+            // IBKR price-protection rejection on a stock limit order, retry once with a
+            // limit anchored to the market price IBKR reported in the rejection message.
+            // No extra roundtrip: the market price is extracted from the rejection itself.
+            if (result.Status == OrderStatus.Cancelled &&
+                order.LimitPrice.HasValue &&
+                TryParsePriceProtectionMarketPrice(result.RejectionReason, out var marketPrice))
+            {
+                result = await RetryWithMarketAnchoredLimitAsync(order, result, alertedPrice, marketPrice, ct);
+
+                if (result.Status == OrderStatus.Rejected || result.Status == OrderStatus.Cancelled)
+                {
+                    _logger.LogWarning(
+                        "Broker rejected retry order for {Symbol} — {Reason}",
+                        alert.Symbol, result.RejectionReason ?? result.Status.ToString());
+                    return null;
+                }
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Broker rejected order for {Symbol} — {Reason}",
+                    alert.Symbol, result.RejectionReason ?? result.Status.ToString());
+                return null;
+            }
+        }
+
+        if (result.Status == OrderStatus.Pending)
+        {
+            _logger.LogWarning(
+                "Order timed out for {Symbol} — verifying position exists in Gateway before recording.",
+                alert.Symbol);
+            result = await VerifyPendingFillAsync(alert, order, result, ct);
+        }
+
+        return result;
+    }
+
+    // Verifies whether a timed-out limit order actually filled by querying the Gateway position.
+    // Retries once after a short delay to allow IBKR propagation. If both checks return nothing,
+    // records an estimated fill rather than silently dropping the position, an unrecorded open
+    // position at IBKR is more dangerous than a ghost that reconciliation can clean up.
+    // StopOrderId stays null from the Pending result, triggering the no-stop Discord critical.
+    private async Task<BrokerOrderResult> VerifyPendingFillAsync(
+        Alert alert,
+        TradeOrder order,
+        BrokerOrderResult pending,
+        CancellationToken ct)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(3), ct);
+
+        var verifyRecord = new TradeRecord
+        {
+            AlertId         = string.Empty,
+            OrderId         = string.Empty,
+            StopOrderId     = null,
+            TargetOrderId   = null,
+            UserName        = order.UserName,
+            XScore          = (decimal)(alert.XScore ?? 0),
+            DiscordRank     = alert.DiscordRank,
+            Symbol          = order.Symbol,
+            TradeType       = order.TradeType,
+            OptionsContract = order.OptionsContractSymbol,
+            Direction       = order.Direction,
+            Strike          = order.Strike,
+            Expiration      = order.Expiration,
+            Quantity        = order.Quantity,
+            EntryPrice      = order.EstimatedEntryPrice,
+            EntryAmount     = order.BudgetUsed,
+            StopPrice       = order.StopPrice,
+            TargetPrice     = order.TargetPrice,
+            OpenedAt        = DateTimeOffset.UtcNow,
+        };
+
+        var (positionPrice, positionQty) = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
+
+        if (positionPrice <= 0 || positionQty <= 0)
+        {
+            _logger.LogWarning(
+                "Position not confirmed for {Symbol} on first check — waiting 5s and retrying.",
+                order.Symbol);
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+            (positionPrice, positionQty) = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
+        }
+
+        if (positionPrice <= 0 || positionQty <= 0)
+        {
+            _logger.LogError(
+                "Position verification timed out twice for {Symbol} — recording with " +
+                "estimated fill to prevent untracked IBKR position. " +
+                "Verify actual fill in IBKR. OrderId: {OrderId}",
+                order.Symbol, pending.OrderId);
+
+            var estimatedMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+            return pending with
+            {
+                FillPrice    = order.EstimatedEntryPrice,
+                FillQuantity = order.Quantity,
+                FillAmount   = order.EstimatedEntryPrice * order.Quantity * estimatedMultiplier,
+                Status       = OrderStatus.Filled,
+            };
+        }
+
+        if (positionQty != order.Quantity)
+            _logger.LogWarning(
+                "Gateway qty mismatch for {Symbol} — ordered {Ordered} but IBKR holds {Actual}. " +
+                "Recording actual qty to prevent ghost short on close.",
+                order.Symbol, order.Quantity, positionQty);
+        else
+            _logger.LogInformation(
+                "Gateway confirmed position for {Symbol} — qty {Qty} @ ${Price:F2}.",
+                order.Symbol, positionQty, positionPrice);
+
+        var pendingMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+        return pending with
+        {
+            FillPrice    = positionPrice,
+            FillQuantity = positionQty,
+            FillAmount   = positionPrice * positionQty * pendingMultiplier,
+            Status       = OrderStatus.Filled,
+        };
+    }
+
+    // Writes a confirmed fill to open_positions, CSV, Discord, and trade_metrics.
+    // On DB write failure, reverts TradeGuard state and fires a Discord critical.
+    // Remaining writes (CSV, Discord, metrics) are skipped when the DB write fails.
+    private async Task PersistEntryAsync(
+        Alert alert,
+        TradeOrder order,
+        TradeRecord trade,
+        BrokerOrderResult result,
+        decimal alertedPrice,
+        DateTimeOffset alertReceivedAt,
+        DateTimeOffset orderSubmittedAt,
+        bool isAverage,
+        CancellationToken ct)
+    {
+        trade.LatencyMs = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds;
+        trade.SlippagePct = alertedPrice > 0
+            ? (result.FillPrice - alertedPrice) / alertedPrice * 100
+            : null;
+
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+
+            if (isAverage)
+            {
+                var existing = await repo.GetBySymbolAndUserAsync(trade.Symbol, trade.UserName, ct);
+
+                if (existing is not null)
+                {
+                    var combinedQty        = existing.Quantity + trade.Quantity;
+                    var weightedEntryPrice = (existing.EntryPrice * existing.Quantity +
+                                             trade.EntryPrice * trade.Quantity) / combinedQty;
+                    var combinedAmount     = existing.EntryAmount + trade.EntryAmount;
+
+                    await repo.UpdateAverageAsync(
+                        existing.OrderId, combinedQty, weightedEntryPrice, combinedAmount,
+                        trade.StopOrderId, ct);
+
+                    _logger.LogInformation(
+                        "Average entry merged — {Symbol} qty {OldQty}+{NewQty}={CombinedQty} " +
+                        "avg price ${AvgPrice:F2}",
+                        trade.Symbol, existing.Quantity, trade.Quantity, combinedQty, weightedEntryPrice);
+                }
+                else
+                {
+                    // No existing row found, fall back to insert
+                    _logger.LogWarning(
+                        "Average entry for {Symbol} — no existing position found, inserting as new.",
+                        trade.Symbol);
+                    await repo.SaveAsync(BuildOpenPosition(trade), ct);
+                }
+            }
+            else
+            {
+                await repo.SaveAsync(BuildOpenPosition(trade), ct);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (isAverage)
+            {
+                // The original position is still valid, only the average failed to persist.
+                // Revert HasAveraged so the position can be averaged again on the next alert.
+                _guard.RevertAverage(order.UserName, order.OptionsContractSymbol, order.Symbol);
+
+                _logger.LogError(ex,
+                    "open_positions write FAILED on average entry for {Symbol}. " +
+                    "HasAveraged reverted. The average fill occurred at IBKR but is not tracked.",
+                    trade.Symbol);
+
+                await _discord.NotifyCriticalAsync(
+                    $"⚠️ Average Entry Write Failed — {trade.Symbol}",
+                    $"Average fill for **{trade.Symbol}** succeeded at IBKR " +
+                    $"(${result.FillPrice:F2} × {result.FillQuantity}) " +
+                    $"but could not be saved to the database. " +
+                    $"The original position remains tracked. Error: {ex.Message}",
+                    ct);
+            }
+            else
+            {
+                // Position is in TradeGuard but not DB. Remove it now, if we don't, the next
+                // restart will reload from DB (empty), TradeGuard will have no record of it,
+                // and the position will be open at IBKR without any stop or exit handling.
+                _guard.RemovePosition(trade.OrderId);
+
+                _logger.LogError(ex,
+                    "CRITICAL: open_positions write FAILED for {Symbol} OrderId {OrderId}. " +
+                    "Position removed from TradeGuard. Fill occurred at IBKR but is now untracked.",
+                    trade.Symbol, trade.OrderId);
+
+                await _discord.NotifyCriticalAsync(
+                    $"🚨 Position Write Failed — {trade.Symbol}",
+                    $"**{trade.Symbol}** filled at IBKR " +
+                    $"(${result.FillPrice:F2} × {result.FillQuantity}) " +
+                    $"but could not be saved to the database.\n" +
+                    $"The position has been removed from TradeFlow tracking.\n" +
+                    $"Error: {ex.Message}\n" +
+                    "Immediate manual review required — " +
+                    "position may be open at IBKR without TradeFlow stop protection.",
+                    ct);
+            }
+
+            return;
+        }
+
+        await _csv.OpenTradeAsync(trade, ct);
+
+        _logger.LogInformation(
+            "ORDER PLACED — {Type} {Symbol} {Direction} × {Qty} @ ${Price:F2} | " +
+            "Stop: ${Stop:F2} | Target: ${Target:F2} | OrderId: {OrderId}",
+            order.TradeType, order.Symbol, order.Direction ?? "—",
+            result.FillQuantity, result.FillPrice,
+            order.StopPrice, order.TargetPrice, result.OrderId);
+
+        await _discord.NotifyOrderPlacedAsync(trade, ct);
+
+        var accountBalance     = await _broker.GetAccountBalanceAsync(ct);
+        var openPositionsValue = await _broker.GetOpenPositionsValueAsync(ct);
+
+        var slippagePct = alertedPrice > 0
+            ? (result.FillPrice - alertedPrice) / alertedPrice * 100
+            : 0m;
+
+        var exposurePct = accountBalance > 0
+            ? (openPositionsValue + order.BudgetUsed) / accountBalance * 100
+            : 0m;
+
+        using var metricScope = _scopeFactory.CreateScope();
+        var metrics = metricScope.ServiceProvider.GetRequiredService<ITradeMetricsRepository>();
+        await metrics.OpenAsync(new TradeMetric
+        {
+            Id                        = result.OrderId,
+            AlertId                   = alert.Id,
+            TraderName                = order.UserName,
+            XScore                    = (decimal?)alert.XScore,
+            DiscordRank               = alert.DiscordRank,
+            Symbol                    = order.Symbol,
+            TradeType                 = order.TradeType.ToString(),
+            Direction                 = order.Direction,
+            OptionsContract           = order.OptionsContractSymbol,
+            IsAverage                 = isAverage,
+            AlertReceivedAt           = alertReceivedAt,
+            OrderSubmittedAt          = orderSubmittedAt,
+            OrderFilledAt             = result.FilledAt,
+            LatencyMs                 = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds,
+            AlertedPrice              = alertedPrice,
+            FillPrice                 = result.FillPrice,
+            SlippagePct               = slippagePct,
+            Quantity                  = result.FillQuantity,
+            EntryAmount               = result.FillAmount,
+            StopPrice                 = order.StopPrice,
+            TargetPrice               = order.TargetPrice,
+            AccountBalanceAtEntry     = accountBalance,
+            OpenPositionsValueAtEntry = openPositionsValue,
+            ExposurePct               = exposurePct,
+        }, ct);
+    }
+
     // Parses the market price stored by IbkrEWrapper when IBKR fires a price-protection [202]
     // rejection. Format: "PRICE_PROTECTION:267.2"
     private static bool TryParsePriceProtectionMarketPrice(string? reason, out decimal marketPrice)
@@ -740,20 +777,19 @@ public class BrokerExecutionService
         CancellationToken ct)
     {
         // Back-calculate effective slippage pct from the original limit so the retry works
-        // correctly for all risk tiers (stock, options standard/high/lotto) without needing
-        // to know which tier's config value to apply.
+        // correctly for all risk tiers without needing to know which tier's config value to apply.
         var effectiveSlippagePct = alertedPrice > 0
             ? (order.LimitPrice!.Value - alertedPrice) / alertedPrice * 100m
             : 0m;
- 
+
         var adjustedLimit = Math.Round(
             marketPrice * (1m + effectiveSlippagePct / 100m), 2);
- 
+
         // The original limit IS the alert ceiling — it was set as alertPrice × (1 + slippage%).
         // If the market moved up, adjustedLimit > original limit, meaning price ran away.
         // Only retry when the market dropped and we can get a tighter, acceptable fill.
         var alertCeiling = order.LimitPrice!.Value;
- 
+
         if (adjustedLimit > alertCeiling)
         {
             _logger.LogWarning(
