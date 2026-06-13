@@ -12,6 +12,7 @@ Usage:
 
 import csv
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 
@@ -156,6 +157,13 @@ def main():
         print("No files could be parsed.")
         return
 
+    # Extract period from the first file's metadata, backtest.py writes this consistently.
+    first_meta  = results[0]["meta"]
+    period      = first_meta.get("Period", folder.name)
+    from_date   = first_meta.get("From", "")
+    to_date     = first_meta.get("To", "")
+    generated   = datetime.now().strftime("%Y-%m-%d %H:%M")
+
     rows = []
     for r in results:
         summary = r["summary"]
@@ -189,6 +197,14 @@ def main():
     output_path = folder / "performance_summary.csv"
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
+
+        # Period header, makes the file self-identifying when reviewed outside its folder.
+        w.writerow([f"Period: {period}"])
+        if from_date and to_date:
+            w.writerow([f"From: {from_date}  To: {to_date}"])
+        w.writerow([f"Generated: {generated}"])
+        w.writerow([])
+
         w.writerow([
             "Rank", "Strategy", "Trades (W/L)", "Total P&L",
             "Top Trader", "Top Trader W/L", "Top Trader P&L",
