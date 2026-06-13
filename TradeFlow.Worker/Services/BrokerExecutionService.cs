@@ -209,47 +209,51 @@ public class BrokerExecutionService
  
                 if (positionPrice <= 0 || positionQty <= 0)
                 {
-                    // First check returned nothing, IBKR may not have propagated the fill yet.
-                    // Retry once after a short delay before concluding no fill.
-                    _logger.LogWarning(
-                        "Position not confirmed for {Symbol} on first check — waiting 5s and retrying.",
-                        alert.Symbol);
+                    // Both position checks timed out, state is uncertain. Record with estimated
+                    // values rather than silently dropping; an unrecorded real position is more
+                    // dangerous than a ghost that reconciliation can detect and clean up.
+                    // StopOrderId stays null from the Pending result so the no-stop Discord
+                    // critical fires below via the existing guard.
+                    _logger.LogError(
+                        "Position verification timed out twice for {Symbol} — recording with " +
+                        "estimated fill to prevent untracked IBKR position. " +
+                        "Verify actual fill in IBKR. OrderId: {OrderId}",
+                        alert.Symbol, result.OrderId);
  
-                    await Task.Delay(TimeSpan.FromSeconds(5), ct);
-                    (positionPrice, positionQty) = await _broker.GetCurrentPositionPriceAsync(verifyRecord, ct);
-                }
- 
-                if (positionPrice <= 0 || positionQty <= 0)
-                {
-                    _logger.LogWarning(
-                        "Position not confirmed in Gateway for {Symbol} after timeout — " +
-                        "order not recorded to prevent ghost position.",
-                        alert.Symbol);
-                    return;
-                }
-
-                if (positionQty != order.Quantity)
-                {
-                    _logger.LogWarning(
-                        "Gateway qty mismatch for {Symbol} — ordered {Ordered} but IBKR holds {Actual}. " +
-                        "Recording actual qty to prevent ghost short on close.",
-                        alert.Symbol, order.Quantity, positionQty);
+                    var estimatedMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+                    result = result with
+                    {
+                        FillPrice    = order.EstimatedEntryPrice,
+                        FillQuantity = order.Quantity,
+                        FillAmount   = order.EstimatedEntryPrice * order.Quantity * estimatedMultiplier,
+                        Status       = OrderStatus.Filled,
+                    };
                 }
                 else
                 {
-                    _logger.LogInformation(
-                        "Gateway confirmed position for {Symbol} — qty {Qty} @ ${Price:F2}.",
-                        alert.Symbol, positionQty, positionPrice);
+                    if (positionQty != order.Quantity)
+                    {
+                        _logger.LogWarning(
+                            "Gateway qty mismatch for {Symbol} — ordered {Ordered} but IBKR holds {Actual}. " +
+                            "Recording actual qty to prevent ghost short on close.",
+                            alert.Symbol, order.Quantity, positionQty);
+                    }
+                    else
+                    {
+                        _logger.LogInformation(
+                            "Gateway confirmed position for {Symbol} — qty {Qty} @ ${Price:F2}.",
+                            alert.Symbol, positionQty, positionPrice);
+                    }
+ 
+                    var pendingMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+                    result = result with
+                    {
+                        FillPrice    = positionPrice,
+                        FillQuantity = positionQty,
+                        FillAmount   = positionPrice * positionQty * pendingMultiplier,
+                        Status       = OrderStatus.Filled,
+                    };
                 }
-
-                var pendingMultiplier = order.TradeType == TradeType.Options ? 100m : 1m;
-                result = result with
-                {
-                    FillPrice    = positionPrice,
-                    FillQuantity = positionQty,
-                    FillAmount   = positionPrice * positionQty * pendingMultiplier,
-                    Status       = OrderStatus.Filled,
-                };
             }
 
             // Tighten trail if post-fill slippage exceeds the configured warning threshold.

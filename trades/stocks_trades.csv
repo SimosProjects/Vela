@@ -1,23 +1,13 @@
-Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %
-2026-06-08,11:36:52,2026-06-08,15:03:08,AMD,6.0,489.59,2937.54,2893.0,+0.08%,490.11,2940.66,2603.0,-0.04%,Closed,XtradesExit,Lukasz,65.0,,3.12,+0.11%
-2026-06-08,15:03:41,2026-06-08,15:31:42,AMD,6.0,491.62,2949.72,2141.0,+0.26%,489.85,2939.1,2464.0,+0.00%,Closed,XtradesExit,Lukasz,65.0,,-10.62,-0.36%
+Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId
 2026-06-08,14:25:48,,,SHAK,55.0,53.99,2969.45,2899.0,+0.04%,,,,,Open,Open,Kevin Izaguirrre,74.0,,,
-2026-06-08,14:32:21,2026-06-09,10:38:35,META,5.0,588.48,2942.4,,,595.92,2979.6,1676.0,-0.10%,Closed,XtradesExit,Theo,81.0,,37.2,+1.26%
-2026-06-08,15:52:43,2026-06-09,11:28:06,LITE,3.0,889.96,2669.88,,,821.12,2463.36,,,Closed,StoppedOut,ultra,72.0,,-206.52,-7.74%
 2026-06-08,15:03:41,,,AMD,6.0,490.99,2945.94,2141.0,+0.26%,,,,,Open,Open,Lukasz,65.0,,,
-2026-06-09,10:32:49,2026-06-10,14:32:49,ROL,63.0,47.33,2981.79,2756.0,+0.06%,48.41,3049.83,,,Closed,XtradesExit,Theo,81.0,,68.04,+2.28%
-2026-06-09,10:33:54,2026-06-09,16:00:00,POET,271.0,11.04,2991.84,2094.0,-0.09%,9.3925,2545.37,,,Closed,StoppedOut,Krazy 👶 🐐,77.0,Top Analyst I,-446.47,-14.92%
-2026-06-09,10:40:21,2026-06-09,16:00:00,MRVL,11.0,271.11,2982.21,2032.0,+0.01%,230.4265,2534.69,,,Closed,StoppedOut,SLAM,78.0,,-447.52,-15.01%
-2026-06-09,11:20:28,2026-06-09,11:32:04,PAVS,309.0,9.9,3059.1,2099.0,+2.17%,12.1,3738.9,,,Closed,StoppedOut,yoyomun,88.0,,679.8,+22.22%
-2026-06-10,10:07:13,2026-06-11,09:31:14,CHWY,148.0,20.22,2992.56,2240.0,-0.25%,18.5,2738.0,,,Closed,StoppedOut,SLAM,78.0,Contributor II,-254.56,-8.51%
-2026-06-10,11:27:09,2026-06-11,12:19:49,SW,19.0,39.26,745.94,1187.0,+0.15%,39.65,753.35,,,Closed,XtradesExit,Theo,81.0,Top Analyst VIII,7.41,+0.99%
 2026-06-10,14:12:24,,,SOFI,46.0,16.03,737.38,1953.0,+0.19%,,,,,Open,Open,Krazy 👶 🐐,77.0,Top Analyst I,,
-2026-06-11,09:37:02,2026-06-11,09:41:09,PPCB,177,4.17,738.09,1417,-1.18%,5.04,892.08,,,Closed,StoppedOut,yoyomun,88,,+153.99,+20.86%
 2026-06-11,10:04:58,,,PINS,34,21.47,729.98,1312,+0.09%,,,,,Open,Open,SLAM,78,,,
 2026-06-11,14:49:49,,,BULL,348,6.47,2251.56,1397,+0.31%,,,,,Open,Open,Krazy 👶 🐐,77,Top Analyst I,,
+2026-06-12,11:10:52,,,PURR,255,8.81,2246.55,1497,+0.23%,,,,,Open,Open,Trading Goat,96,,,,4454
 
 ,,SUMMARY
-,,Total Trades,16
-,,Open,5,Closed,11
-,,Wins,6,Losses,5,Win Rate,54.5%
-,,Total P&L,-416.13
+,,Total Trades,6
+,,Open,6,Closed,0
+,,Wins,0,Losses,0,Win Rate,0.0%
+,,Total P&L,+0.00

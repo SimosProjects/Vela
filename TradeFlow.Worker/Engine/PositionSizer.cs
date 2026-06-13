@@ -3,9 +3,11 @@ using TradeFlow.Worker.Models;
 namespace TradeFlow.Worker.Engine;
 
 // Converts an approved Alert into a TradeOrder with sizing, stop, target, and trail prices.
-// Fixed sizing rules for paper trading phase:
-//   Options: $2,000 initial, $1,000 average
-//   Stocks:  $1,500 initial, $500 average
+// Position sizing uses independent budgets per risk tier, all configurable:
+//   Options standard: OptionsInitialBudget / OptionsAverageBudget
+//   Options high:     OptionsHighBudget    / OptionsHighAverageBudget
+//   Options lotto:    OptionsLottoBudget   / OptionsLottoAverageBudget
+//   Stocks:           StockInitialBudget   / StockAverageBudget
 //
 // Risk tier is auto-classified for options based on expiry:
 //   Expires today          -> lotto (regardless of Xtrades label)
@@ -71,14 +73,17 @@ public class PositionSizer
             : (alert.Risk?.ToLowerInvariant() ?? "standard");
 
         var budget = isOptions
-            ? effectiveRisk == "lotto"
-                ? (isAverage ? _options.OptionsLottoAverageBudget : _options.OptionsLottoBudget)
-                : (isAverage ? _options.OptionsAverageBudget : _options.OptionsInitialBudget)
+            ? effectiveRisk switch
+            {
+                "lotto" => isAverage ? _options.OptionsLottoAverageBudget : _options.OptionsLottoBudget,
+                "high"  => isAverage ? _options.OptionsHighAverageBudget  : _options.OptionsHighBudget,
+                _       => isAverage ? _options.OptionsAverageBudget      : _options.OptionsInitialBudget,
+            }
             : (isAverage ? _options.StockAverageBudget : _options.StockInitialBudget);
 
-        // Apply regime-aware sizing multiplier — set once at market open by MarketConditionsLogger.
+        // Apply regime-aware sizing multiplier, set once at market open by MarketConditionsLogger.
         // Multiplier is 1.0 (Bullish), 0.5 (Choppy), or 0.25 (Bearish) by default.
-        // Lotto budget is not scaled — it is already sized for maximum risk tolerance.
+        // Lotto budget is not scaled, it is already sized for maximum risk tolerance.
         if (effectiveRisk != "lotto" && _regime is not null)
             budget = budget * _regime.SizingMultiplier;
 

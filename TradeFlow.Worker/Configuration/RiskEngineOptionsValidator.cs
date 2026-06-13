@@ -31,6 +31,26 @@ public class RiskEngineOptionsValidator : IValidateOptions<RiskEngineOptions>
             failures.Add(
                 $"OptionsAverageBudget ({options.OptionsAverageBudget}) must not exceed " +
                 $"OptionsInitialBudget ({options.OptionsInitialBudget}).");
+ 
+        if (options.OptionsHighBudget > options.OptionsInitialBudget)
+            failures.Add(
+                $"OptionsHighBudget ({options.OptionsHighBudget}) must not exceed " +
+                $"OptionsInitialBudget ({options.OptionsInitialBudget}).");
+ 
+        if (options.OptionsHighBudget < options.OptionsLottoBudget)
+            failures.Add(
+                $"OptionsHighBudget ({options.OptionsHighBudget}) must not be below " +
+                $"OptionsLottoBudget ({options.OptionsLottoBudget}).");
+ 
+        if (options.OptionsHighAverageBudget > options.OptionsAverageBudget)
+            failures.Add(
+                $"OptionsHighAverageBudget ({options.OptionsHighAverageBudget}) must not exceed " +
+                $"OptionsAverageBudget ({options.OptionsAverageBudget}).");
+ 
+        if (options.OptionsHighAverageBudget < options.OptionsLottoAverageBudget)
+            failures.Add(
+                $"OptionsHighAverageBudget ({options.OptionsHighAverageBudget}) must not be below " +
+                $"OptionsLottoAverageBudget ({options.OptionsLottoAverageBudget}).");
 
         if (options.StockAverageBudget > options.StockInitialBudget)
             failures.Add(
