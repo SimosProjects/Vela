@@ -67,7 +67,7 @@ export function DesktopLayout({
             />
             <AlertSourcePanel system={system} />
             <BrokerPanel system={system} />
-            <TraderRoster traders={traders} minXScore={riskConfig.minXScore} />
+            <TraderRoster />
           </div>
         </div>
       </div>

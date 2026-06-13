@@ -1,14 +1,33 @@
 import { useState, useEffect } from 'react';
 import { B, fmtTime } from '../styles/theme.js';
 
+// Level-based color for the level badge
 const LEVEL_COLOR = {
   INF: B.mu,
   WRN: B.am,
   ERR: B.rd,
 };
 
+// Returns the message text color based on level and content.
+// Priority: ERR → red, WRN → amber, fill confirmed → green, default → text2.
+function msgColor(level, message) {
+  if (level === 'ERR') return B.rd;
+  if (level === 'WRN') return B.am;
+  const m = message.toLowerCase();
+  if (m.includes('filled')) return B.gr;
+  return B.tx2;
+}
+
+// Optional subtle left-border accent for high-signal rows.
+function rowAccent(level, message) {
+  if (level === 'ERR') return B.rd;
+  if (level === 'WRN') return B.am;
+  if (message.toLowerCase().includes('filled')) return B.gr;
+  return 'transparent';
+}
+
 export function LogPanel() {
-  const [logs, setLogs]   = useState([]);
+  const [logs,  setLogs]  = useState([]);
   const [error, setError] = useState(false);
 
   const fetchLogs = async () => {
@@ -29,7 +48,6 @@ export function LogPanel() {
     return () => clearInterval(timer);
   }, []);
 
-  // API returns newest first (DESC) — display as-is so newest shows at top
   return (
     <div style={{
       background:    B.bg,
@@ -60,36 +78,35 @@ export function LogPanel() {
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
         {logs.length === 0 && !error && (
-          <div style={{
-            padding:    '12px',
-            fontSize:   10,
-            color:      B.mu,
-            fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-          }}>
+          <div style={{ padding: '12px', fontSize: 10, color: B.mu, fontFamily: 'ui-monospace, SFMono-Regular, monospace' }}>
             No log entries for today yet.
           </div>
         )}
-        {logs.map((entry, i) => (
-          <div key={i} style={{
-            display:             'grid',
-            gridTemplateColumns: '58px 36px 1fr',
-            gap:                 6,
-            padding:             '3px 12px',
-            fontSize:            10,
-            lineHeight:          '16px',
-            fontFamily:          'ui-monospace, SFMono-Regular, monospace',
-          }}>
-            <span style={{ color: B.mu2, whiteSpace: 'nowrap' }}>
-              {fmtTime(entry.loggedAt)}
-            </span>
-            <span style={{ color: LEVEL_COLOR[entry.level] ?? B.mu, fontWeight: 700 }}>
-              {entry.level}
-            </span>
-            <span style={{ color: entry.level === 'INF' ? B.tx2 : (LEVEL_COLOR[entry.level] ?? B.mu) }}>
-              {entry.message}
-            </span>
-          </div>
-        ))}
+        {logs.map((entry, i) => {
+          const accent = rowAccent(entry.level, entry.message);
+          return (
+            <div key={i} style={{
+              display:             'grid',
+              gridTemplateColumns: '58px 36px 1fr',
+              gap:                 6,
+              padding:             '3px 12px 3px 10px',
+              fontSize:            10,
+              lineHeight:          '16px',
+              fontFamily:          'ui-monospace, SFMono-Regular, monospace',
+              borderLeft:          `2px solid ${accent}`,
+            }}>
+              <span style={{ color: B.mu2, whiteSpace: 'nowrap' }}>
+                {fmtTime(entry.loggedAt)}
+              </span>
+              <span style={{ color: LEVEL_COLOR[entry.level] ?? B.mu, fontWeight: 700 }}>
+                {entry.level}
+              </span>
+              <span style={{ color: msgColor(entry.level, entry.message) }}>
+                {entry.message}
+              </span>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

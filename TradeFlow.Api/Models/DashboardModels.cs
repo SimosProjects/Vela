@@ -106,3 +106,13 @@ public record WorkerLogResponse(
     string Level,
     string Message
 );
+
+/// <summary>Full trader roster returned by GET /api/dashboard/traders.</summary>
+public record TradersResponse(
+    IReadOnlyList<string> Approved,
+    IReadOnlyList<RestrictedTraderDto> Restricted,
+    IReadOnlyList<string> Blocked
+);
+
+/// <summary>Trader with a partial position-size allotment (0 &lt; allotmentPct &lt; 100).</summary>
+public record RestrictedTraderDto(string Name, int AllotmentPct);
