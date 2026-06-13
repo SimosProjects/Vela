@@ -1,9 +1,9 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike,Expiration,Contracts,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId
-2026-06-08,13:52:48,,,MSFT,MSFT260717C00420000,call,420,Jul 17 2026,2.0,13.4,2680.0,8266.0,+1.52%,,,,,Open,Open,Krazy 👶 🐐,77.0,Top Analyst 1,,
-2026-06-09,09:46:31,,,GOOGL,GOOGL260821C00400000,call,400,Aug 21 2026,2.0,14.55,2910.0,3916.0,+2.46%,,,,,Open,Open,cpotts9,70.0,,,
-2026-06-09,10:29:44,,,ONDS,ONDS260918C00010000,call,10,Sep 18 2026,14.0,2.16,3024.0,15868.0,+2.86%,,,,,Open,Open,Krazy 👶 🐐,77.0,Top Analyst I,,
-2026-06-11,10:56:04,,,BMY,BMY260918C00060000,call,60,Sep 18 2026,3,2.35,705.00,4113,+6.82%,,,,,Open,Open,Fibonaccizer,61,,,
-2026-06-11,14:15:30,,,BABA,BABA260717C00115000,call,115,Jul 17 2026,5,5.08,2542.00,4972,+12.98%,,,,,Open,Open,Krazy 👶 🐐,77,,,
+2026-06-08,13:52:48,,,MSFT,MSFT260717C00420000,call,420,Jul 17 2026,2.0,13.4,2680.0,8266.0,+1.52%,,,,,Open,Open,Krazy 👶 🐐,77.0,Top Analyst 1,,,3156
+2026-06-09,09:46:31,,,GOOGL,GOOGL260821C00400000,call,400,Aug 21 2026,2.0,14.55,2910.0,3916.0,+2.46%,,,,,Open,Open,cpotts9,70.0,,,,3426
+2026-06-09,10:29:44,,,ONDS,ONDS260918C00010000,call,10,Sep 18 2026,14.0,2.16,3024.0,15868.0,+2.86%,,,,,Open,Open,Krazy 👶 🐐,77.0,Top Analyst I,,,3539
+2026-06-11,10:56:04,,,BMY,BMY260918C00060000,call,60,Sep 18 2026,3,2.35,705.00,4113,+6.82%,,,,,Open,Open,Fibonaccizer,61,,,,4014
+2026-06-11,14:15:30,,,BABA,BABA260717C00115000,call,115,Jul 17 2026,5,5.08,2542.00,4972,+12.98%,,,,,Open,Open,Krazy 👶 🐐,77,,,,4112
 2026-06-12,10:15:28,,,NFLX,NFLX260618C00080000,call,80,Jun 18 2026,20,1.11,2220.00,2919,+2.78%,,,,,Open,Open,slicedbreadth,82,,,,4314
 2026-06-12,11:08:14,,,BROS,BROS280121C00095000,call,95,Jan 21 2028,1,13.60,1360.00,2817,+10.75%,,,,,Open,Open,slicedbreadth,82,,,,4414
 2026-06-12,11:26:21,,,NOW,NOW260717C00120000,call,120,Jul 17 2026,8,2.60,2080.00,1812,+3.17%,,,,,Open,Open,Draw the Lamp,75,,,,4514
