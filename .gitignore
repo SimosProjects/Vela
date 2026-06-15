@@ -8,9 +8,9 @@ logs/
 reports/
 trades/test/
 trades/archive/
-TradeFlow.Analytics/reports/
+Vela.Analytics/reports/
 
 # Node / React dashboard
-TradeFlow.Dashboard/node_modules/
-TradeFlow.Api/wwwroot/
+Vela.Dashboard/node_modules/
+Vela.Api/wwwroot/
 .vite/

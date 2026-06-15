@@ -5,4 +5,4 @@ logs/
 .env
 *.user
 appsettings.Development.json
-TradeFlow.Tests/
+Vela.Tests/
