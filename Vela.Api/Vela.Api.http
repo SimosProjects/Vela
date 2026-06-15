@@ -1,6 +1,6 @@
-@TradeFlow.Api_HostAddress = http://localhost:5141
+@Vela.Api_HostAddress = http://localhost:5141
 
-GET {{TradeFlow.Api_HostAddress}}/weatherforecast/
+GET {{Vela.Api_HostAddress}}/weatherforecast/
 Accept: application/json
 
 ###

@@ -65,8 +65,6 @@ services:
 
 volumes:
   postgres_data:
-    external: true
-    name: tradeflow_postgres_data
   trades_data:
   reports_data:
 networks:

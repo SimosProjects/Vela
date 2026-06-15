@@ -35,7 +35,12 @@ export function MobileLayout({ data, paused, onTogglePause, onForceClose, lastUp
         flexShrink: 0,
       }}>
         <div style={{ fontWeight: 700, fontSize: 16, color: B.tx }}>
-          <span style={{ color: B.bl }}>Trade</span>Flow
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+          <svg width="16" height="16" viewBox="0 0 18 18" fill="none">
+            <path d="M9 2 L16 14 L9 11 L2 14 Z" fill="#378add" />
+          </svg>
+          <span style={{ fontWeight: 700, letterSpacing: '0.08em', color: '#e6edf3' }}>VELA</span>
+        </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div style={{ display: 'flex', gap: 6 }}>
