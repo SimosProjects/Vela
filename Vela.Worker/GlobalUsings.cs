@@ -1,0 +1,12 @@
+global using Vela.AlertPoC.RiskEngine;
+global using Vela.AlertPoC.Services;
+global using Vela.AlertPoC.Models;
+global using Vela.Worker.Configuration;
+global using Microsoft.Extensions.Options;
+global using Microsoft.EntityFrameworkCore;
+global using Vela.Worker.Data;
+global using Serilog;
+global using System.Net.Http.Headers;
+global using Vela.Worker.Services; 
+global using System.Net.Http.Json;
+global using Microsoft.Extensions.DependencyInjection;

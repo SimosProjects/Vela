@@ -4,31 +4,31 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_DB:       tradeflow
-      POSTGRES_USER:     tradeflow_user
+      POSTGRES_DB:       vela
+      POSTGRES_USER:     vela_user
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U tradeflow_user -d tradeflow"]
+      test: ["CMD-SHELL", "pg_isready -U vela_user -d vela"]
       interval: 5s
       timeout: 5s
       retries: 5
       start_period: 10s
     networks:
-      - tradeflow-net
+      - vela-net
 
   # Worker Service
   worker:
     build:
       context: .
-      dockerfile: TradeFlow.Worker/Dockerfile
+      dockerfile: Vela.Worker/Dockerfile
     environment:
-      ConnectionStrings__TradeFlow: >-
-        Host=postgres;Database=tradeflow;
-        Username=tradeflow_user;Password=${POSTGRES_PASSWORD}
+      ConnectionStrings__Vela: >-
+        Host=postgres;Database=vela;
+        Username=vela_user;Password=${POSTGRES_PASSWORD}
       XTRADES_TOKEN: ${XTRADES_TOKEN}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL}
       DOTNET_ENVIRONMENT: Development
@@ -41,18 +41,18 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - tradeflow-net
+      - vela-net
     restart: unless-stopped
 
   # API
   api:
     build:
       context: .
-      dockerfile: TradeFlow.Api/Dockerfile
+      dockerfile: Vela.Api/Dockerfile
     environment:
-      ConnectionStrings__TradeFlow: >-
-        Host=postgres;Database=tradeflow;
-        Username=tradeflow_user;Password=${POSTGRES_PASSWORD}
+      ConnectionStrings__Vela: >-
+        Host=postgres;Database=vela;
+        Username=vela_user;Password=${POSTGRES_PASSWORD}
       DOTNET_ENVIRONMENT: Development
     ports:
       - "5141:8080"
@@ -60,14 +60,15 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - tradeflow-net
+      - vela-net
     restart: unless-stopped
 
 volumes:
   postgres_data:
+    external: true
+    name: tradeflow_postgres_data
   trades_data:
   reports_data:
-
 networks:
-  tradeflow-net:
+  vela-net:
     driver: bridge

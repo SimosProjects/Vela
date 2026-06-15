@@ -1,4 +1,4 @@
-# TradeFlow
+# Vela
 
 ![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
@@ -19,13 +19,13 @@ An event-driven automated trading platform that ingests trade alerts, evaluates 
 
 ## Architecture At A Glance
 
-TradeFlow ingests trade alerts from Xtrades and screens each one through layered risk controls before routing approved orders to Interactive Brokers for execution. Open positions are protected by broker-side exit orders and persisted to PostgreSQL, so the system recovers its state after a restart and runs unattended through the trading day.
+Vela ingests trade alerts from Xtrades and screens each one through layered risk controls before routing approved orders to Interactive Brokers for execution. Open positions are protected by broker-side exit orders and persisted to PostgreSQL, so the system recovers its state after a restart and runs unattended through the trading day.
 
 ![Architecture Overview](docs/images/architecture-overview.png)
 
 ## Overview
 
-TradeFlow receives trade alerts published by tracked traders on the Xtrades platform, decides whether each alert should be acted on, and, when it should, places and manages the corresponding order with Interactive Brokers. It runs unattended through the trading day and records every decision and outcome for later review.
+Vela receives trade alerts published by tracked traders on the Xtrades platform, decides whether each alert should be acted on, and, when it should, places and manages the corresponding order with Interactive Brokers. It runs unattended through the trading day and records every decision and outcome for later review.
 
 Alerts arrive through two paths: a real-time SignalR feed for low latency and a REST polling interface as a backstop when the feed is unavailable. Both feed a single processing pipeline, so behaviour is identical regardless of source. Each alert is normalized, classified, and evaluated against the risk engine; approved entries are sized, screened by an account-level safety control, routed to the broker, and protected by broker-side exit orders until they close.
 
@@ -50,7 +50,7 @@ The system is organized around an execution core that owns the full path from al
 - **Trade execution** places the entry with immediate stop protection and, once filled, replaces it with a trailing stop and profit target in a One-Cancels-All (OCA) group.
 - **Position management** reconciles positions the broker closes on its own (a stop or target fill) and restores position state and broker callbacks after a restart.
 
-Full design detail, including the four architectural views and the architectural decision records, is in the [Software Architecture Document](docs/architecture/TradeFlow_Software_Architecture_Document.md).
+Full design detail, including the four architectural views and the architectural decision records, is in the [Software Architecture Document](docs/architecture/Vela_Software_Architecture_Document.md).
 
 ## Key Features
 
@@ -84,13 +84,13 @@ Full design detail, including the four architectural views and the architectural
 
 ## Repository Structure
 
-The solution (`TradeFlow.sln`) contains five projects with distinct responsibilities.
+The solution (`Vela.sln`) contains five projects with distinct responsibilities.
 
-- **TradeFlow.AlertPoC** — Shared domain library. Owns the alert model, the alert classifier, and the risk engine with its rules. Referenced by the execution core and the tests.
-- **TradeFlow.Worker** — The execution core. Owns ingestion, risk evaluation, position sizing, trade execution, position management, scheduling, broker integration, and persistence (the EF Core `DbContext` and migrations live here).
-- **TradeFlow.Api** — A read-only HTTP API over ingested alerts, with filtering, pagination, output caching, and health endpoints.
-- **TradeFlow.Analytics** — A console application that produces performance reports from recorded trade outcomes.
-- **TradeFlow.Tests** — Unit tests for the risk engine, position sizing, and execution, plus integration tests against a containerized PostgreSQL instance and the API host.
+- **Vela.AlertPoC** — Shared domain library. Owns the alert model, the alert classifier, and the risk engine with its rules. Referenced by the execution core and the tests.
+- **Vela.Worker** — The execution core. Owns ingestion, risk evaluation, position sizing, trade execution, position management, scheduling, broker integration, and persistence (the EF Core `DbContext` and migrations live here).
+- **Vela.Api** — A read-only HTTP API over ingested alerts, with filtering, pagination, output caching, and health endpoints.
+- **Vela.Analytics** — A console application that produces performance reports from recorded trade outcomes.
+- **Vela.Tests** — Unit tests for the risk engine, position sizing, and execution, plus integration tests against a containerized PostgreSQL instance and the API host.
 
 ## Risk Controls
 
@@ -132,7 +132,7 @@ Ibkr__AccountId
 IBKR_ENABLED        # false for simulation; true to enable Interactive Brokers
 ```
 
-Non-secret settings (risk parameters, polling interval, IB Gateway host and port, logging) are in `TradeFlow.Worker/appsettings.json`.
+Non-secret settings (risk parameters, polling interval, IB Gateway host and port, logging) are in `Vela.Worker/appsettings.json`.
 
 ### Database
 
@@ -140,7 +140,7 @@ Start PostgreSQL and apply the Entity Framework Core migrations:
 
 ```bash
 docker compose up -d postgres
-dotnet ef database update --project TradeFlow.Worker
+dotnet ef database update --project Vela.Worker
 ```
 
 ### Running the services
@@ -148,8 +148,8 @@ dotnet ef database update --project TradeFlow.Worker
 Run the worker and the API with the .NET CLI:
 
 ```bash
-dotnet run --project TradeFlow.Worker   # execution core
-dotnet run --project TradeFlow.Api      # read API (separate terminal)
+dotnet run --project Vela.Worker   # execution core
+dotnet run --project Vela.Api      # read API (separate terminal)
 ```
 
 Or run the full stack in containers:
@@ -166,20 +166,20 @@ Tests use xUnit. Integration tests run against a real PostgreSQL instance via Te
 
 ```bash
 # Unit tests only
-dotnet test TradeFlow.Tests --filter "FullyQualifiedName!~Integration"
+dotnet test Vela.Tests --filter "FullyQualifiedName!~Integration"
 
 # Integration tests
-SKIP_IBKR_TESTS=true dotnet test TradeFlow.Tests --filter "FullyQualifiedName~Integration"
+SKIP_IBKR_TESTS=true dotnet test Vela.Tests --filter "FullyQualifiedName~Integration"
 
 # Full suite
-SKIP_IBKR_TESTS=true dotnet test TradeFlow.sln
+SKIP_IBKR_TESTS=true dotnet test Vela.sln
 ```
 
 Continuous integration (GitHub Actions) restores, builds, and runs the unit and integration suites against a PostgreSQL service container on every push and pull request, and publishes multi-architecture container images to the GitHub Container Registry on merges to `main`.
 
 ## Documentation
 
-- [Software Architecture Document](docs/architecture/TradeFlow_Software_Architecture_Document.md) — system responsibilities, the four architectural views, security and reliability design, and the architectural decision records (Section 12).
+- [Software Architecture Document](docs/architecture/Vela_Software_Architecture_Document.md) — system responsibilities, the four architectural views, security and reliability design, and the architectural decision records (Section 12).
 
 ## Disclaimer
 
