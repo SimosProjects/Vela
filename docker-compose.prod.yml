@@ -4,7 +4,7 @@ services:
     ports: !reset []
 
   worker:
-    image: ghcr.io/simosprojects/tradeflow-worker:latest
+    image: ghcr.io/simosprojects/vela-worker:latest
     restart: always
     environment:
       DOTNET_ENVIRONMENT: Production
@@ -15,7 +15,7 @@ services:
       - reports_data:/app/reports
 
   api:
-    image: ghcr.io/simosprojects/tradeflow-api:latest
+    image: ghcr.io/simosprojects/vela-api:latest
     restart: always
     environment:
       DOTNET_ENVIRONMENT: Production

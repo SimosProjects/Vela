@@ -36,22 +36,22 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: TradeFlow.Worker/Dockerfile
+          file: Vela.Worker/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/tradeflow-worker:${{ steps.version.outputs.VERSION }}
-            ghcr.io/${{ github.repository_owner }}/tradeflow-worker:latest
+            ghcr.io/${{ github.repository_owner }}/vela-worker:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/vela-worker:latest
 
       # -- Create GitHub Release --
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: TradeFlow v${{ steps.version.outputs.VERSION }}
+          name: Vela v${{ steps.version.outputs.VERSION }}
           body: |
-            ## TradeFlow v${{ steps.version.outputs.VERSION }}
+            ## Vela v${{ steps.version.outputs.VERSION }}
 
             Docker images:
-            - `ghcr.io/${{ github.repository_owner }}/tradeflow-worker:${{ steps.version.outputs.VERSION }}`
-            - `ghcr.io/${{ github.repository_owner }}/tradeflow-api:${{ steps.version.outputs.VERSION }}`
+            - `ghcr.io/${{ github.repository_owner }}/vela-worker:${{ steps.version.outputs.VERSION }}`
+            - `ghcr.io/${{ github.repository_owner }}/vela-api:${{ steps.version.outputs.VERSION }}`
           draft: false
           prerelease: false
