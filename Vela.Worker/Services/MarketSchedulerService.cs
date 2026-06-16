@@ -169,6 +169,9 @@ public class MarketSchedulerService : BackgroundService
     }
 
     // Closes all open option positions expiring today before liquidity dries up near close.
+    // Duplicate entries on the same contract share a TradeGuard match key, the contract
+    // deduplication in TradeGuard.CheckAsync prevents this, but InvariantCulture parsing
+    // ensures the expiration comparison is locale-independent regardless.
     private async Task CloseSameDayExpiryPositionsAsync(CancellationToken ct)
     {
         var et      = GetEasternTime();
@@ -178,7 +181,11 @@ public class MarketSchedulerService : BackgroundService
             .Where(t =>
                 t.TradeType == TradeType.Options &&
                 t.Expiration is not null &&
-                DateTimeOffset.TryParse(t.Expiration, out var expiry) &&
+                DateTimeOffset.TryParse(
+                    t.Expiration,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AllowWhiteSpaces,
+                    out var expiry) &&
                 DateOnly.FromDateTime(expiry.DateTime) == todayEt)
             .ToList();
 
@@ -209,7 +216,11 @@ public class MarketSchedulerService : BackgroundService
             .Where(t =>
                 t.TradeType == TradeType.Options &&
                 t.Expiration is not null &&
-                DateTimeOffset.TryParse(t.Expiration, out var expiry) &&
+                DateTimeOffset.TryParse(
+                    t.Expiration,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AllowWhiteSpaces,
+                    out var expiry) &&
                 DateOnly.FromDateTime(expiry.DateTime) == tomorrowEt)
             .ToList();
 
@@ -287,7 +298,11 @@ public class MarketSchedulerService : BackgroundService
                 t.TradeType == TradeType.Options &&
                 t.Expiration is not null &&
                 t.StopOrderId is not null &&
-                DateTimeOffset.TryParse(t.Expiration, out var expiry) &&
+                DateTimeOffset.TryParse(
+                    t.Expiration,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AllowWhiteSpaces,
+                    out var expiry) &&
                 DateOnly.FromDateTime(expiry.DateTime) == tomorrowEt)
             .ToList();
 
@@ -686,12 +701,12 @@ public class MarketSchedulerService : BackgroundService
             (9,           0,            "HealthCheck"),
             (9,           15,           "PositionSummary"),
             (9,           20,           "MarketConditions"),
-            (11,           0,           "MarketConditions"),
+            (11,          0,            "MarketConditions"),
             (11,          23,           "HealthCheck"),
-            (13,           0,           "MarketConditions"),
+            (13,          0,            "MarketConditions"),
             (13,          17,           "HealthCheck"),
             (cutoff.Hour, cutoff.Minute,"SameDayExpiryClose"),
-            (14,           0,           "MarketConditions"),
+            (14,          0,            "MarketConditions"),
             (15,          0,            "OneDteProfitClose"),
             (15,          55,           "OneDteLottoConvert"),
             (16,          5,            "HealthCheck"),

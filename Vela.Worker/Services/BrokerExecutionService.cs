@@ -502,7 +502,7 @@ public class BrokerExecutionService
 
         if (result.Status == OrderStatus.Pending)
         {
-            _logger.LogWarning(
+            _logger.LogDebug(
                 "Order timed out for {Symbol} — verifying position exists in Gateway before recording.",
                 alert.Symbol);
             result = await VerifyPendingFillAsync(alert, order, result, ct);
@@ -551,7 +551,7 @@ public class BrokerExecutionService
 
         if (positionPrice <= 0 || positionQty <= 0)
         {
-            _logger.LogWarning(
+            _logger.LogDebug(
                 "Position not confirmed for {Symbol} on first check — waiting 5s and retrying.",
                 order.Symbol);
             await Task.Delay(TimeSpan.FromSeconds(5), ct);
