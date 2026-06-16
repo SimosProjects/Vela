@@ -407,7 +407,7 @@ public class IbkrBrokerService : IBrokerService
                 _connection.Client.cancelOrder(tempStopId);
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
  
-                await Task.Delay(300, ct);
+                await Task.Delay(600, ct);
  
                 var priceProtectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
                 _logger.LogWarning(
@@ -434,7 +434,7 @@ public class IbkrBrokerService : IBrokerService
                 orderId, state.Status);
 
             _connection.Client.cancelOrder(tempStopId);
-            await Task.Delay(300, ct);
+            await Task.Delay(600, ct);
 
             // Use FilledQuantity from orderStatus — may be less than order.Quantity on a partial
             // fill. Trail stop must match actual position size to avoid overselling into a short.
@@ -474,7 +474,7 @@ public class IbkrBrokerService : IBrokerService
                 _connection.Wrapper.UnregisterOrderCallback(orderId);
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
-                _logger.LogWarning(
+                _logger.LogDebug(
                     "IBKR limit order fill window expired for {Symbol} @ ${Limit:F2} — cancelling unfilled portion.",
                     order.Symbol, order.LimitPrice.Value);
 
@@ -490,7 +490,7 @@ public class IbkrBrokerService : IBrokerService
             }
 
             // Market order timeout: wait for a late ExecDetails callback before giving up.
-            _logger.LogWarning(
+            _logger.LogDebug(
                 "IBKR PlaceOrder timed out for {Symbol} after 15s — sending cancel, checking for late fill.",
                 order.Symbol);
 
@@ -509,7 +509,7 @@ public class IbkrBrokerService : IBrokerService
                     "IBKR PlaceOrder late fill detected for {Symbol} @ ${Price:F2} — verifying actual position qty.",
                     order.Symbol, lateFillPrice);
 
-                await Task.Delay(300, ct);
+                await Task.Delay(600, ct);
 
                 var posKey = order.TradeType == TradeType.Options
                     ? $"{order.Symbol}::{order.OptionsContractSymbol}"
@@ -951,7 +951,7 @@ public class IbkrBrokerService : IBrokerService
         _connection.Wrapper.UnregisterExecDetailsCallback(existingId);
         RemoveStopOrderMapping(existingId);
 
-        await Task.Delay(300, ct);
+        await Task.Delay(600, ct);
 
         var contract  = BuildContract(order);
         var newStopId = GetNextOrderId();
@@ -1188,12 +1188,12 @@ public class IbkrBrokerService : IBrokerService
         try
         {
             using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            checkCts.CancelAfter(TimeSpan.FromMilliseconds(300));
+            checkCts.CancelAfter(TimeSpan.FromMilliseconds(600));
             rejection = await rejectionTcs.Task.WaitAsync(checkCts.Token);
         }
         catch (OperationCanceledException)
         {
-            // No rejection in 300ms, OCA trail accepted
+            // No rejection, OCA trail accepted
             _connection.Wrapper.UnregisterStopRejectionCallback(trailStopId);
         }
  
@@ -1203,10 +1203,14 @@ public class IbkrBrokerService : IBrokerService
             return trailStopId.ToString();
         }
  
-        // OCA rejected, retry as standalone trail (no OCA group)
-        _logger.LogWarning(
-            "OCA trail stop rejected for {Symbol} StopId {StopId} — retrying as standalone trail. " +
-            "Reason: {Reason}",
+        // "both sides" is a timing race — IBKR hasn't fully cleared its open-order
+        // state after the temp bracket stop was cancelled. A short pause before
+        // retrying as standalone gives IBKR time to reconcile.
+        if (rejection.Contains("both sides", StringComparison.OrdinalIgnoreCase))
+            await Task.Delay(500, ct);
+
+        _logger.LogDebug(
+            "OCA trail stop rejected for {Symbol} StopId {StopId} — retrying as standalone trail. Reason: {Reason}",
             symbol, trailStopId, rejection);
  
         var standaloneId  = GetNextOrderId();
@@ -1221,7 +1225,7 @@ public class IbkrBrokerService : IBrokerService
         try
         {
             using var retryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            retryCts.CancelAfter(TimeSpan.FromMilliseconds(300));
+            retryCts.CancelAfter(TimeSpan.FromMilliseconds(600));
             standaloneRejection = await standaloneTcs.Task.WaitAsync(retryCts.Token);
         }
         catch (OperationCanceledException)
@@ -1233,7 +1237,7 @@ public class IbkrBrokerService : IBrokerService
         if (standaloneRejection is null)
         {
             RegisterTrailCallbacks(entryOrderId, standaloneId);
-            _logger.LogInformation(
+            _logger.LogDebug(
                 "Standalone trail stop placed for {Symbol} StopId {StopId} (OCA fallback).",
                 symbol, standaloneId);
             return standaloneId.ToString();

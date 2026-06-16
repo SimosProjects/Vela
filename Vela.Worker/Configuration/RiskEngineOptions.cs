@@ -101,8 +101,20 @@ public class RiskEngineOptions
     [Range(0, 23, ErrorMessage = "ZeroDteEntryCutoffHour must be between 0 and 23.")]
     public int ZeroDteEntryCutoffHour { get; init; } = 12;
 
+    // Maximum open positions allowed per symbol across all traders.
+    // Stocks and options are counted independently when MaxOptionsPositionsPerSymbol
+    // or MaxStockPositionsPerSymbol are set; falls back to this value if they are 0.
     [Range(1, 10, ErrorMessage = "MaxPositionsPerSymbol must be between 1 and 10.")]
     public int MaxPositionsPerSymbol { get; init; } = 1;
+
+    // Per-type symbol cap for options. 0 = fall back to MaxPositionsPerSymbol.
+    // When set, options and stocks on the same underlying count against separate caps.
+    [Range(0, 10, ErrorMessage = "MaxOptionsPositionsPerSymbol must be between 0 and 10.")]
+    public int MaxOptionsPositionsPerSymbol { get; init; } = 0;
+
+    // Per-type symbol cap for stocks. 0 = fall back to MaxPositionsPerSymbol.
+    [Range(0, 10, ErrorMessage = "MaxStockPositionsPerSymbol must be between 0 and 10.")]
+    public int MaxStockPositionsPerSymbol { get; init; } = 0;
 
     public string SameDayExpiryAutoCloseCutoff { get; init; } = "15:30";
 
@@ -188,7 +200,7 @@ public class RiskEngineOptions
 
     // SPY intraday drop percentage from the session open that triggers a one-tier step-down
     // at the next checkpoint, independent of the MA cascade. 0 = disabled.
-    // Example: 2.0 means SPY dropping 2% from 9:20am forces Bullish → Choppy or Choppy → Bearish.
+    // Example: 2.0 means SPY dropping 2% from 9:20am forces Bullish to Choppy or Choppy to Bearish.
     [Range(0, 20)]
     public double RegimeSpyShockDownPct { get; init; } = 2.0;
 

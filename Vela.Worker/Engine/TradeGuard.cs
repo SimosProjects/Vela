@@ -12,12 +12,16 @@ public record TradeGuardBlock(string Reason, bool IsRoutine = false);
 
 // Enforces trading safety rules before any order is placed.
 // Rules checked in order:
-//   1. Symbol already open — prevents doubled exposure on same underlying
-//   2. Contract duplicate and averaging rules
-//   3. Daily exposure cap
-//   4. Stock sub-cap
-//   5. Hard balance check
-//   6. Daily loss limit — blocks new entries when today's realized P&L falls below the threshold
+//   1. Exact contract duplicate, blocks any open or in-flight position on the same options
+//      contract across all traders, preventing the polling+SignalR race from doubling into
+//      the same strike and expiry.
+//   2. Per-type symbol cap, stocks and options count against separate limits so a stock
+//      position on MSFT does not consume an options slot on the same underlying.
+//   3. Per-trader match key, prevents the same trader re-entering a position they already hold.
+//   4. Daily exposure cap
+//   5. Stock sub-cap
+//   6. Hard balance check
+//   7. Daily loss limit
 //
 // Account balance and open positions value are cached and refreshed every 30 seconds
 // in the background to avoid blocking the trade execution path with IBKR round trips.
@@ -35,6 +39,8 @@ public class TradeGuard
     private readonly double _stockDailyAllocationPct;
     private readonly double _marginPct;
     private readonly int _maxPositionsPerSymbol;
+    private readonly int _maxOptionsPositionsPerSymbol;
+    private readonly int _maxStockPositionsPerSymbol;
     private readonly decimal _dailyLossLimit;
     private readonly CsvTradeLogger? _csv;
 
@@ -51,7 +57,12 @@ public class TradeGuard
     private readonly HashSet<string> _closingKeys = new();
 
     // Tracks symbols reserved by CheckAsync but not yet confirmed by RegisterOpen.
+    // Keyed by "{TradeType}::{Symbol}" so stocks and options count independently.
     private readonly Dictionary<string, int> _pendingReservations = new();
+
+    // Tracks options contracts reserved by CheckAsync but not yet confirmed by RegisterOpen.
+    // Prevents concurrent polling+SignalR paths from both entering the same contract.
+    private readonly HashSet<string> _pendingContracts = new();
 
     private readonly Lock _lock = new();
 
@@ -75,16 +86,18 @@ public class TradeGuard
         CsvTradeLogger? csv = null,
         MarketRegimeService? regime = null)
     {
-        _broker                  = broker;
-        _logger                  = logger;
-        _maxDailyExposurePct     = riskOptions.Value.MaxDailyExposurePct;
-        _stockDailyAllocationPct = riskOptions.Value.StockDailyAllocationPct;
-        _marginPct               = riskOptions.Value.MarginPct;
-        _maxPositionsPerSymbol   = riskOptions.Value.MaxPositionsPerSymbol;
-        _dailyLossLimit          = riskOptions.Value.DailyLossLimit;
-        _csv                     = csv;
-        _chopDailyLossLimit      = riskOptions.Value.ChopDailyLossLimit;
-        _regime                  = regime;
+        _broker                       = broker;
+        _logger                       = logger;
+        _maxDailyExposurePct          = riskOptions.Value.MaxDailyExposurePct;
+        _stockDailyAllocationPct      = riskOptions.Value.StockDailyAllocationPct;
+        _marginPct                    = riskOptions.Value.MarginPct;
+        _maxPositionsPerSymbol        = riskOptions.Value.MaxPositionsPerSymbol;
+        _maxOptionsPositionsPerSymbol = riskOptions.Value.MaxOptionsPositionsPerSymbol;
+        _maxStockPositionsPerSymbol   = riskOptions.Value.MaxStockPositionsPerSymbol;
+        _dailyLossLimit               = riskOptions.Value.DailyLossLimit;
+        _csv                          = csv;
+        _chopDailyLossLimit           = riskOptions.Value.ChopDailyLossLimit;
+        _regime                       = regime;
     }
 
     /// <summary>
@@ -172,21 +185,54 @@ public class TradeGuard
         {
             if (!order.IsAverage)
             {
-                var openCount = _openTrades.Values
-                    .Count(t => string.Equals(
-                        t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase));
-                _pendingReservations.TryGetValue(order.Symbol, out var pendingCount);
-                var symbolCount = openCount + pendingCount;
-
-                if (symbolCount >= _maxPositionsPerSymbol)
+                // Exact contract duplicate — checked before the per-symbol cap because it is
+                // more specific: two different contracts on the same underlying are allowed up
+                // to the cap, but the same contract cannot be held twice.
+                if (order.OptionsContractSymbol is not null)
                 {
-                    var isRoutineDuplicate = openCount == 0 && pendingCount > 0;
-                    positionBlock = isRoutineDuplicate
-                        ? new TradeGuardBlock(
-                            $"Entry in progress for {order.Symbol} on concurrent path — duplicate blocked",
-                            IsRoutine: true)
-                        : new TradeGuardBlock(
-                            $"Max positions per symbol reached for {order.Symbol} ({symbolCount}/{_maxPositionsPerSymbol})");
+                    var contractAlreadyOpen = _openTrades.Values
+                        .Any(t => string.Equals(
+                            t.OptionsContract, order.OptionsContractSymbol,
+                            StringComparison.OrdinalIgnoreCase));
+                    var contractPending = _pendingContracts.Contains(order.OptionsContractSymbol);
+
+                    if (contractAlreadyOpen || contractPending)
+                    {
+                        positionBlock = contractAlreadyOpen
+                            ? new TradeGuardBlock(
+                                $"Contract {order.OptionsContractSymbol} already open — cannot enter same contract twice")
+                            : new TradeGuardBlock(
+                                $"Entry in progress for {order.OptionsContractSymbol} on concurrent path — duplicate blocked",
+                                IsRoutine: true);
+                    }
+                }
+
+                // Per-type symbol cap — stocks and options counted independently.
+                // Falls back to MaxPositionsPerSymbol when the typed cap is 0.
+                if (positionBlock is null)
+                {
+                    var pendingKey = GetPendingKey(order);
+                    var maxForType = order.TradeType == TradeType.Options
+                        ? (_maxOptionsPositionsPerSymbol > 0 ? _maxOptionsPositionsPerSymbol : _maxPositionsPerSymbol)
+                        : (_maxStockPositionsPerSymbol > 0 ? _maxStockPositionsPerSymbol : _maxPositionsPerSymbol);
+
+                    var openCount = _openTrades.Values
+                        .Count(t =>
+                            string.Equals(t.Symbol, order.Symbol, StringComparison.OrdinalIgnoreCase) &&
+                            t.TradeType == order.TradeType);
+                    _pendingReservations.TryGetValue(pendingKey, out var pendingCount);
+                    var symbolCount = openCount + pendingCount;
+
+                    if (symbolCount >= maxForType)
+                    {
+                        var isRoutineDuplicate = openCount == 0 && pendingCount > 0;
+                        positionBlock = isRoutineDuplicate
+                            ? new TradeGuardBlock(
+                                $"Entry in progress for {order.Symbol} on concurrent path — duplicate blocked",
+                                IsRoutine: true)
+                            : new TradeGuardBlock(
+                                $"Max {order.TradeType.ToString().ToLower()} positions per symbol reached for {order.Symbol} ({symbolCount}/{maxForType})");
+                    }
                 }
             }
 
@@ -212,8 +258,12 @@ public class TradeGuard
 
             if (positionBlock is null && !order.IsAverage)
             {
-                _pendingReservations.TryGetValue(order.Symbol, out var reservedCount);
-                _pendingReservations[order.Symbol] = reservedCount + 1;
+                var pendingKey = GetPendingKey(order);
+                _pendingReservations.TryGetValue(pendingKey, out var reservedCount);
+                _pendingReservations[pendingKey] = reservedCount + 1;
+
+                if (order.OptionsContractSymbol is not null)
+                    _pendingContracts.Add(order.OptionsContractSymbol);
             }
         }
 
@@ -308,12 +358,17 @@ public class TradeGuard
 
         lock (_lock)
         {
-            if (!_pendingReservations.TryGetValue(order.Symbol, out var count)) return;
+            var pendingKey = GetPendingKey(order);
+            if (_pendingReservations.TryGetValue(pendingKey, out var count))
+            {
+                if (count <= 1)
+                    _pendingReservations.Remove(pendingKey);
+                else
+                    _pendingReservations[pendingKey] = count - 1;
+            }
 
-            if (count <= 1)
-                _pendingReservations.Remove(order.Symbol);
-            else
-                _pendingReservations[order.Symbol] = count - 1;
+            if (order.OptionsContractSymbol is not null)
+                _pendingContracts.Remove(order.OptionsContractSymbol);
         }
     }
 
@@ -335,12 +390,19 @@ public class TradeGuard
                 return;
             }
 
-            if (!order.IsAverage && _pendingReservations.TryGetValue(order.Symbol, out var reservedCount))
+            if (!order.IsAverage)
             {
-                if (reservedCount <= 1)
-                    _pendingReservations.Remove(order.Symbol);
-                else
-                    _pendingReservations[order.Symbol] = reservedCount - 1;
+                var pendingKey = GetPendingKey(order);
+                if (_pendingReservations.TryGetValue(pendingKey, out var reservedCount))
+                {
+                    if (reservedCount <= 1)
+                        _pendingReservations.Remove(pendingKey);
+                    else
+                        _pendingReservations[pendingKey] = reservedCount - 1;
+                }
+
+                if (order.OptionsContractSymbol is not null)
+                    _pendingContracts.Remove(order.OptionsContractSymbol);
             }
 
             var record = new TradeRecord
@@ -606,6 +668,10 @@ public class TradeGuard
     }
 
     // -- Helpers --
+
+    // Pending reservation key includes trade type so stocks and options count independently.
+    private static string GetPendingKey(TradeOrder order) =>
+        $"{order.TradeType}::{order.Symbol}";
 
     private decimal GetTodayOpenedValue()
     {

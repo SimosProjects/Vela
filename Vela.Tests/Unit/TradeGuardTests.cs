@@ -19,18 +19,29 @@ public class TradeGuardTests
         _brokerMock.Setup(b => b.GetOpenPositionsValueAsync(default))
             .ReturnsAsync(0m);
 
-        var riskOptions = Options.Create(new RiskEngineOptions());
-        _guard = new TradeGuard(_brokerMock.Object, riskOptions, NullLogger<TradeGuard>.Instance);
+        _guard = BuildGuard();
+    }
+
+    private TradeGuard BuildGuard(int maxPositionsPerSymbol = 1, int maxOptions = 0, int maxStocks = 0)
+    {
+        var options = Options.Create(new RiskEngineOptions
+        {
+            MaxPositionsPerSymbol        = maxPositionsPerSymbol,
+            MaxOptionsPositionsPerSymbol = maxOptions,
+            MaxStockPositionsPerSymbol   = maxStocks,
+        });
+        return new TradeGuard(_brokerMock.Object, options, NullLogger<TradeGuard>.Instance);
     }
 
     private static TradeOrder BuildOrder(
         string symbol = "TSLA",
         string? contractSymbol = "TSLA260620C00450000",
         decimal budgetUsed = 1_000m,
-        bool isAverage = false) =>
+        bool isAverage = false,
+        string userName = "TestTrader") =>
         new(
             AlertId: Guid.NewGuid().ToString(),
-            UserName: "TestTrader",
+            UserName: userName,
             Symbol: symbol,
             TradeType: TradeType.Options,
             OptionsContractSymbol: contractSymbol,
@@ -74,9 +85,140 @@ public class TradeGuardTests
         var result = await _guard.CheckAsync(order);
 
         result.Should().NotBeNull();
-        result!.Reason.Should().Contain("Max positions per symbol reached");
-        result.IsRoutine.Should().BeFalse("confirmed open position is a real cap, not a concurrent-path duplicate");
+        result!.Reason.Should().Contain("already open");
+        result.IsRoutine.Should().BeFalse("a confirmed open contract is a real cap, not a concurrent-path duplicate");
     }
+
+    // -- Exact contract deduplication --
+
+    [Fact]
+    public async Task CheckAsync_BlocksDuplicateContract_DifferentTrader()
+    {
+        // Trader1 already holds the contract — Trader2 cannot enter the same one.
+        var firstOrder = BuildOrder(userName: "Trader1");
+        _guard.RegisterOpen(firstOrder, BuildResult("ORDER-001"));
+
+        var secondOrder = BuildOrder(userName: "Trader2");
+        var result = await _guard.CheckAsync(secondOrder);
+
+        result.Should().NotBeNull();
+        result!.Reason.Should().Contain("already open");
+        result.IsRoutine.Should().BeFalse("a confirmed open contract blocks another trader non-routinely");
+    }
+
+    [Fact]
+    public async Task CheckAsync_AllowsDifferentContractWhenUnderSymbolCap()
+    {
+        // Two different strikes on the same underlying are allowed up to the cap.
+        var guard = BuildGuard(maxPositionsPerSymbol: 3);
+        guard.SetCacheForTesting(100_000m, 0m);
+
+        var firstOrder = BuildOrder(contractSymbol: "TSLA260620C00450000");
+        guard.RegisterOpen(firstOrder, BuildResult("ORDER-001"));
+
+        var secondOrder = BuildOrder(contractSymbol: "TSLA260620C00500000");
+        var result = await guard.CheckAsync(secondOrder);
+
+        result.Should().BeNull("different contracts on the same underlying are allowed under the cap");
+    }
+
+    [Fact]
+    public async Task CheckAsync_BlocksDuplicateContract_ViaPendingReservation()
+    {
+        // First concurrent path reserves the contract but has not yet called RegisterOpen.
+        // Second path should be blocked as a routine duplicate.
+        var order = BuildOrder();
+
+        var firstBlock = await _guard.CheckAsync(order);
+        firstBlock.Should().BeNull("first path should pass");
+
+        var secondBlock = await _guard.CheckAsync(order);
+
+        secondBlock.Should().NotBeNull();
+        secondBlock!.IsRoutine.Should().BeTrue("pending contract reservation is an expected concurrent-path duplicate");
+        secondBlock.Reason.Should().Contain("concurrent path");
+    }
+
+    // -- Per-type symbol cap --
+
+    [Fact]
+    public async Task CheckAsync_AllowsOptionWhenOnlyStockOpenOnSameSymbol()
+    {
+        // A stock position on TSLA does not consume an options slot on the same underlying.
+        var stockOrder = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(),
+            UserName: "TestTrader",
+            Symbol: "TSLA",
+            TradeType: TradeType.Stock,
+            OptionsContractSymbol: null,
+            Direction: null,
+            Strike: null,
+            Expiration: null,
+            Quantity: 18,
+            EstimatedEntryPrice: 165.00m,
+            BudgetUsed: 2_970m,
+            StopPrice: 140.25m,
+            TargetPrice: 214.50m,
+            TrailPercent: 15.0);
+
+        _guard.RegisterOpen(stockOrder, new BrokerOrderResult(
+            OrderId: "ORDER-STK-001",
+            StopOrderId: null,
+            TargetOrderId: null,
+            FillPrice: 165.00m,
+            FillQuantity: 18,
+            FillAmount: 2_970m,
+            Status: OrderStatus.Filled,
+            FilledAt: DateTimeOffset.UtcNow));
+
+        var optionOrder = BuildOrder(symbol: "TSLA", contractSymbol: "TSLA260620C00450000");
+        var result = await _guard.CheckAsync(optionOrder);
+
+        result.Should().BeNull("stock and options caps are independent — a stock position does not block an options entry");
+    }
+
+    [Fact]
+    public async Task CheckAsync_BlocksSecondOptionsWhenCapReached_AllowsStockOnSameSymbol()
+    {
+        // Options cap is hit on TSLA, but the stock cap is separate and still has room.
+        var guard = BuildGuard(maxPositionsPerSymbol: 1);
+        guard.SetCacheForTesting(100_000m, 0m);
+
+        var optionOrder = BuildOrder(symbol: "TSLA", contractSymbol: "TSLA260620C00450000");
+        guard.RegisterOpen(optionOrder, BuildResult("OPT-001"));
+
+        // Second options entry on the same symbol is blocked (options cap reached).
+        var secondOption = BuildOrder(
+            symbol: "TSLA",
+            contractSymbol: "TSLA260620C00500000",
+            userName: "OtherTrader");
+        var optionBlock = await guard.CheckAsync(secondOption);
+
+        optionBlock.Should().NotBeNull();
+        optionBlock!.Reason.Should().Contain("options").And.Contain("per symbol reached");
+
+        // Stock entry on the same symbol still passes (separate cap).
+        var stockOrder = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(),
+            UserName: "TestTrader",
+            Symbol: "TSLA",
+            TradeType: TradeType.Stock,
+            OptionsContractSymbol: null,
+            Direction: null,
+            Strike: null,
+            Expiration: null,
+            Quantity: 10,
+            EstimatedEntryPrice: 165.00m,
+            BudgetUsed: 1_650m,
+            StopPrice: 140.25m,
+            TargetPrice: 214.50m,
+            TrailPercent: 15.0);
+
+        var stockResult = await guard.CheckAsync(stockOrder);
+        stockResult.Should().BeNull("stock cap is independent of the options cap");
+    }
+
+    // -- Exposure and balance checks --
 
     [Fact]
     public async Task CheckAsync_BlocksWhenBudgetExceedsAvailableCapital()
@@ -87,7 +229,6 @@ public class TradeGuardTests
         var result = await _guard.CheckAsync(order);
 
         result.Should().NotBeNull();
-        // Either the cap or the balance check fires depending on which limit is hit first
         result!.Reason.Should().MatchRegex("Daily exposure cap|Insufficient");
     }
 
@@ -135,6 +276,8 @@ public class TradeGuardTests
         result.Should().BeNull();
     }
 
+    // -- Averaging --
+
     [Fact]
     public async Task CheckAsync_AllowsAveragingWhenNotYetAveraged()
     {
@@ -162,24 +305,25 @@ public class TradeGuardTests
         result!.Reason.Should().Contain("Already averaged");
     }
 
+    // -- Concurrent path (routine duplicate) --
+
     [Fact]
     public async Task CheckAsync_RoutineBlock_WhenPendingReservationOnlyNoPosopen()
     {
-        // Simulate the polling+SignalR race: one path reserves a slot but has not yet
-        // called RegisterOpen. The concurrent path should be blocked with IsRoutine=true.
+        // First path passes and reserves — second path is blocked as routine.
         var order = BuildOrder();
 
-        // First path passes CheckAsync, reserves a slot but has not called RegisterOpen yet
         var firstBlock = await _guard.CheckAsync(order);
         firstBlock.Should().BeNull("first path should pass");
 
-        // Second path hits the pending reservation
         var secondBlock = await _guard.CheckAsync(order);
 
         secondBlock.Should().NotBeNull();
         secondBlock!.IsRoutine.Should().BeTrue("pending-reservation duplicate is expected concurrent-path behaviour");
         secondBlock.Reason.Should().Contain("concurrent path");
     }
+
+    // -- Close and find --
 
     [Fact]
     public void RegisterClose_PopulatesExitData()
@@ -233,118 +377,65 @@ public class TradeGuardTests
         result!.Symbol.Should().Be("TSLA");
     }
 
-    [Fact]
-    public async Task CheckAsync_BlocksSameSymbolDifferentInstrument()
-    {
-        var stockOrder = new TradeOrder(
-            AlertId: Guid.NewGuid().ToString(),
-            UserName: "TestTrader",
-            Symbol: "TSLA",
-            TradeType: TradeType.Stock,
-            OptionsContractSymbol: null,
-            Direction: null,
-            Strike: null,
-            Expiration: null,
-            Quantity: 18,
-            EstimatedEntryPrice: 165.00m,
-            BudgetUsed: 2_970m,
-            StopPrice: 140.25m,
-            TargetPrice: 214.50m,
-            TrailPercent: 15.0);
-
-        _guard.RegisterOpen(stockOrder, new BrokerOrderResult(
-            OrderId: "ORDER-STK-001",
-            StopOrderId: null,
-            TargetOrderId: null,
-            FillPrice: 165.00m,
-            FillQuantity: 18,
-            FillAmount: 2_970m,
-            Status: OrderStatus.Filled,
-            FilledAt: DateTimeOffset.UtcNow));
-
-        var optionOrder = new TradeOrder(
-            AlertId: Guid.NewGuid().ToString(),
-            UserName: "TestTrader",
-            Symbol: "TSLA",
-            TradeType: TradeType.Options,
-            OptionsContractSymbol: "TSLA260620C00450000",
-            Direction: "call",
-            Strike: 450,
-            Expiration: "2026-06-20",
-            Quantity: 2,
-            EstimatedEntryPrice: 4.95m,
-            BudgetUsed: 990m,
-            StopPrice: 2.48m,
-            TargetPrice: 14.85m,
-            TrailPercent: 50.0);
-
-        var result = await _guard.CheckAsync(optionOrder);
-
-        result.Should().NotBeNull();
-        result!.Reason.Should().Contain("TSLA");
-        result.Reason.Should().Contain("Max positions per symbol reached");
-        result.IsRoutine.Should().BeFalse("a confirmed stock position blocking an option entry is a real cap");
-    }
-
     // -- Single-closer election tests --
- 
+
     [Fact]
     public void TryMarkClosing_ReturnsTrueForOpenPosition()
     {
         var order = BuildOrder();
         _guard.RegisterOpen(order, BuildResult());
- 
+
         var result = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
- 
+
         result.Should().BeTrue();
     }
- 
+
     [Fact]
     public void TryMarkClosing_ReturnsFalseWhenPositionNotFound()
     {
         var result = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
- 
+
         result.Should().BeFalse("no position exists to close");
     }
- 
+
     [Fact]
     public void TryMarkClosing_ReturnsFalseWhenAlreadyClosing()
     {
         var order = BuildOrder();
         _guard.RegisterOpen(order, BuildResult());
- 
+
         _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
         var secondAttempt = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
- 
+
         secondAttempt.Should().BeFalse("concurrent path already claimed the close");
     }
- 
+
     [Fact]
     public void RevertClosing_AllowsSubsequentTryMarkClosing()
     {
         var order = BuildOrder();
         _guard.RegisterOpen(order, BuildResult());
- 
+
         _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
         _guard.RevertClosing("TestTrader", "TSLA260620C00450000", "TSLA");
- 
+
         var retryResult = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
- 
+
         retryResult.Should().BeTrue("closing mark was reverted — position available again");
     }
- 
+
     [Fact]
     public void RegisterClose_ClearsClosingMark()
     {
         var order = BuildOrder();
         _guard.RegisterOpen(order, BuildResult());
- 
+
         _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
         _guard.RegisterClose("TestTrader", "TSLA260620C00450000", "TSLA", 8.20m, TradeOutcome.XtradesExit);
- 
+
         // After RegisterClose the position is gone, TryMarkClosing should return false
         var afterClose = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
- 
+
         afterClose.Should().BeFalse("position no longer exists after close");
     }
 }

@@ -9,14 +9,15 @@ namespace Vela.Worker.Services;
 ///
 /// Runs every 30 minutes between 9:30am and 4:00pm ET. Three checks per cycle:
 /// 1. Managed positions, verify each TradeGuard position still exists in IBKR.
-///    A gap indicates a fill callback was missed; Discord alert for manual review.
+///    Consecutive misses are tracked, after two missed cycles (one hour) the
+///    position is auto-removed from TradeGuard and the DB. A single miss only
+///    warns so transient Gateway delays do not trigger premature cleanup.
 /// 2. New manual positions, detect IBKR longs not in the DB and create tracking
 ///    records (is_manual=true) so they appear on the dashboard.
 /// 3. Closed manual positions, remove tracking records for manual positions that
 ///    are no longer in IBKR and Discord-note the closure.
 ///
 /// Does not cover shorts (startup concern) or classify orders (startup concern).
-/// Does not auto-close or intervene in any position, tracking and alerts only.
 /// </summary>
 public class PeriodicReconciliationService : BackgroundService
 {
@@ -24,11 +25,18 @@ public class PeriodicReconciliationService : BackgroundService
     private static readonly TimeZoneInfo EasternTime =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
+    // Number of consecutive reconciliation cycles a managed position must be absent
+    // from IBKR before it is auto-removed. Each cycle is 30 minutes, so 2 = 1 hour.
+    private const int AutoCleanupAfterMisses = 2;
+
     private readonly IBrokerService _broker;
     private readonly TradeGuard _guard;
     private readonly DiscordNotificationService _discord;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<PeriodicReconciliationService> _logger;
+
+    // Tracks consecutive IBKR misses per OrderId. Cleared when the position is found.
+    private readonly Dictionary<string, int> _missedChecks = new();
 
     public PeriodicReconciliationService(
         IBrokerService broker,
@@ -89,8 +97,11 @@ public class PeriodicReconciliationService : BackgroundService
     }
 
     // Verifies each TradeGuard-managed position still exists in IBKR.
-    // A missing position means a fill callback was missed (trail stop, manual close via IBKR).
-    // Alerts Discord so the operator can reconcile — does not auto-close.
+    // A single miss warns via Discord, the position might have closed without
+    // a fill callback reaching the Worker (trail stop, manual close in IBKR).
+    // After AutoCleanupAfterMisses consecutive misses the position is removed
+    // from TradeGuard and the DB so it does not block future entries on the
+    // same contract or consume risk budget.
     private async Task CheckManagedPositionsAsync(
         List<IbkrPosition> ibkrPositions,
         CancellationToken ct)
@@ -100,18 +111,55 @@ public class PeriodicReconciliationService : BackgroundService
 
         foreach (var trade in openTrades)
         {
-            if (FindIbkrPositionForTrade(ibkrPositions, trade) is not null) continue;
+            if (FindIbkrPositionForTrade(ibkrPositions, trade) is not null)
+            {
+                // Position confirmed — clear any previous miss streak
+                _missedChecks.Remove(trade.OrderId);
+                continue;
+            }
 
+            _missedChecks.TryGetValue(trade.OrderId, out var misses);
+            _missedChecks[trade.OrderId] = ++misses;
+
+            if (misses < AutoCleanupAfterMisses)
+            {
+                _logger.LogWarning(
+                    "Periodic reconciliation — {Symbol} (OrderId {OrderId}) not found in IBKR " +
+                    "({Misses}/{Threshold} consecutive misses). May have closed without a fill callback.",
+                    trade.Symbol, trade.OrderId, misses, AutoCleanupAfterMisses);
+
+                await _discord.NotifyCriticalAsync(
+                    $"⚠️ Position Discrepancy — {trade.Symbol}",
+                    $"Managed position **{trade.Symbol}** (OrderId {trade.OrderId}) is open in " +
+                    "Vela but not found in IBKR. It may have closed without Vela detecting the fill. " +
+                    $"Will auto-remove after {AutoCleanupAfterMisses - misses} more missed cycle(s) " +
+                    "if still absent.",
+                    ct);
+
+                continue;
+            }
+
+            // Threshold reached, remove from TradeGuard and DB
             _logger.LogWarning(
-                "Periodic reconciliation — {Symbol} (OrderId {OrderId}) is in TradeGuard " +
-                "but not found in IBKR. May have closed without a fill callback.",
-                trade.Symbol, trade.OrderId);
+                "Periodic reconciliation — auto-removing {Symbol} (OrderId {OrderId}) after " +
+                "{Misses} consecutive missed cycles. Position assumed closed at IBKR.",
+                trade.Symbol, trade.OrderId, misses);
+
+            _missedChecks.Remove(trade.OrderId);
+            _guard.RemovePosition(trade.OrderId);
+
+            using (var scope = _scopeFactory.CreateScope())
+            {
+                var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+                await repo.DeleteAsync(trade.OrderId, ct);
+            }
 
             await _discord.NotifyCriticalAsync(
-                $"⚠️ Position Discrepancy — {trade.Symbol}",
-                $"Managed position **{trade.Symbol}** (OrderId {trade.OrderId}) is open in " +
-                "Vela but not found in IBKR. It may have closed without Vela detecting " +
-                "the fill. Manual review and reconciliation required.",
+                $"🧹 Ghost Position Removed — {trade.Symbol}",
+                $"Managed position **{trade.Symbol}** (OrderId {trade.OrderId}) was absent " +
+                $"from IBKR for {misses} consecutive reconciliation cycles and has been removed " +
+                "from Vela tracking. If this position still exists at IBKR, manual reconciliation " +
+                "is required.",
                 ct);
         }
     }
