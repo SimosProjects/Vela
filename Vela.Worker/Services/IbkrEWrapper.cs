@@ -543,6 +543,13 @@ public class IbkrEWrapper : EWrapper
         }
         else if (errorCode == 404)
         {
+            // Order held while locating shares. Store the reason so that if the order never fills
+            // within its window, PlaceOrderAsync's timeout path reads it via TakeRejectionReason
+            // and returns Rejected instead of Pending. That keeps VerifyPendingFillAsync from
+            // recording a ghost for an order that was held and never actually filled. An order
+            // that does fill once the locate completes resolves normally and ignores this.
+            lock (_lock) { _rejectionReasons[id] = errorMsg; }
+
             _logger.LogWarning(
                 "IBKR Order held while locating [404] Id {Id} — {Message}", id, errorMsg);
         }
