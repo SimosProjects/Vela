@@ -75,7 +75,7 @@ public class PositionMonitorServiceTests : IDisposable
             .Callback<Action<string, decimal, TradeOutcome>>(h => capturedHandler = h);
 
         using var cts = new CancellationTokenSource();
-        var monitorTask = _monitor.StartAsync(cts.Token);
+        await _monitor.StartAsync(cts.Token);
 
         await Task.Delay(50);
 
