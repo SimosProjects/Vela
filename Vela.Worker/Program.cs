@@ -159,6 +159,10 @@ builder.Services.AddHostedService<PositionMonitorService>();
 builder.Services.AddHostedService<AlertPollingService>();
 builder.Services.AddHostedService<SignalRListenerService>();
 
+// Consumes dashboard force-close requests from force_close_requests and runs them through
+// BrokerExecutionService. Lives in the Worker because the single IBKR session is here.
+builder.Services.AddHostedService<ForceCloseConsumerService>();
+
 // Periodic position reconciliation, IBKR only, runs every 30 min during market hours
 if (ibkrEnabled)
     builder.Services.AddHostedService<PeriodicReconciliationService>();
