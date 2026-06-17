@@ -781,11 +781,28 @@ public class IbkrBrokerService : IBrokerService
 
         await Task.Delay(500, ct);
 
+        // Verify the actual held quantity before closing so we never sell more than IBKR holds.
+        // A stale or estimated record quantity (e.g. from a verification-timeout entry) would
+        // otherwise oversell into a short. When the quantity cannot be confirmed (a timeout, or
+        // the position is not returned) we fall back to the recorded quantity, as before.
+        var (_, heldQty) = await GetCurrentPositionPriceAsync(trade, ct);
+        var closeQty = heldQty > 0 ? Math.Min(trade.Quantity, heldQty) : trade.Quantity;
+
+        if (heldQty > 0 && closeQty < trade.Quantity)
+            _logger.LogWarning(
+                "IBKR close quantity clamped for {Symbol} — record holds {Recorded} but IBKR holds {Held}. " +
+                "Closing {CloseQty} to avoid overselling into a short.",
+                trade.Symbol, trade.Quantity, heldQty, closeQty);
+        else if (heldQty <= 0)
+            _logger.LogWarning(
+                "IBKR could not confirm held quantity for {Symbol} before close — using recorded quantity {Qty}.",
+                trade.Symbol, trade.Quantity);
+
         var closeOrderId = GetNextOrderId();
         var tcs          = _connection.Wrapper.RegisterOrderCallback(closeOrderId);
         var execTcs      = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
         var contract     = BuildCloseContract(trade);
-        var closeOrder   = BuildCloseOrder(closeOrderId, trade);
+        var closeOrder   = BuildCloseOrder(closeOrderId, closeQty);
 
         try
         {
@@ -808,8 +825,8 @@ public class IbkrBrokerService : IBrokerService
                 StopOrderId:   null,
                 TargetOrderId: null,
                 FillPrice:     fillPrice,
-                FillQuantity:  trade.Quantity,
-                FillAmount:    fillPrice * trade.Quantity * multiplier,
+                FillQuantity:  closeQty,
+                FillAmount:    fillPrice * closeQty * multiplier,
                 Status:        OrderStatus.Filled,
                 FilledAt:      DateTimeOffset.UtcNow);
         }
@@ -837,8 +854,8 @@ public class IbkrBrokerService : IBrokerService
                     StopOrderId:   null,
                     TargetOrderId: null,
                     FillPrice:     execFillPrice,
-                    FillQuantity:  trade.Quantity,
-                    FillAmount:    execFillPrice * trade.Quantity * multiplier,
+                    FillQuantity:  closeQty,
+                    FillAmount:    execFillPrice * closeQty * multiplier,
                     Status:        OrderStatus.Filled,
                     FilledAt:      DateTimeOffset.UtcNow);
             }
@@ -1302,13 +1319,13 @@ public class IbkrBrokerService : IBrokerService
             OnStopOrderFilled(stopId, fillPrice));
     }
 
-    private static Order BuildCloseOrder(int orderId, TradeRecord trade) =>
+    private static Order BuildCloseOrder(int orderId, int quantity) =>
         new()
         {
             OrderId       = orderId,
             Action        = "SELL",
             OrderType     = "MKT",
-            TotalQuantity = trade.Quantity,
+            TotalQuantity = quantity,
             Transmit      = true,
         };
 
