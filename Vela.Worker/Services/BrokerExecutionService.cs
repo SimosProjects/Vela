@@ -248,10 +248,12 @@ public class BrokerExecutionService
 
     /// <summary>
     /// Force-closes an open position regardless of any exit alert.
-    /// Used by MarketSchedulerService to close same-day expiry options before liquidity dries up.
+    /// Used by MarketSchedulerService to close same-day expiry options before liquidity dries up,
+    /// and by ForceCloseConsumerService for dashboard-initiated closes.
     /// Writes to CSV, Discord, and trade_metrics identically to a normal exit.
+    /// Returns the outcome so a caller can distinguish a clean close from one needing reconciliation.
     /// </summary>
-    public async Task ForceCloseAsync(
+    public async Task<ForceCloseOutcome> ForceCloseAsync(
         TradeRecord trade,
         TradeOutcome outcome,
         CancellationToken ct = default)
@@ -266,7 +268,7 @@ public class BrokerExecutionService
             _logger.LogInformation(
                 "Force close for {Symbol} skipped — already being closed on a concurrent path.",
                 trade.Symbol);
-            return;
+            return ForceCloseOutcome.AlreadyClosing;
         }
 
         BrokerOrderResult closeResult;
@@ -279,7 +281,7 @@ public class BrokerExecutionService
             _guard.RevertClosing(trade.UserName, trade.OptionsContract, trade.Symbol);
             _logger.LogError(ex,
                 "Broker ClosePositionAsync failed during force close for {Symbol}", trade.Symbol);
-            return;
+            return ForceCloseOutcome.Failed;
         }
 
         if (closeResult.Status == OrderStatus.Pending)
@@ -289,7 +291,7 @@ public class BrokerExecutionService
                 "Force close timed out for {Symbol} — position may still be open at IBKR. " +
                 "Not recording close to prevent data loss. Manual reconciliation required.",
                 trade.Symbol);
-            return;
+            return ForceCloseOutcome.Pending;
         }
 
         var closedTrade = _guard.RegisterClose(
@@ -299,7 +301,7 @@ public class BrokerExecutionService
             closeResult.FillPrice,
             outcome);
 
-        if (closedTrade is null) return;
+        if (closedTrade is null) return ForceCloseOutcome.NotFound;
 
         closedTrade.ExitLatencyMs   = null;
         closedTrade.ExitSlippagePct = null;
@@ -337,6 +339,8 @@ public class BrokerExecutionService
                 exitSlippagePct: null,
                 ct:              ct);
         }
+
+        return ForceCloseOutcome.Closed;
     }
 
     /// <summary>

@@ -26,6 +26,9 @@ public static class DashboardEndpoints
         group.MapGet("/positions", GetPositions).WithName("GetOpenPositions")
              .WithSummary("Returns all currently open positions.");
 
+        group.MapPost("/positions/{orderId}/close", ForceClosePosition).WithName("ForceClosePosition")
+             .WithSummary("Queues a force-close for the given position. The Worker performs the broker close and writes the outcome back.");
+
         group.MapGet("/closed-today", GetClosedToday).WithName("GetClosedToday")
              .WithSummary("Returns trades closed today in Eastern Time.");
 
@@ -198,6 +201,46 @@ public static class DashboardEndpoints
         )).ToList();
 
         return Results.Ok(positions);
+    }
+
+    // Queues a dashboard-initiated force close. The Worker owns the single IBKR session, so the
+    // close itself is performed there: ForceCloseConsumerService picks up the Requested row,
+    // runs BrokerExecutionService.ForceCloseAsync, and writes the outcome back to the row.
+    private static async Task<IResult> ForceClosePosition(
+        string orderId,
+        VelaDbContext db,
+        CancellationToken ct)
+    {
+        var position = await db.OpenPositions
+            .FirstOrDefaultAsync(p => p.OrderId == orderId, ct);
+
+        if (position is null)
+            return Results.NotFound($"No open position found for order {orderId}.");
+
+        // Manual positions are not tracked by TradeGuard and must be closed directly in IBKR.
+        if (position.IsManual)
+            return Results.BadRequest(
+                "This position is manual and must be closed directly in IBKR.");
+
+        var alreadyQueued = await db.ForceCloseRequests
+            .AnyAsync(r => r.OrderId == orderId && r.Status == "Requested", ct);
+
+        if (alreadyQueued)
+            return Results.Conflict("A close is already queued for this position.");
+
+        var request = new Vela.Worker.Data.ForceCloseRequest
+        {
+            OrderId = orderId,
+            Status = "Requested",
+            RequestedAt = DateTimeOffset.UtcNow,
+        };
+
+        db.ForceCloseRequests.Add(request);
+        await db.SaveChangesAsync(ct);
+
+        return Results.Accepted(
+            $"/api/dashboard/positions/{orderId}/close",
+            new { requestId = request.Id, status = request.Status });
     }
 
     private static async Task<IResult> GetClosedToday(VelaDbContext db, CancellationToken ct)

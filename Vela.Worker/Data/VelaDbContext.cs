@@ -21,6 +21,11 @@ public class VelaDbContext : DbContext
     /// Populated by POST /api/config/risk; read by GET /api/config/risk.
     /// </summary>
     public DbSet<RiskConfigOverride> RiskConfigOverrides { get; set; }
+    /// <summary>
+    /// Dashboard-initiated force-close requests. Inserted by the Api and consumed by
+    /// ForceCloseConsumerService, which writes the outcome back to Status.
+    /// </summary>
+    public DbSet<ForceCloseRequest> ForceCloseRequests { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -183,6 +188,20 @@ public class VelaDbContext : DbContext
             entity.Property(r => r.Id).HasColumnName("id").ValueGeneratedNever();
             entity.Property(r => r.ConfigJson).HasColumnName("config_json");
             entity.Property(r => r.UpdatedAt).HasColumnName("updated_at");
+        });
+
+        modelBuilder.Entity<ForceCloseRequest>(entity =>
+        {
+            entity.ToTable("force_close_requests");
+            entity.HasKey(r => r.Id);
+
+            entity.HasIndex(r => r.Status).HasDatabaseName("idx_force_close_requests_status");
+
+            entity.Property(r => r.Id).HasColumnName("id");
+            entity.Property(r => r.OrderId).HasColumnName("order_id");
+            entity.Property(r => r.Status).HasColumnName("status");
+            entity.Property(r => r.RequestedAt).HasColumnName("requested_at");
+            entity.Property(r => r.ProcessedAt).HasColumnName("processed_at");
         });
     }
 }

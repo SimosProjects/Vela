@@ -45,6 +45,7 @@ export default function App() {
   const [userHasToggledPause]         = useState(false);
   const [modalPosition, setModalPosition] = useState(null);
   const { data, lastUpdated, error }  = usePolling(10000);
+  const [actionMsg, setActionMsg] = useState(null);
 
   const [blockCalls, onToggleBlockCalls, syncBlockCalls]   = useSessionToggle(null, '/api/dashboard/block-calls', 'blockCallsOverride');
   const [blockHigh,  onToggleBlockHigh,  syncBlockHigh]    = useSessionToggle(null, '/api/dashboard/block-high',  'blockHighOverride');
@@ -68,10 +69,25 @@ export default function App() {
     } catch { }
   };
 
-  const handleConfirmClose = () => {
-    // TODO: POST /api/dashboard/positions/{modalPosition.id}/close
-    console.log('Force closing:', modalPosition?.id);
+  const handleConfirmClose = async () => {
+    if (!modalPosition) return;
+    const pos = modalPosition;
     setModalPosition(null);
+    try {
+      const res = await fetch(
+        `/api/dashboard/positions/${encodeURIComponent(pos.id)}/close`,
+        { method: 'POST' }
+      );
+      if (res.ok) {
+        setActionMsg({ type: 'ok', text: `Close requested for ${pos.contract}` });
+      } else {
+        const body = await res.text().catch(() => '');
+        setActionMsg({ type: 'err', text: `Close failed for ${pos.contract}: ${body || res.status}` });
+      }
+    } catch {
+      setActionMsg({ type: 'err', text: `Close request failed for ${pos.contract} — network error` });
+    }
+    setTimeout(() => setActionMsg(null), 6000);
   };
 
   const regimeBlocksCalls = data.regime?.blockCalls ?? false;
@@ -96,6 +112,16 @@ export default function App() {
       {error && (
         <div style={{ background: 'rgba(248,81,73,0.1)', borderBottom: `1px solid rgba(248,81,73,0.3)`, padding: '6px 16px', fontSize: 11, color: B.rd }}>
           ⚠ Poll error: {error} — showing last known data
+        </div>
+      )}
+      {actionMsg && (
+        <div style={{
+          padding: '6px 16px', fontSize: 11,
+          color: actionMsg.type === 'ok' ? '#3fb950' : B.rd,
+          background: actionMsg.type === 'ok' ? 'rgba(63,185,80,0.1)' : 'rgba(248,81,73,0.1)',
+          borderBottom: `1px solid ${actionMsg.type === 'ok' ? 'rgba(63,185,80,0.3)' : 'rgba(248,81,73,0.3)'}`,
+        }}>
+          {actionMsg.text}
         </div>
       )}
       {isMobile
