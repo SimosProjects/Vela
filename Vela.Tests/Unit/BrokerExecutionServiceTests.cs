@@ -695,4 +695,63 @@ public class BrokerExecutionServiceTests
             It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TradeOrder>(),
             It.IsAny<double>(), default), Times.Never);
     }
+
+    [Fact]
+    public async Task HandleEntryAsync_PriceProtectionRejectionDuringFillWindow_DoesNotRecordGhost()
+    {
+        // IbkrBrokerService now returns Rejected (not Pending) when a price-protection
+        // cancellation races with the limit order fill window. Verifies that no position
+        // is recorded in TradeGuard and GetCurrentPositionPriceAsync is never called.
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "1", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 0m, FillQuantity: 0, FillAmount: 0m,
+                Status: OrderStatus.Rejected, FilledAt: DateTimeOffset.UtcNow,
+                RejectionReason: "PRICE_PROTECTION:5.90"));
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        _guard.GetOpenTrades().Should().BeEmpty();
+        _brokerMock.Verify(
+            b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_HighSlippage_StopAndTargetRebasedFromFillPrice()
+    {
+        // Fill is 197% above alert. After trail tightening to 25%, stop and target
+        // persisted to TradeGuard should be calculated from the $11.00 fill, not the $3.70 alert.
+        // Stop: 11.00 * (1 - 0.25) = $8.25. Target: 11.00 * (11.10 / 3.70) = 11.00 * 3.0 = $33.00
+        var options = new RiskEngineOptions
+        {
+            PostFillSlippageWarningPct = 50.0,
+            HighSlippageTrailPct       = 25.0,
+            OptionsStandardTrailPct    = 40.0,
+        };
+
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "ORDER-200", StopOrderId: "STOP-200", TargetOrderId: null,
+                FillPrice: 11.00m, FillQuantity: 2, FillAmount: 2200m,
+                Status: OrderStatus.Filled, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.ReplaceTrailStopAsync(
+                "STOP-200", It.IsAny<int>(), It.IsAny<TradeOrder>(), 25.0, default))
+            .ReturnsAsync("STOP-200-TIGHT");
+
+        var service = BuildService(options);
+        var alert   = BuildAlert(pricePaid: 3.70m);
+
+        await service.HandleEntryAsync(alert, CallClassification());
+
+        var trade = _guard.GetOpenTrades().FirstOrDefault();
+        trade.Should().NotBeNull();
+        trade!.StopPrice.Should().BeApproximately(8.25m, 0.01m);
+        trade.TargetPrice.Should().BeApproximately(33.00m, 0.05m);
+    }
 }

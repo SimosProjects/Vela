@@ -4,12 +4,14 @@ Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry 
 2026-06-10,14:12:24,,,SOFI,46.0,16.03,737.38,1953.0,+0.19%,,,,,Open,Open,Krazy 👶 🐐,77.0,Top Analyst I,,,3858
 2026-06-11,10:04:58,,,PINS,34,21.47,729.98,1312,+0.09%,,,,,Open,Open,SLAM,78,,,,3920
 2026-06-11,14:49:49,,,BULL,348,6.47,2251.56,1397,+0.31%,,,,,Open,Open,Krazy 👶 🐐,77,Top Analyst I,,,4142
-2026-06-12,11:10:52,,,PURR,255,8.81,2246.55,1497,+0.23%,,,,,Open,Open,Trading Goat,96,,,,4454
+2026-06-12,11:10:52,2026-06-16,15:51:50,PURR,255,8.81,2246.55,,,9.87,2516.85,,,Closed,StoppedOut,Trading Goat,96,,+270.30,+12.03%,4454
 2026-06-15,11:25:19,,,OPEN,646,4.65,3003.90,1584,+0.22%,,,,,Open,Open,ismcant ,72,,,,5456
 2026-06-15,11:25:21,,,OPEN,646,4.65,3003.90,2074,+0.22%,,,,,Open,Open,ismcant ,72,Prospect,,,5466
+2026-06-16,10:14:32,,,GME,139,21.44,2980.16,2829,-0.05%,,,,,Open,Open,SLAM,78,,,,5890
+2026-06-16,11:58:45,2026-06-16,12:00:53,CRVO,536,5.52,2958.72,2658,-1.25%,5.22,2797.92,,,Closed,StoppedOut,yoyomun,88,,-160.80,-5.43%,6100
 
 ,,SUMMARY
-,,Total Trades,8
-,,Open,8,Closed,0
-,,Wins,0,Losses,0,Win Rate,0.0%
-,,Total P&L,+0.00
+,,Total Trades,10
+,,Open,8,Closed,2
+,,Wins,1,Losses,1,Win Rate,50.0%
+,,Total P&L,+109.50

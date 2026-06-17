@@ -42,6 +42,7 @@ public class BrokerExecutionService
         _scopeFactory = scopeFactory;
         _logger       = logger;
         _riskOptions  = riskOptions.Value;
+
         // Injectable for testing; defaults to real ET market hours check
         _isMarketOpen = isMarketOpen ?? IsMarketOpenDefault;
     }
@@ -50,7 +51,8 @@ public class BrokerExecutionService
     /// Handles a BTO or averaging entry alert by sizing the order, running safety checks,
     /// placing the order with the broker, and logging the result to CSV and Discord.
     /// Delegates to <see cref="PassesPreEntryChecks"/>, <see cref="ExecuteBrokerEntryAsync"/>,
-    /// <see cref="TightenTrailOnElevatedSlippageAsync"/>, and <see cref="PersistEntryAsync"/>.
+    /// <see cref="TightenTrailOnElevatedSlippageAsync"/>, <see cref="AdjustOrderPricesForFill"/>,
+    /// and <see cref="PersistEntryAsync"/>.
     /// Skips silently if the market is closed or any safety check fails.
     /// </summary>
     public async Task HandleEntryAsync(
@@ -90,12 +92,16 @@ public class BrokerExecutionService
         try
         {
             var orderSubmittedAt = DateTimeOffset.UtcNow;
-
             var result = await ExecuteBrokerEntryAsync(alert, order, alertedPrice, ct);
             if (result is null) return;
 
             // Must run before RegisterOpen so the updated StopOrderId is stored in TradeGuard and DB.
             result = await TightenTrailOnElevatedSlippageAsync(order, result, alertedPrice, ct);
+
+            // When slippage is elevated the order's stop and target prices were derived from the
+            // alert price, not the fill price. Rebase them so the persisted record reflects the
+            // actual position risk rather than showing a near-zero target or a massive stop gap.
+            order = AdjustOrderPricesForFill(order, result, alertedPrice);
 
             // Both OCA and standalone trail attempts were rejected at IBKR (e.g. SPX cash-settled
             // margin rules). The fill happened and will be tracked, but the position has no stop.
@@ -105,7 +111,6 @@ public class BrokerExecutionService
                     "No stop protection for {Symbol} OrderId {OrderId} — all trail stop attempts " +
                     "rejected by IBKR. Position is open and unprotected. Manual stop required.",
                     order.Symbol, result.OrderId);
-
                 await _discord.NotifyCriticalAsync(
                     $"⚠️ No Stop Protection — {order.Symbol}",
                     $"**{order.Symbol}** filled at ${result.FillPrice:F2} × {result.FillQuantity} " +
@@ -138,7 +143,6 @@ public class BrokerExecutionService
         CancellationToken ct = default)
     {
         var alertReceivedAt = DateTimeOffset.UtcNow;
-
         var trade = _guard.FindOpenTrade(
             alert.UserName ?? "",
             alert.OptionsContractSymbol,
@@ -378,6 +382,7 @@ public class BrokerExecutionService
         }
 
         var remainingQty = trade.Quantity - quantityToClose;
+
         _guard.UpdateAfterPartialClose(
             trade.UserName,
             trade.OptionsContract,
@@ -482,7 +487,6 @@ public class BrokerExecutionService
                 TryParsePriceProtectionMarketPrice(result.RejectionReason, out var marketPrice))
             {
                 result = await RetryWithMarketAnchoredLimitAsync(order, result, alertedPrice, marketPrice, ct);
-
                 if (result.Status == OrderStatus.Rejected || result.Status == OrderStatus.Cancelled)
                 {
                     _logger.LogWarning(
@@ -623,7 +627,6 @@ public class BrokerExecutionService
             if (isAverage)
             {
                 var existing = await repo.GetBySymbolAndUserAsync(trade.Symbol, trade.UserName, ct);
-
                 if (existing is not null)
                 {
                     var combinedQty        = existing.Quantity + trade.Quantity;
@@ -661,12 +664,10 @@ public class BrokerExecutionService
                 // The original position is still valid, only the average failed to persist.
                 // Revert HasAveraged so the position can be averaged again on the next alert.
                 _guard.RevertAverage(order.UserName, order.OptionsContractSymbol, order.Symbol);
-
                 _logger.LogError(ex,
                     "open_positions write FAILED on average entry for {Symbol}. " +
                     "HasAveraged reverted. The average fill occurred at IBKR but is not tracked.",
                     trade.Symbol);
-
                 await _discord.NotifyCriticalAsync(
                     $"⚠️ Average Entry Write Failed — {trade.Symbol}",
                     $"Average fill for **{trade.Symbol}** succeeded at IBKR " +
@@ -681,12 +682,10 @@ public class BrokerExecutionService
                 // restart will reload from DB (empty), TradeGuard will have no record of it,
                 // and the position will be open at IBKR without any stop or exit handling.
                 _guard.RemovePosition(trade.OrderId);
-
                 _logger.LogError(ex,
                     "CRITICAL: open_positions write FAILED for {Symbol} OrderId {OrderId}. " +
                     "Position removed from TradeGuard. Fill occurred at IBKR but is now untracked.",
                     trade.Symbol, trade.OrderId);
-
                 await _discord.NotifyCriticalAsync(
                     $"🚨 Position Write Failed — {trade.Symbol}",
                     $"**{trade.Symbol}** filled at IBKR " +
@@ -698,7 +697,6 @@ public class BrokerExecutionService
                     "position may be open at IBKR without Vela stop protection.",
                     ct);
             }
-
             return;
         }
 
@@ -868,6 +866,44 @@ public class BrokerExecutionService
         }
 
         return result with { StopOrderId = newStopId };
+    }
+
+    // When post-fill slippage is elevated the order's stop and target prices were derived from
+    // the alert price and no longer reflect actual position risk. Rebase both from the confirmed
+    // fill price so open_positions, CSV, and trade_metrics show meaningful values.
+    // The trail stop at IBKR already trails from the fill price, this only affects persistence.
+    private TradeOrder AdjustOrderPricesForFill(
+        TradeOrder order,
+        BrokerOrderResult result,
+        decimal alertedPrice)
+    {
+        if (_riskOptions.PostFillSlippageWarningPct <= 0 || alertedPrice <= 0 || result.FillPrice <= 0)
+            return order;
+
+        var slippagePct = (result.FillPrice - alertedPrice) / alertedPrice * 100;
+        if (slippagePct <= (decimal)_riskOptions.PostFillSlippageWarningPct)
+            return order;
+
+        // Use the effective (possibly tightened) trail to derive the new stop price floor.
+        var effectiveTrailPct = _riskOptions.HighSlippageTrailPct > 0
+            ? (decimal)Math.Min(order.TrailPercent, _riskOptions.HighSlippageTrailPct)
+            : (decimal)order.TrailPercent;
+
+        // Derive the target multiple from the original alert-based prices, then rebase on fill.
+        var targetMultiple = order.EstimatedEntryPrice > 0
+            ? order.TargetPrice / order.EstimatedEntryPrice
+            : 3.0m;
+
+        var newStop   = Math.Round(result.FillPrice * (1m - effectiveTrailPct / 100m), 2);
+        var newTarget = Math.Round(result.FillPrice * targetMultiple, 2);
+
+        _logger.LogInformation(
+            "Rebasing stop and target for {Symbol} from alert price ${Alert:F2} to fill price ${Fill:F2}. " +
+            "Stop: ${OldStop:F2} → ${NewStop:F2} | Target: ${OldTarget:F2} → ${NewTarget:F2}",
+            order.Symbol, alertedPrice, result.FillPrice,
+            order.StopPrice, newStop, order.TargetPrice, newTarget);
+
+        return order with { StopPrice = newStop, TargetPrice = newTarget };
     }
 
     private static OpenPosition BuildOpenPosition(TradeRecord trade) => new()
