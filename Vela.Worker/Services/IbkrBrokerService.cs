@@ -59,7 +59,6 @@ public class IbkrBrokerService : IBrokerService
     public void ReRegisterStopCallbacks(IEnumerable<OpenPosition> positions)
     {
         var count = 0;
-
         foreach (var p in positions)
         {
             if (!int.TryParse(p.StopOrderId, out var stopId) ||
@@ -68,7 +67,6 @@ public class IbkrBrokerService : IBrokerService
 
             var hasTarget = p.TargetOrderId is not null &&
                             int.TryParse(p.TargetOrderId, out var _);
-
             int.TryParse(p.TargetOrderId, out var targetId);
 
             var entryOrderId = p.OrderId;
@@ -76,7 +74,6 @@ public class IbkrBrokerService : IBrokerService
             lock (_stopMapLock)
             {
                 _stopOrderMap[stopId] = (entryOrderId, TradeOutcome.StoppedOut);
-
                 if (hasTarget)
                     _stopOrderMap[targetId] = (entryOrderId, TradeOutcome.TargetHit);
             }
@@ -140,7 +137,7 @@ public class IbkrBrokerService : IBrokerService
 
     /// <summary>
     /// Returns the current average cost and actual held quantity of an open position from IBKR.
-    /// Quantity will be negative for short positions — BrokerExecutionService guards against this.
+    /// Quantity will be negative for short positions, BrokerExecutionService guards against this.
     /// Returns (0, 0) if the position is not found or the request times out.
     /// </summary>
     public async Task<(decimal Price, int Quantity)> GetCurrentPositionPriceAsync(
@@ -161,9 +158,11 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
             var (price, qty) = await tcs.Task.WaitAsync(cts.Token);
+
             _logger.LogDebug(
                 "IBKR position for {Symbol}: avgCost ${Price:F2} qty {Qty}",
                 trade.Symbol, price, qty);
+
             return (price, qty);
         }
         catch (OperationCanceledException)
@@ -182,17 +181,19 @@ public class IbkrBrokerService : IBrokerService
     public async Task<PositionsSnapshot> GetAllPositionsAsync(CancellationToken ct = default)
     {
         if (!EnsureConnected()) return new PositionsSnapshot([], false);
- 
+
         var tcs = _connection.Wrapper.RegisterAllPositionsCallback();
         _connection.Client.reqPositions();
- 
+
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(60));
             var positions = await tcs.Task.WaitAsync(cts.Token);
+
             _logger.LogDebug(
                 "IBKR GetAllPositions — {Count} positions received", positions.Count);
+
             return new PositionsSnapshot(positions, false);
         }
         catch (OperationCanceledException)
@@ -210,20 +211,23 @@ public class IbkrBrokerService : IBrokerService
     public async Task<OrdersSnapshot> GetAllOpenOrdersAsync(CancellationToken ct = default)
     {
         if (!EnsureConnected()) return new OrdersSnapshot([], false);
- 
+
         var tcs = _connection.Wrapper.RegisterAllOpenOrdersCallback();
+
         // reqAllOpenOrders returns orders from all API sessions, not just the current one.
         // Trail stop orders placed in previous sessions appear here, which is what we need
         // to correctly classify managed vs unknown orders at startup.
         _connection.Client.reqAllOpenOrders();
- 
+
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
             var orders = await tcs.Task.WaitAsync(cts.Token);
+
             _logger.LogDebug(
                 "IBKR GetAllOpenOrders — {Count} orders received", orders.Count);
+
             return new OrdersSnapshot(orders, false);
         }
         catch (OperationCanceledException)
@@ -233,7 +237,7 @@ public class IbkrBrokerService : IBrokerService
             return new OrdersSnapshot([], true);
         }
     }
- 
+
     /// <summary>
     /// Returns true if the given order ID is tracked in the stop/target order map,
     /// meaning Vela placed it and is managing it this session.
@@ -294,6 +298,7 @@ public class IbkrBrokerService : IBrokerService
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
             var price = await tcs.Task.WaitAsync(cts.Token);
+
             _logger.LogDebug("IBKR market price for {Symbol}: ${Price:F2}", symbol, price);
             return price;
         }
@@ -350,7 +355,7 @@ public class IbkrBrokerService : IBrokerService
     /// <summary>
     /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
     /// an OCA group containing a TRAIL stop. When the order has a LimitPrice set, a LMT order
-    /// is placed with a shorter fill window (7s); unfilled remainder is cancelled before
+    /// is placed with a shorter fill window (10s); unfilled remainder is cancelled before
     /// BrokerExecutionService verifies the actual held quantity. Market orders retain the 15s
     /// window with late-fill detection via ExecDetails. Partial fills are handled by reading
     /// FilledQuantity from the orderStatus callback (normal path) or reqPositions (late fill
@@ -367,20 +372,26 @@ public class IbkrBrokerService : IBrokerService
         var tcs      = _connection.Wrapper.RegisterOrderCallback(orderId);
         var contract = BuildContract(order);
 
-        var entryOrder = order.LimitPrice.HasValue
-            ? BuildLimitOrder(orderId, order.Quantity, "BUY", order.LimitPrice.Value)
+        // Compute minimum price tick once, applied to both the entry limit and the temp stop
+        // so neither triggers a [110] price variation rejection from IBKR.
+        var minTick = GetOptionsMinTick(order);
+        var entryLimitPrice = order.LimitPrice.HasValue
+            ? (decimal)Math.Round(Math.Round((double)order.LimitPrice.Value / minTick) * minTick, 2)
+            : (decimal?)null;
+
+        var entryOrder = entryLimitPrice.HasValue
+            ? BuildLimitOrder(orderId, order.Quantity, "BUY", entryLimitPrice.Value)
             : BuildMarketOrder(orderId, order.Quantity, "BUY");
 
         var fillWindowSeconds = order.LimitPrice.HasValue ? LimitOrderFillWindowSeconds : 15;
 
-        // Register exec details TCS before placing — catches late fills that arrive
+        // Register exec details TCS before placing, catches late fills that arrive
         // after the fill window fires and the order cancel is sent to IBKR.
         var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId);
 
         // Place entry with a temporary fixed STP as bracket child so there is always
         // stop protection in place while we wait for the actual fill confirmation.
         var tempStopId    = orderId + 1;
-        var minTick       = order.TradeType == TradeType.Options ? 0.05 : 0.01;
         var roundedStop   = Math.Round(Math.Round((double)order.StopPrice / minTick) * minTick, 2);
         var tempStopOrder = BuildStopOrder(tempStopId, orderId, order.Quantity, roundedStop);
 
@@ -397,7 +408,7 @@ public class IbkrBrokerService : IBrokerService
 
             // Only resolves when IBKR confirms status "Filled".
             var state = await tcs.Task.WaitAsync(cts.Token);
- 
+
             // IBKR cancelled the order before the fill window expired (e.g. price-protection
             // rejection). Return without placing trail stop or OCA group.
             // Small delay before reading the rejection reason: orderStatus("Cancelled") fires
@@ -406,14 +417,15 @@ public class IbkrBrokerService : IBrokerService
             {
                 _connection.Client.cancelOrder(tempStopId);
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
- 
+
                 await Task.Delay(600, ct);
- 
+
                 var priceProtectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
+
                 _logger.LogWarning(
                     "IBKR order cancelled before fill for {Symbol} — Reason: {Reason}",
                     order.Symbol, priceProtectionReason ?? "no reason provided");
- 
+
                 return new BrokerOrderResult(
                     OrderId:         orderId.ToString(),
                     StopOrderId:     null,
@@ -425,10 +437,10 @@ public class IbkrBrokerService : IBrokerService
                     FilledAt:        DateTimeOffset.UtcNow,
                     RejectionReason: priceProtectionReason);
             }
- 
+
             // Normal fill, exec details TCS no longer needed
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
- 
+
             _logger.LogDebug(
                 "IBKR entry filled. OrderId: {OrderId} Status: {Status} — replacing stop with OCA trail",
                 orderId, state.Status);
@@ -443,15 +455,15 @@ public class IbkrBrokerService : IBrokerService
             var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
 
             var trailStopId = orderId + 2;
- 
+
             var finalStopId = await PlaceTrailWithFallbackAsync(
                 order.Symbol, orderId.ToString(), trailStopId, contract,
                 fillQty, order.TrailPercent, ct);
- 
+
             _logger.LogDebug(
                 "IBKR trail placed — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | StopId: {StopId}",
                 fillQty, order.TrailPercent, finalStopId ?? "NONE");
- 
+
             return new BrokerOrderResult(
                 OrderId:       orderId.ToString(),
                 StopOrderId:   finalStopId,
@@ -466,13 +478,36 @@ public class IbkrBrokerService : IBrokerService
         {
             // Limit order: cancel the unfilled portion and return Pending so
             // BrokerExecutionService can verify what quantity actually filled.
-            // The 3s delay in BrokerExecutionService doubles as the cancel propagation window.
             if (order.LimitPrice.HasValue)
             {
                 _connection.Client.cancelOrder(orderId);
                 _connection.Client.cancelOrder(tempStopId);
                 _connection.Wrapper.UnregisterOrderCallback(orderId);
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
+
+                // Brief pause — a price-protection rejection that raced with the fill window
+                // may arrive just after the OperationCanceledException. Catching it here
+                // prevents VerifyPendingFillAsync from recording a ghost for a cancelled order.
+                await Task.Delay(300, ct);
+                var priceProtectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
+                if (priceProtectionReason is not null)
+                {
+                    _logger.LogWarning(
+                        "IBKR limit order cancelled via price protection during fill window for {Symbol} — " +
+                        "skipping position verification. Reason: {Reason}",
+                        order.Symbol, priceProtectionReason);
+
+                    return new BrokerOrderResult(
+                        OrderId:         orderId.ToString(),
+                        StopOrderId:     null,
+                        TargetOrderId:   null,
+                        FillPrice:       0m,
+                        FillQuantity:    0,
+                        FillAmount:      0m,
+                        Status:          OrderStatus.Rejected,
+                        FilledAt:        DateTimeOffset.UtcNow,
+                        RejectionReason: priceProtectionReason);
+                }
 
                 _logger.LogDebug(
                     "IBKR limit order fill window expired for {Symbol} @ ${Limit:F2} — cancelling unfilled portion.",
@@ -502,7 +537,6 @@ public class IbkrBrokerService : IBrokerService
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 execCts.CancelAfter(TimeSpan.FromSeconds(10));
-
                 var lateFillPrice = await lateExecTcs.Task.WaitAsync(execCts.Token);
 
                 _logger.LogInformation(
@@ -540,11 +574,10 @@ public class IbkrBrokerService : IBrokerService
                 }
 
                 var trailStopId = orderId + 2;
- 
                 var lateFinalStopId = await PlaceTrailWithFallbackAsync(
                     order.Symbol, orderId.ToString(), trailStopId, contract,
                     actualLateFillQty, order.TrailPercent, ct);
- 
+
                 _logger.LogDebug(
                     "IBKR trail placed for late fill — Qty: {Qty} Trail: {TrailPct}% | Target: none (Level 2 restriction) | StopId: {StopId}",
                     actualLateFillQty, order.TrailPercent, lateFinalStopId ?? "NONE");
@@ -634,7 +667,6 @@ public class IbkrBrokerService : IBrokerService
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
-
             var fill       = await tcs.Task.WaitAsync(cts.Token);
             var fillPrice  = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
             var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
@@ -667,7 +699,6 @@ public class IbkrBrokerService : IBrokerService
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 execCts.CancelAfter(TimeSpan.FromSeconds(30));
-
                 var execFillPrice = await execTcs.Task.WaitAsync(execCts.Token);
                 var multiplier    = trade.TradeType == TradeType.Options ? 100m : 1m;
 
@@ -762,7 +793,6 @@ public class IbkrBrokerService : IBrokerService
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(_options.TimeoutMs);
-
             var fill       = await tcs.Task.WaitAsync(cts.Token);
             var fillPrice  = fill.AvgFillPrice > 0 ? fill.AvgFillPrice : trade.EntryPrice;
             var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
@@ -795,7 +825,6 @@ public class IbkrBrokerService : IBrokerService
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 execCts.CancelAfter(TimeSpan.FromSeconds(30));
-
                 var execFillPrice = await execTcs.Task.WaitAsync(execCts.Token);
                 var multiplier    = trade.TradeType == TradeType.Options ? 100m : 1m;
 
@@ -901,10 +930,11 @@ public class IbkrBrokerService : IBrokerService
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(TimeSpan.FromSeconds(30));
-
             var bars = await tcs.Task.WaitAsync(cts.Token);
+
             _logger.LogDebug(
                 "IBKR historical data received — {Symbol} {Count} bars", symbol, bars.Count);
+
             return bars;
         }
         catch (OperationCanceledException)
@@ -955,10 +985,10 @@ public class IbkrBrokerService : IBrokerService
 
         var contract  = BuildContract(order);
         var newStopId = GetNextOrderId();
- 
+
         var replacedStopId = await PlaceTrailWithFallbackAsync(
             order.Symbol, entryOrderId, newStopId, contract, quantity, newTrailPercent, ct);
- 
+
         if (replacedStopId is null)
         {
             _logger.LogError(
@@ -967,11 +997,11 @@ public class IbkrBrokerService : IBrokerService
                 order.Symbol);
             return null;
         }
- 
+
         _logger.LogDebug(
             "IBKR trail stop replaced for {Symbol} — {OldId} → {NewId} trail: {Trail}%",
             order.Symbol, existingStopOrderId, replacedStopId, newTrailPercent);
- 
+
         return replacedStopId;
     }
 
@@ -984,7 +1014,6 @@ public class IbkrBrokerService : IBrokerService
         lock (_stopMapLock)
         {
             _stopOrderMap[trailStopId] = (entryIdStr, TradeOutcome.StoppedOut);
-
             if (targetOrderId.HasValue)
                 _stopOrderMap[targetOrderId.Value] = (entryIdStr, TradeOutcome.TargetHit);
         }
@@ -1000,12 +1029,10 @@ public class IbkrBrokerService : IBrokerService
     private void OnStopOrderFilled(int stopOrderId, decimal fillPrice)
     {
         (string EntryOrderId, TradeOutcome Outcome) mapping;
-
         lock (_stopMapLock)
         {
             if (!_stopOrderMap.TryGetValue(stopOrderId, out mapping))
                 return;
-
             _stopOrderMap.Remove(stopOrderId);
         }
 
@@ -1040,6 +1067,18 @@ public class IbkrBrokerService : IBrokerService
 
     // Leaves gaps of 10 between parent IDs to accommodate stop, target, and OCA child order IDs
     private int GetNextOrderId() => Interlocked.Add(ref _nextOrderId, 10);
+
+    // Returns the minimum price increment for the given order's instrument.
+    // Index options (SPX, NDX, RUT, XSP) use $0.10 increments regardless of price.
+    // All other options use $0.05, correct for most equity and ETF option contracts.
+    private static double GetOptionsMinTick(TradeOrder order)
+    {
+        if (order.TradeType != TradeType.Options) return 0.01;
+
+        return order.Symbol is "SPX" or "SPXW" or "NDX" or "NDXW" or "RUT" or "XSP"
+            ? 0.10
+            : 0.05;
+    }
 
     private static Contract BuildContract(TradeOrder order)
     {
@@ -1162,8 +1201,8 @@ public class IbkrBrokerService : IBrokerService
             Tif             = "GTC",
             Transmit        = true,
         };
- 
-    // Places an OCA trail stop and waits up to 300ms for an immediate 201 rejection.
+
+    // Places an OCA trail stop and waits up to 600ms for an immediate 201 rejection.
     // If rejected, retries as a standalone trail stop (no OCA group), the fallback path
     // for cash-settled index options whose sell-side OCA orders are rejected by IBKR.
     // Returns the accepted stop order ID, or null if both attempts are rejected.
@@ -1178,12 +1217,12 @@ public class IbkrBrokerService : IBrokerService
     {
         var ocaGroup   = $"OCA_{trailStopId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
         var trailOrder = BuildOcaTrailOrder(trailStopId, quantity, trailPercent, ocaGroup);
- 
+
         var rejectionTcs = new TaskCompletionSource<string?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         _connection.Wrapper.RegisterStopRejectionCallback(trailStopId, rejectionTcs);
         _connection.Client.placeOrder(trailStopId, contract, trailOrder);
- 
+
         string? rejection = null;
         try
         {
@@ -1196,13 +1235,13 @@ public class IbkrBrokerService : IBrokerService
             // No rejection, OCA trail accepted
             _connection.Wrapper.UnregisterStopRejectionCallback(trailStopId);
         }
- 
+
         if (rejection is null)
         {
             RegisterTrailCallbacks(entryOrderId, trailStopId);
             return trailStopId.ToString();
         }
- 
+
         // "both sides" is a timing race — IBKR hasn't fully cleared its open-order
         // state after the temp bracket stop was cancelled. A short pause before
         // retrying as standalone gives IBKR time to reconcile.
@@ -1212,15 +1251,14 @@ public class IbkrBrokerService : IBrokerService
         _logger.LogDebug(
             "OCA trail stop rejected for {Symbol} StopId {StopId} — retrying as standalone trail. Reason: {Reason}",
             symbol, trailStopId, rejection);
- 
+
         var standaloneId  = GetNextOrderId();
         var standalone    = BuildStandaloneTrailOrder(standaloneId, quantity, trailPercent);
- 
         var standaloneTcs = new TaskCompletionSource<string?>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         _connection.Wrapper.RegisterStopRejectionCallback(standaloneId, standaloneTcs);
         _connection.Client.placeOrder(standaloneId, contract, standalone);
- 
+
         string? standaloneRejection = null;
         try
         {
@@ -1233,7 +1271,7 @@ public class IbkrBrokerService : IBrokerService
             // Standalone accepted
             _connection.Wrapper.UnregisterStopRejectionCallback(standaloneId);
         }
- 
+
         if (standaloneRejection is null)
         {
             RegisterTrailCallbacks(entryOrderId, standaloneId);
@@ -1242,14 +1280,15 @@ public class IbkrBrokerService : IBrokerService
                 symbol, standaloneId);
             return standaloneId.ToString();
         }
- 
+
         _logger.LogError(
             "All trail stop attempts rejected for {Symbol} — position is unprotected. " +
             "Reason: {Reason}",
             symbol, standaloneRejection);
+
         return null;
     }
- 
+
     // Registers exec callbacks for a trail stop using a string entry order ID.
     // String version required for ReplaceTrailStopAsync where entryOrderId is a string.
     private void RegisterTrailCallbacks(string entryOrderId, int stopId)
@@ -1258,7 +1297,7 @@ public class IbkrBrokerService : IBrokerService
         {
             _stopOrderMap[stopId] = (entryOrderId, TradeOutcome.StoppedOut);
         }
- 
+
         _connection.Wrapper.RegisterExecDetailsCallback(stopId, fillPrice =>
             OnStopOrderFilled(stopId, fillPrice));
     }
