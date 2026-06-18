@@ -631,12 +631,34 @@ public class IbkrEWrapper : EWrapper
 
     // -- Helpers --
 
-    // Parses the current market price from IBKR's price-protection [202] rejection message.
-    // Format: "...current market price of 267.2..."
-    // Stores the price as "PRICE_PROTECTION:267.2" in _rejectionReasons and resolves the
-    // order TCS immediately so PlaceOrderAsync returns without sitting at the fill window timeout.
+    // Parses IBKR [202] cancellation messages and stores a structured rejection reason so
+    // PlaceOrderAsync can distinguish a cancelled order from a genuine pending fill.
+    // Two formats are handled:
+    //   "current market price of 267.2" -> PRICE_PROTECTION:267.2
+    //     Carries the market price so BrokerExecutionService can retry with an anchored limit.
+    //   "Limit price too far outside of NBBO" -> NBBO_REJECTION
+    //     No market price available; still a definitive cancellation that must not ghost.
+    // Both formats resolve the order TCS immediately so PlaceOrderAsync exits via the early-cancel
+    // path instead of sitting at the fill window timeout.
     private void TryHandlePriceProtectionRejection(int orderId, string errorMsg)
     {
+        // NBBO rejection carries no market price, detect it first and store a sentinel reason.
+        if (errorMsg.Contains("outside of NBBO", StringComparison.OrdinalIgnoreCase))
+        {
+            lock (_lock)
+            {
+                _rejectionReasons[orderId] = "NBBO_REJECTION";
+
+                if (_orderCallbacks.TryGetValue(orderId, out var nbboTcs))
+                {
+                    nbboTcs.TrySetResult(new OrderFill("Cancelled", 0m, 0));
+                    _orderCallbacks.Remove(orderId);
+                }
+            }
+            return;
+        }
+
+        // Standard price-protection message includes the market price after a known marker.
         const string marker = "current market price of ";
         var markerIdx = errorMsg.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
         if (markerIdx < 0) return;
