@@ -180,17 +180,29 @@ public class BrokerExecutionService
             return;
         }
 
-        // A Pending result means ClosePositionAsync double-timed out. The stop is already
-        // cancelled at IBKR but the position may still be open. Do not record a close —
-        // the position remains in TradeGuard and open_positions for reconciliation.
+        // Both fill and execDetails callbacks timed out. Verify whether the close actually
+        // executed at IBKR before deciding to leave the position open for reconciliation.
         if (closeResult.Status == OrderStatus.Pending)
         {
-            _guard.RevertClosing(alert.UserName ?? "", alert.OptionsContractSymbol, alert.Symbol ?? "");
-            _logger.LogWarning(
-                "Close order timed out for {Symbol} — position may still be open at IBKR. " +
-                "Not recording close to prevent data loss. Manual reconciliation required.",
-                alert.Symbol);
-            return;
+            closeResult = await VerifyCloseExecutedAsync(trade, closeResult, ct);
+
+            if (closeResult.Status == OrderStatus.Pending)
+            {
+                _guard.RevertClosing(alert.UserName ?? "", alert.OptionsContractSymbol, alert.Symbol ?? "");
+                _logger.LogWarning(
+                    "Close order timed out for {Symbol} — position may still be open at IBKR. " +
+                    "Not recording close to prevent data loss. Manual reconciliation required.",
+                    alert.Symbol);
+                return;
+            }
+
+            // Position confirmed absent via reqPositions — close executed despite callback failure.
+            await _discord.NotifyCriticalAsync(
+                $"⚠️ Close Verified via reqPositions — {trade.Symbol}",
+                $"Close for **{trade.Symbol}** timed out on both callbacks but position was " +
+                $"confirmed absent from IBKR. Recorded at entry price ${trade.EntryPrice:F2} " +
+                "as fill price fallback. Actual P&L requires manual verification.",
+                ct);
         }
 
         var alertedExitPrice = alert.PriceAtExit ?? alert.ActualPriceAtTimeOfExit ?? 0m;
@@ -284,14 +296,29 @@ public class BrokerExecutionService
             return ForceCloseOutcome.Failed;
         }
 
+        // Both fill and execDetails callbacks timed out. Verify whether the close actually
+        // executed at IBKR before deciding to leave the position open for reconciliation.
         if (closeResult.Status == OrderStatus.Pending)
         {
-            _guard.RevertClosing(trade.UserName, trade.OptionsContract, trade.Symbol);
-            _logger.LogWarning(
-                "Force close timed out for {Symbol} — position may still be open at IBKR. " +
-                "Not recording close to prevent data loss. Manual reconciliation required.",
-                trade.Symbol);
-            return ForceCloseOutcome.Pending;
+            closeResult = await VerifyCloseExecutedAsync(trade, closeResult, ct);
+
+            if (closeResult.Status == OrderStatus.Pending)
+            {
+                _guard.RevertClosing(trade.UserName, trade.OptionsContract, trade.Symbol);
+                _logger.LogWarning(
+                    "Force close timed out for {Symbol} — position may still be open at IBKR. " +
+                    "Not recording close to prevent data loss. Manual reconciliation required.",
+                    trade.Symbol);
+                return ForceCloseOutcome.Pending;
+            }
+
+            // Position confirmed absent via reqPositions — close executed despite callback failure.
+            await _discord.NotifyCriticalAsync(
+                $"⚠️ Force Close Verified via reqPositions — {trade.Symbol}",
+                $"Force close for **{trade.Symbol}** timed out on both callbacks but position was " +
+                $"confirmed absent from IBKR. Recorded at entry price ${trade.EntryPrice:F2} " +
+                "as fill price fallback. Actual P&L requires manual verification.",
+                ct);
         }
 
         var closedTrade = _guard.RegisterClose(
@@ -604,6 +631,75 @@ public class BrokerExecutionService
         };
     }
 
+    // Called when ClosePositionAsync returns Pending (both fill and execDetails callbacks timed out).
+    // Uses GetAllPositionsAsync, which distinguishes a confirmed empty list from a Gateway timeout
+    // via PositionsSnapshot.TimedOut, to determine whether the close actually executed at IBKR.
+    // Returns the original Pending result unchanged when the outcome cannot be confirmed, so callers
+    // preserve the position for reconciliation rather than recording an incorrect close.
+    private async Task<BrokerOrderResult> VerifyCloseExecutedAsync(
+        TradeRecord trade,
+        BrokerOrderResult pending,
+        CancellationToken ct)
+    {
+        // Brief pause to allow IBKR to propagate the close before querying positions
+        await Task.Delay(TimeSpan.FromSeconds(3));
+
+        using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        checkCts.CancelAfter(TimeSpan.FromSeconds(15));
+        var snapshot = await _broker.GetAllPositionsAsync(checkCts.Token);
+
+        if (snapshot.TimedOut)
+        {
+            // Gateway did not respond, cannot distinguish a closed position from a still-open one.
+            // Return Pending so the caller leaves the position open for the reconciler.
+            _logger.LogWarning(
+                "Close verification for {Symbol} — reqPositions timed out. " +
+                "Cannot confirm close status. Leaving open for reconciliation.",
+                trade.Symbol);
+            return pending;
+        }
+
+        var contractKey = trade.TradeType == TradeType.Options
+            ? trade.OptionsContract?.Replace(" ", "") ?? ""
+            : trade.Symbol;
+
+        var stillOpen = snapshot.Positions.Any(p =>
+            trade.TradeType == TradeType.Options
+                ? string.Equals(
+                    p.LocalSymbol?.Replace(" ", ""),
+                    contractKey,
+                    StringComparison.OrdinalIgnoreCase) && p.Quantity > 0
+                : string.Equals(p.Symbol, contractKey, StringComparison.OrdinalIgnoreCase)
+                  && p.SecType == "STK"
+                  && p.Quantity > 0);
+
+        if (stillOpen)
+        {
+            _logger.LogWarning(
+                "Close verification for {Symbol} — position still present in IBKR. " +
+                "Close did not execute. Leaving open for reconciliation.",
+                trade.Symbol);
+            return pending;
+        }
+
+        // Position confirmed absent from a complete snapshot, the close executed.
+        // Use entry price as fill price since the actual fill price is unknown.
+        _logger.LogWarning(
+            "Close verification for {Symbol} — position absent from IBKR snapshot. " +
+            "Close executed despite callback timeout. Recording with entry price as fill price fallback.",
+            trade.Symbol);
+
+        var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
+        return pending with
+        {
+            FillPrice    = trade.EntryPrice,
+            FillQuantity = trade.Quantity,
+            FillAmount   = trade.EntryAmount,
+            Status       = OrderStatus.Filled,
+            FilledAt     = DateTimeOffset.UtcNow,
+        };
+    }
+
     // Writes a confirmed fill to open_positions, CSV, Discord, and trade_metrics.
     // On DB write failure, reverts TradeGuard state and fires a Discord critical.
     // Remaining writes (CSV, Discord, metrics) are skipped when the DB write fails.
@@ -903,7 +999,7 @@ public class BrokerExecutionService
 
         _logger.LogInformation(
             "Rebasing stop and target for {Symbol} from alert price ${Alert:F2} to fill price ${Fill:F2}. " +
-            "Stop: ${OldStop:F2} → ${NewStop:F2} | Target: ${OldTarget:F2} → ${NewTarget:F2}",
+            "Stop: ${OldStop:F2} -> ${NewStop:F2} | Target: ${OldTarget:F2} -> ${NewTarget:F2}",
             order.Symbol, alertedPrice, result.FillPrice,
             order.StopPrice, newStop, order.TargetPrice, newTarget);
 

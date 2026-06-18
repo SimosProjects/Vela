@@ -476,8 +476,6 @@ public class IbkrBrokerService : IBrokerService
         }
         catch (OperationCanceledException)
         {
-            // Limit order: cancel the unfilled portion and return Pending so
-            // BrokerExecutionService can verify what quantity actually filled.
             if (order.LimitPrice.HasValue)
             {
                 _connection.Client.cancelOrder(orderId);
@@ -485,17 +483,23 @@ public class IbkrBrokerService : IBrokerService
                 _connection.Wrapper.UnregisterOrderCallback(orderId);
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
-                // Brief pause — a price-protection rejection that raced with the fill window
-                // may arrive just after the OperationCanceledException. Catching it here
-                // prevents VerifyPendingFillAsync from recording a ghost for a cancelled order.
-                await Task.Delay(300, ct);
-                var priceProtectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
-                if (priceProtectionReason is not null)
+                // A [202] rejection racing with the fill window may arrive 1-3 seconds after the
+                // OCE fires. Poll with fixed delays rather than a single check so a delayed
+                // rejection is caught before reaching VerifyPendingFillAsync. Fixed delays (no ct)
+                // ensure the loop completes even when the outer token is concurrently cancelled.
+                string? rejectionReason = null;
+                for (var attempt = 0; attempt < 6 && rejectionReason is null; attempt++)
+                {
+                    await Task.Delay(500);
+                    rejectionReason = _connection.Wrapper.TakeRejectionReason(orderId);
+                }
+
+                if (rejectionReason is not null)
                 {
                     _logger.LogWarning(
                         "IBKR limit order cancelled via price protection during fill window for {Symbol} — " +
                         "skipping position verification. Reason: {Reason}",
-                        order.Symbol, priceProtectionReason);
+                        order.Symbol, rejectionReason);
 
                     return new BrokerOrderResult(
                         OrderId:         orderId.ToString(),
@@ -506,22 +510,70 @@ public class IbkrBrokerService : IBrokerService
                         FillAmount:      0m,
                         Status:          OrderStatus.Rejected,
                         FilledAt:        DateTimeOffset.UtcNow,
-                        RejectionReason: priceProtectionReason);
+                        RejectionReason: rejectionReason);
                 }
 
-                _logger.LogDebug(
-                    "IBKR limit order fill window expired for {Symbol} @ ${Limit:F2} — cancelling unfilled portion.",
-                    order.Symbol, order.LimitPrice.Value);
+                // No rejection reason after retries. Query the position to determine whether
+                // anything actually filled. If position is absent the order was cancelled with
+                // no fill, so return Rejected to prevent a ghost being recorded. If a position
+                // exists return Pending so VerifyPendingFillAsync records the actual fill.
+                var posKey = order.TradeType == TradeType.Options
+                    ? $"{order.Symbol}::{order.OptionsContractSymbol}"
+                    : $"{order.Symbol}::STK";
+
+                var posTcs = _connection.Wrapper.RegisterPositionCallback(posKey);
+                _connection.Client.reqPositions();
+
+                int verifiedQty = 0;
+                try
+                {
+                    using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    checkCts.CancelAfter(_options.TimeoutMs);
+                    var (_, qty) = await posTcs.Task.WaitAsync(checkCts.Token);
+                    verifiedQty = qty;
+                }
+                catch (OperationCanceledException)
+                {
+                    _connection.Wrapper.UnregisterPositionCallback(posKey);
+                }
+                finally
+                {
+                    _connection.Client.cancelPositions();
+                }
+
+                if (verifiedQty > 0)
+                {
+                    _logger.LogInformation(
+                        "IBKR position confirmed for {Symbol} after limit timeout — qty {Qty}. " +
+                        "Entering pending verification.",
+                        order.Symbol, verifiedQty);
+
+                    return new BrokerOrderResult(
+                        OrderId:       orderId.ToString(),
+                        StopOrderId:   null,
+                        TargetOrderId: null,
+                        FillPrice:     0m,
+                        FillQuantity:  0,
+                        FillAmount:    0m,
+                        Status:        OrderStatus.Pending,
+                        FilledAt:      DateTimeOffset.UtcNow);
+                }
+
+                _logger.LogWarning(
+                    "IBKR limit order for {Symbol} cancelled — no position confirmed via reqPositions. " +
+                    "Treating as rejected to prevent ghost recording.",
+                    order.Symbol);
 
                 return new BrokerOrderResult(
-                    OrderId:       orderId.ToString(),
-                    StopOrderId:   null,
-                    TargetOrderId: null,
-                    FillPrice:     0m,
-                    FillQuantity:  0,
-                    FillAmount:    0m,
-                    Status:        OrderStatus.Pending,
-                    FilledAt:      DateTimeOffset.UtcNow);
+                    OrderId:         orderId.ToString(),
+                    StopOrderId:     null,
+                    TargetOrderId:   null,
+                    FillPrice:       0m,
+                    FillQuantity:    0,
+                    FillAmount:      0m,
+                    Status:          OrderStatus.Rejected,
+                    FilledAt:        DateTimeOffset.UtcNow,
+                    RejectionReason: "Cancelled — no position confirmed after fill window");
             }
 
             // Market order timeout: wait for a late ExecDetails callback before giving up.
@@ -1016,7 +1068,7 @@ public class IbkrBrokerService : IBrokerService
         }
 
         _logger.LogDebug(
-            "IBKR trail stop replaced for {Symbol} — {OldId} → {NewId} trail: {Trail}%",
+            "IBKR trail stop replaced for {Symbol} — {OldId} -> {NewId} trail: {Trail}%",
             order.Symbol, existingStopOrderId, replacedStopId, newTrailPercent);
 
         return replacedStopId;

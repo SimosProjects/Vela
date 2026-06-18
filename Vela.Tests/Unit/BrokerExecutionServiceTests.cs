@@ -77,6 +77,8 @@ public class BrokerExecutionServiceTests
             It.IsAny<string>(), It.IsAny<int>(), It.IsAny<TradeOrder>(),
             It.IsAny<double>(), default))
             .ReturnsAsync((string?)null);
+        _brokerMock.Setup(b => b.GetAllPositionsAsync(default))
+            .ReturnsAsync(new PositionsSnapshot([], false));
         _metricsMock.Setup(m => m.GetTodayTradeCountAsync(
             It.IsAny<DateOnly>(), default)).ReturnsAsync(0);
         _metricsMock.Setup(m => m.CloseAsync(
@@ -753,5 +755,199 @@ public class BrokerExecutionServiceTests
         trade.Should().NotBeNull();
         trade!.StopPrice.Should().BeApproximately(8.25m, 0.01m);
         trade.TargetPrice.Should().BeApproximately(33.00m, 0.05m);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_NbboRejection_DoesNotRecordGhost()
+    {
+        // IbkrEWrapper now stores NBBO_REJECTION and resolves the TCS immediately.
+        // IbkrBrokerService returns Cancelled with that reason from the early-cancel path.
+        // ExecuteBrokerEntryAsync treats Cancelled as rejected when reason is not PRICE_PROTECTION.
+        // Verifies no position is recorded and GetCurrentPositionPriceAsync is never called.
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "1", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 0m, FillQuantity: 0, FillAmount: 0m,
+                Status: OrderStatus.Cancelled, FilledAt: DateTimeOffset.UtcNow,
+                RejectionReason: "NBBO_REJECTION"));
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        _guard.GetOpenTrades().Should().BeEmpty();
+        _brokerMock.Verify(
+            b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_LimitTimeout_NoPositionConfirmed_DoesNotRecordGhost()
+    {
+        // After the fill window OCE and the rejection-reason retry loop both yield nothing,
+        // IbkrBrokerService queries reqPositions. When the position is absent it returns
+        // Rejected rather than Pending, preventing VerifyPendingFillAsync from running and
+        // recording an estimated fill ghost.
+        _brokerMock
+            .Setup(b => b.PlaceOrderAsync(It.IsAny<TradeOrder>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "1", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 0m, FillQuantity: 0, FillAmount: 0m,
+                Status: OrderStatus.Rejected, FilledAt: DateTimeOffset.UtcNow,
+                RejectionReason: "Cancelled — no position confirmed after fill window"));
+
+        var alert = BuildAlert("bto", "options", "call", 4.95m, "TSLA260620C00450000", 450);
+        await _executionMarketOpen.HandleEntryAsync(alert, CallClassification());
+
+        _guard.GetOpenTrades().Should().BeEmpty();
+        _brokerMock.Verify(
+            b => b.GetCurrentPositionPriceAsync(It.IsAny<TradeRecord>(), default),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task HandleExitAsync_CloseTimeout_PositionAbsent_RecordsClose()
+    {
+        // ClosePositionAsync returns Pending (both callbacks timed out).
+        // GetAllPositionsAsync returns an empty non-timed-out snapshot, position is gone.
+        // VerifyCloseExecutedAsync confirms the close executed and returns Filled.
+        // HandleExitAsync should record the close in TradeGuard.
+        var order = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(), UserName: "TestTrader", Symbol: "TSLA",
+            TradeType: TradeType.Options, OptionsContractSymbol: "TSLA260620C00450000",
+            Direction: "call", Strike: 450, Expiration: "2026-06-20",
+            Quantity: 2, EstimatedEntryPrice: 4.95m, BudgetUsed: 990m,
+            StopPrice: 2.48m, TargetPrice: 14.85m, TrailPercent: 50.0);
+
+        _guard.RegisterOpen(order, new BrokerOrderResult(
+            OrderId: "ORDER-FC1", StopOrderId: "STOP-FC1", TargetOrderId: null,
+            FillPrice: 4.95m, FillQuantity: 2, FillAmount: 990m,
+            Status: OrderStatus.Filled, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.ClosePositionAsync(It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "CLOSE-FC1", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 4.95m, FillQuantity: 2, FillAmount: 990m,
+                Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
+
+        // Empty list, TimedOut=false: position confirmed absent from IBKR
+        _brokerMock
+            .Setup(b => b.GetAllPositionsAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PositionsSnapshot([], false));
+
+        var exitAlert = BuildAlert(side: "stc", userName: "TestTrader");
+        await _executionMarketOpen.HandleExitAsync(exitAlert);
+
+        _guard.GetOpenTrades().Should().BeEmpty("close was confirmed via reqPositions");
+    }
+
+    [Fact]
+    public async Task HandleExitAsync_CloseTimeout_PositionPresent_LeavesOpen()
+    {
+        // ClosePositionAsync returns Pending.
+        // GetAllPositionsAsync returns a snapshot containing the position, close did not execute.
+        // HandleExitAsync should revert and leave the position open.
+        var order = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(), UserName: "TestTrader", Symbol: "TSLA",
+            TradeType: TradeType.Options, OptionsContractSymbol: "TSLA260620C00450000",
+            Direction: "call", Strike: 450, Expiration: "2026-06-20",
+            Quantity: 2, EstimatedEntryPrice: 4.95m, BudgetUsed: 990m,
+            StopPrice: 2.48m, TargetPrice: 14.85m, TrailPercent: 50.0);
+
+        _guard.RegisterOpen(order, new BrokerOrderResult(
+            OrderId: "ORDER-FC2", StopOrderId: "STOP-FC2", TargetOrderId: null,
+            FillPrice: 4.95m, FillQuantity: 2, FillAmount: 990m,
+            Status: OrderStatus.Filled, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.ClosePositionAsync(It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "CLOSE-FC2", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 4.95m, FillQuantity: 2, FillAmount: 990m,
+                Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
+
+        // Position still present in IBKR
+        _brokerMock
+            .Setup(b => b.GetAllPositionsAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PositionsSnapshot(
+                [new IbkrPosition("TSLA", "OPT", "TSLA260620C00450000", 2, 4.95m)], false));
+
+        var exitAlert = BuildAlert(side: "stc", userName: "TestTrader");
+        await _executionMarketOpen.HandleExitAsync(exitAlert);
+
+        _guard.GetOpenTrades().Should().HaveCount(1, "position still open at IBKR, not safe to record close");
+    }
+
+    [Fact]
+    public async Task HandleExitAsync_CloseTimeout_GatewayDegraded_LeavesOpen()
+    {
+        // ClosePositionAsync returns Pending.
+        // GetAllPositionsAsync returns TimedOut=true, Gateway did not respond.
+        // Cannot confirm whether close executed, so HandleExitAsync must leave position open.
+        var order = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(), UserName: "TestTrader", Symbol: "TSLA",
+            TradeType: TradeType.Options, OptionsContractSymbol: "TSLA260620C00450000",
+            Direction: "call", Strike: 450, Expiration: "2026-06-20",
+            Quantity: 2, EstimatedEntryPrice: 4.95m, BudgetUsed: 990m,
+            StopPrice: 2.48m, TargetPrice: 14.85m, TrailPercent: 50.0);
+
+        _guard.RegisterOpen(order, new BrokerOrderResult(
+            OrderId: "ORDER-FC3", StopOrderId: "STOP-FC3", TargetOrderId: null,
+            FillPrice: 4.95m, FillQuantity: 2, FillAmount: 990m,
+            Status: OrderStatus.Filled, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.ClosePositionAsync(It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "CLOSE-FC3", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 4.95m, FillQuantity: 2, FillAmount: 990m,
+                Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
+
+        // TimedOut=true: Gateway degraded, cannot determine close status
+        _brokerMock
+            .Setup(b => b.GetAllPositionsAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PositionsSnapshot([], true));
+
+        var exitAlert = BuildAlert(side: "stc", userName: "TestTrader");
+        await _executionMarketOpen.HandleExitAsync(exitAlert);
+
+        _guard.GetOpenTrades().Should().HaveCount(1, "Gateway timeout means close status is unknown");
+    }
+
+    [Fact]
+    public async Task ForceCloseAsync_CloseTimeout_PositionAbsent_ReturnsClosed()
+    {
+        // ClosePositionAsync returns Pending.
+        // GetAllPositionsAsync confirms position absent, close executed.
+        // ForceCloseAsync should record the close and return ForceCloseOutcome.Closed.
+        var order = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(), UserName: "TestTrader", Symbol: "TSLA",
+            TradeType: TradeType.Options, OptionsContractSymbol: "TSLA260620C00450000",
+            Direction: "call", Strike: 450, Expiration: "2026-06-20",
+            Quantity: 2, EstimatedEntryPrice: 4.95m, BudgetUsed: 990m,
+            StopPrice: 2.48m, TargetPrice: 14.85m, TrailPercent: 50.0);
+
+        _guard.RegisterOpen(order, new BrokerOrderResult(
+            OrderId: "ORDER-FC4", StopOrderId: "STOP-FC4", TargetOrderId: null,
+            FillPrice: 4.95m, FillQuantity: 2, FillAmount: 990m,
+            Status: OrderStatus.Filled, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.ClosePositionAsync(It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "CLOSE-FC4", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 4.95m, FillQuantity: 2, FillAmount: 990m,
+                Status: OrderStatus.Pending, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.GetAllPositionsAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PositionsSnapshot([], false));
+
+        var trade = _guard.FindOpenTrade("TestTrader", "TSLA260620C00450000", "TSLA")!;
+        var outcome = await _executionMarketOpen.ForceCloseAsync(trade, TradeOutcome.ForcedClose);
+
+        outcome.Should().Be(ForceCloseOutcome.Closed);
+        _guard.GetOpenTrades().Should().BeEmpty();
     }
 }
