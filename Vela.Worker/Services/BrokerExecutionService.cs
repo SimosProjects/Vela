@@ -458,9 +458,17 @@ public class BrokerExecutionService
         }
 
         var isStockEntry = classification.Category == AlertCategory.StockEntry;
-        var maxStaleness = isStockEntry && _riskOptions.StockAlertStalenessMaxSlippagePct > 0
-            ? _riskOptions.StockAlertStalenessMaxSlippagePct
-            : _riskOptions.AlertStalenessMaxSlippagePct;
+
+        // Select the most specific staleness threshold for the trade type.
+        // Stock uses StockAlertStalenessMaxSlippagePct; options uses OptionsAlertStalenessMaxSlippagePct.
+        // Both fall back to the general AlertStalenessMaxSlippagePct when their type-specific value is 0.
+        decimal maxStaleness;
+        if (isStockEntry && _riskOptions.StockAlertStalenessMaxSlippagePct > 0)
+            maxStaleness = _riskOptions.StockAlertStalenessMaxSlippagePct;
+        else if (!isStockEntry && _riskOptions.OptionsAlertStalenessMaxSlippagePct > 0)
+            maxStaleness = _riskOptions.OptionsAlertStalenessMaxSlippagePct;
+        else
+            maxStaleness = _riskOptions.AlertStalenessMaxSlippagePct;
 
         if (maxStaleness > 0 && alertedPrice > 0)
         {
@@ -481,6 +489,14 @@ public class BrokerExecutionService
                 _logger.LogDebug(
                     "Alert staleness check passed for {Symbol} — {Staleness:F1}% within {TradeType} limit {Max:F1}%",
                     alert.Symbol, staleness, isStockEntry ? "stock" : "options", maxStaleness);
+            }
+            else
+            {
+                // ActualPriceAtTimeOfAlert was not provided by Xtrades for this alert.
+                // The staleness check is skipped, the limit order ceiling provides entry protection.
+                _logger.LogDebug(
+                    "Staleness check skipped for {Symbol} — ActualPriceAtTimeOfAlert not provided by Xtrades.",
+                    alert.Symbol);
             }
         }
 

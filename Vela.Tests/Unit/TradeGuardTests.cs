@@ -66,7 +66,6 @@ public class TradeGuardTests
             FillAmount: 990m,
             Status: OrderStatus.Filled,
             FilledAt: DateTimeOffset.UtcNow);
-
     [Fact]
     public async Task CheckAsync_AllowsValidOrder()
     {
@@ -94,7 +93,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksDuplicateContract_DifferentTrader()
     {
-        // Trader1 already holds the contract — Trader2 cannot enter the same one.
         var firstOrder = BuildOrder(userName: "Trader1");
         _guard.RegisterOpen(firstOrder, BuildResult("ORDER-001"));
 
@@ -109,7 +107,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_AllowsDifferentContractWhenUnderSymbolCap()
     {
-        // Two different strikes on the same underlying are allowed up to the cap.
         var guard = BuildGuard(maxPositionsPerSymbol: 3);
         guard.SetCacheForTesting(100_000m, 0m);
 
@@ -125,8 +122,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksDuplicateContract_ViaPendingReservation()
     {
-        // First concurrent path reserves the contract but has not yet called RegisterOpen.
-        // Second path should be blocked as a routine duplicate.
         var order = BuildOrder();
 
         var firstBlock = await _guard.CheckAsync(order);
@@ -144,7 +139,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_AllowsOptionWhenOnlyStockOpenOnSameSymbol()
     {
-        // A stock position on TSLA does not consume an options slot on the same underlying.
         var stockOrder = new TradeOrder(
             AlertId: Guid.NewGuid().ToString(),
             UserName: "TestTrader",
@@ -180,14 +174,12 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksSecondOptionsWhenCapReached_AllowsStockOnSameSymbol()
     {
-        // Options cap is hit on TSLA, but the stock cap is separate and still has room.
         var guard = BuildGuard(maxPositionsPerSymbol: 1);
         guard.SetCacheForTesting(100_000m, 0m);
 
         var optionOrder = BuildOrder(symbol: "TSLA", contractSymbol: "TSLA260620C00450000");
         guard.RegisterOpen(optionOrder, BuildResult("OPT-001"));
 
-        // Second options entry on the same symbol is blocked (options cap reached).
         var secondOption = BuildOrder(
             symbol: "TSLA",
             contractSymbol: "TSLA260620C00500000",
@@ -197,7 +189,6 @@ public class TradeGuardTests
         optionBlock.Should().NotBeNull();
         optionBlock!.Reason.Should().Contain("options").And.Contain("per symbol reached");
 
-        // Stock entry on the same symbol still passes (separate cap).
         var stockOrder = new TradeOrder(
             AlertId: Guid.NewGuid().ToString(),
             UserName: "TestTrader",
@@ -235,8 +226,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_BlocksWhenDailyExposureCapReached()
     {
-        // Balance $100,000, cap 30% = $30,000 max deployment
-        // Register $29,500 worth of trades opened today — only $500 deployable, order needs $1,000
         _guard.SetCacheForTesting(balance: 100_000m, openValue: 29_500m);
 
         for (var i = 0; i < 29; i++)
@@ -266,8 +255,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_AllowsWhenUnderExposureCap()
     {
-        // Balance $100,000, cap 30% = $30,000 max deployment
-        // Open $10,000 — $20,000 still deployable, order needs $1,000
         _guard.SetCacheForTesting(balance: 100_000m, openValue: 10_000m);
 
         var order = BuildOrder(budgetUsed: 1_000m);
@@ -310,7 +297,6 @@ public class TradeGuardTests
     [Fact]
     public async Task CheckAsync_RoutineBlock_WhenPendingReservationOnlyNoPosopen()
     {
-        // First path passes and reserves — second path is blocked as routine.
         var order = BuildOrder();
 
         var firstBlock = await _guard.CheckAsync(order);
@@ -433,9 +419,63 @@ public class TradeGuardTests
         _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
         _guard.RegisterClose("TestTrader", "TSLA260620C00450000", "TSLA", 8.20m, TradeOutcome.XtradesExit);
 
-        // After RegisterClose the position is gone, TryMarkClosing should return false
         var afterClose = _guard.TryMarkClosing("TestTrader", "TSLA260620C00450000", "TSLA");
 
         afterClose.Should().BeFalse("position no longer exists after close");
+    }
+
+    // -- Alert ID deduplication --
+
+    [Fact]
+    public async Task CheckAsync_DuplicateAlertId_ConcurrentPaths_BlocksSecondAsRoutine()
+    {
+        // First path passes CheckAsync and reserves the alert ID. Second path carrying the
+        // same alert_id (polling + SignalR race on the same alert) is blocked as routine
+        // before any contract or symbol checks run.
+        var alertId = Guid.NewGuid().ToString();
+        var order = BuildOrder() with { AlertId = alertId };
+
+        var firstBlock = await _guard.CheckAsync(order);
+        firstBlock.Should().BeNull("first path should pass");
+
+        var secondOrder = BuildOrder(contractSymbol: "TSLA260620C00500000") with { AlertId = alertId };
+        var secondBlock = await _guard.CheckAsync(secondOrder);
+
+        secondBlock.Should().NotBeNull();
+        secondBlock!.IsRoutine.Should().BeTrue("same alert_id on a concurrent path is an expected duplicate");
+        secondBlock.Reason.Should().Contain(alertId);
+    }
+
+    [Fact]
+    public async Task CheckAsync_AlertIdReleasedAfterReleaseReservation_AllowsRetry()
+    {
+        // After ReleaseReservation the alert_id slot is cleared. A subsequent call
+        // with the same alert_id should pass (e.g. retry after a broker failure).
+        var alertId = Guid.NewGuid().ToString();
+        var order = BuildOrder() with { AlertId = alertId };
+
+        await _guard.CheckAsync(order);
+        _guard.ReleaseReservation(order);
+
+        var retryOrder = BuildOrder(contractSymbol: "TSLA260620C00500000") with { AlertId = alertId };
+        var retryBlock = await _guard.CheckAsync(retryOrder);
+
+        retryBlock.Should().BeNull("alert_id was released — retry should be allowed");
+    }
+
+    [Fact]
+    public async Task CheckAsync_NullAlertId_FallsThroughToSymbolChecks()
+    {
+        // When AlertId is null or empty, the alert_id dedup is skipped entirely
+        // and normal symbol-based dedup still applies.
+        var order = BuildOrder() with { AlertId = string.Empty };
+        var firstBlock = await _guard.CheckAsync(order);
+        firstBlock.Should().BeNull();
+
+        var secondOrder = BuildOrder() with { AlertId = string.Empty };
+        var secondBlock = await _guard.CheckAsync(secondOrder);
+
+        secondBlock.Should().NotBeNull();
+        secondBlock!.Reason.Should().Contain("concurrent path");
     }
 }

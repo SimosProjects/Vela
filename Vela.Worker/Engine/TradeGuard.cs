@@ -12,16 +12,17 @@ public record TradeGuardBlock(string Reason, bool IsRoutine = false);
 
 // Enforces trading safety rules before any order is placed.
 // Rules checked in order:
-//   1. Exact contract duplicate, blocks any open or in-flight position on the same options
-//      contract across all traders, preventing the polling+SignalR race from doubling into
-//      the same strike and expiry.
-//   2. Per-type symbol cap, stocks and options count against separate limits so a stock
-//      position on MSFT does not consume an options slot on the same underlying.
-//   3. Per-trader match key, prevents the same trader re-entering a position they already hold.
-//   4. Daily exposure cap
-//   5. Stock sub-cap
-//   6. Hard balance check
-//   7. Daily loss limit
+//   1. Alert ID deduplication — blocks any second path that carries the same alert_id
+//      as one already reserved or open, closing the polling+SignalR race at the earliest
+//      possible point before any symbol-level checks run.
+//   2. Exact contract duplicate — blocks any open or in-flight position on the same options
+//      contract across all traders.
+//   3. Per-type symbol cap — stocks and options count against separate limits.
+//   4. Per-trader match key — prevents the same trader re-entering a position they already hold.
+//   5. Daily exposure cap
+//   6. Stock sub-cap
+//   7. Hard balance check
+//   8. Daily loss limit
 //
 // Account balance and open positions value are cached and refreshed every 30 seconds
 // in the background to avoid blocking the trade execution path with IBKR round trips.
@@ -63,6 +64,12 @@ public class TradeGuard
     // Tracks options contracts reserved by CheckAsync but not yet confirmed by RegisterOpen.
     // Prevents concurrent polling+SignalR paths from both entering the same contract.
     private readonly HashSet<string> _pendingContracts = new();
+
+    // Tracks alert IDs reserved by CheckAsync but not yet confirmed by RegisterOpen.
+    // Closes the dual-ingestion race at the alert level, if the same alert_id arrives
+    // on both polling and SignalR before either calls RegisterOpen, the second is blocked
+    // immediately without needing to reach the symbol or contract checks.
+    private readonly HashSet<string> _pendingAlertIds = new();
 
     private readonly Lock _lock = new();
 
@@ -171,9 +178,9 @@ public class TradeGuard
     /// Returns null if the order is allowed, or a TradeGuardBlock describing why it was blocked.
     /// IsRoutine on the block indicates whether this is an expected concurrent-path duplicate
     /// (polling + SignalR race) rather than a genuine policy violation worth operator attention.
-    /// Checks position limits, exposure caps, and the daily loss limit in sequence.
-    /// If all checks pass, atomically reserves a slot for this symbol so concurrent
-    /// ingestion paths cannot both pass the per-symbol cap before either registers.
+    /// Checks alert ID dedup, position limits, exposure caps, and the daily loss limit in sequence.
+    /// If all checks pass, atomically reserves a slot for this alert, symbol, and contract so
+    /// concurrent ingestion paths cannot both pass before either registers.
     /// The caller must call ReleaseReservation on any failure path before RegisterOpen.
     /// Uses cached balance and open positions value, no IBKR round trips on the hot path.
     /// </summary>
@@ -185,10 +192,22 @@ public class TradeGuard
         {
             if (!order.IsAverage)
             {
-                // Exact contract duplicate — checked before the per-symbol cap because it is
+                // Alert ID deduplication, checked before contract or symbol so the race is
+                // closed as early as possible. A non-empty alert_id already in _pendingAlertIds
+                // means the sibling ingestion path (polling vs SignalR) is already processing
+                // this exact alert. Block as routine without touching any other state.
+                if (!string.IsNullOrEmpty(order.AlertId) &&
+                    _pendingAlertIds.Contains(order.AlertId))
+                {
+                    positionBlock = new TradeGuardBlock(
+                        $"Alert {order.AlertId} already processing on a concurrent path — duplicate blocked",
+                        IsRoutine: true);
+                }
+
+                // Exact contract duplicate, checked before the per-symbol cap because it is
                 // more specific: two different contracts on the same underlying are allowed up
                 // to the cap, but the same contract cannot be held twice.
-                if (order.OptionsContractSymbol is not null)
+                if (positionBlock is null && order.OptionsContractSymbol is not null)
                 {
                     var contractAlreadyOpen = _openTrades.Values
                         .Any(t => string.Equals(
@@ -264,6 +283,9 @@ public class TradeGuard
 
                 if (order.OptionsContractSymbol is not null)
                     _pendingContracts.Add(order.OptionsContractSymbol);
+
+                if (!string.IsNullOrEmpty(order.AlertId))
+                    _pendingAlertIds.Add(order.AlertId);
             }
         }
 
@@ -369,6 +391,9 @@ public class TradeGuard
 
             if (order.OptionsContractSymbol is not null)
                 _pendingContracts.Remove(order.OptionsContractSymbol);
+
+            if (!string.IsNullOrEmpty(order.AlertId))
+                _pendingAlertIds.Remove(order.AlertId);
         }
     }
 
@@ -403,6 +428,9 @@ public class TradeGuard
 
                 if (order.OptionsContractSymbol is not null)
                     _pendingContracts.Remove(order.OptionsContractSymbol);
+
+                if (!string.IsNullOrEmpty(order.AlertId))
+                    _pendingAlertIds.Remove(order.AlertId);
             }
 
             var record = new TradeRecord

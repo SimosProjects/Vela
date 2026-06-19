@@ -54,7 +54,8 @@ public class RiskEngineOptions
 
     // 0 = disabled. Rejects alerts where PricePaid exceeds ActualPriceAtTimeOfAlert by more than this %.
     // Catches already-running trades before any IBKR interaction.
-    // Applied to options entries. For stocks use StockAlertStalenessMaxSlippagePct.
+    // Applied when no type-specific threshold is set. For stocks use StockAlertStalenessMaxSlippagePct;
+    // for options use OptionsAlertStalenessMaxSlippagePct.
     [Range(0, 100, ErrorMessage = "AlertStalenessMaxSlippagePct must be between 0 and 100.")]
     public decimal AlertStalenessMaxSlippagePct { get; init; } = 25.0m;
 
@@ -64,6 +65,15 @@ public class RiskEngineOptions
     // The goal is to enter near the alerted price or not at all.
     [Range(0, 100, ErrorMessage = "StockAlertStalenessMaxSlippagePct must be between 0 and 100.")]
     public decimal StockAlertStalenessMaxSlippagePct { get; init; } = 2.0m;
+
+    // 0 = disabled (falls back to AlertStalenessMaxSlippagePct).
+    // Two weeks of trade data show options entries above ~8-10% slippage consistently stop out
+    // within the hour at significant losses, the alert was already stale by the time it filled.
+    // When ActualPriceAtTimeOfAlert is not provided by Xtrades, the check is skipped and a
+    // debug-level log fires so the skip rate is visible. Does not apply to lotto entries
+    // (market orders) since no limit price constraint exists for those.
+    [Range(0, 100, ErrorMessage = "OptionsAlertStalenessMaxSlippagePct must be between 0 and 100.")]
+    public decimal OptionsAlertStalenessMaxSlippagePct { get; init; } = 0.0m;
 
     // Maximum acceptable fill price above PricePaid per risk tier.
     // Used to compute the limit order ceiling: PricePaid * (1 + threshold / 100).

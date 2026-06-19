@@ -10,9 +10,29 @@ Two analytics systems run against the Vela PostgreSQL database. Neither reads fr
 
 **Scenarios — 21 total (7 × 3):**
 
-| Score Floors | Risk Profiles |
-|---|---|
-| 60, 65, 70, 75, 80, 85, 90 | `S` (Standard only), `SH` (Standard + High), `SHL` (Standard + High + Lotto) |
+| # | Scenario ID | Min xScore | Allowed Tiers |
+|---|---|---|---|
+| 1 | `60_S` | 60 | Standard only |
+| 2 | `60_SH` | 60 | Standard + High |
+| 3 | `60_SHL` | 60 | Standard + High + Lotto |
+| 4 | `65_S` | 65 | Standard only |
+| 5 | `65_SH` | 65 | Standard + High |
+| 6 | `65_SHL` | 65 | Standard + High + Lotto |
+| 7 | `70_S` | 70 | Standard only |
+| 8 | `70_SH` | 70 | Standard + High |
+| 9 | `70_SHL` | 70 | Standard + High + Lotto |
+| 10 | `75_S` | 75 | Standard only |
+| 11 | `75_SH` | 75 | Standard + High |
+| 12 | `75_SHL` | 75 | Standard + High + Lotto |
+| 13 | `80_S` | 80 | Standard only |
+| 14 | `80_SH` | 80 | Standard + High |
+| 15 | `80_SHL` | 80 | Standard + High + Lotto |
+| 16 | `85_S` | 85 | Standard only |
+| 17 | `85_SH` | 85 | Standard + High |
+| 18 | `85_SHL` | 85 | Standard + High + Lotto |
+| 19 | `90_S` | 90 | Standard only |
+| 20 | `90_SH` | 90 | Standard + High |
+| 21 | `90_SHL` | 90 | Standard + High + Lotto |
 
 Each scenario simulates a $75,000 account with a $2,000 daily loss limit and a $3,000 per-trade budget.
 
@@ -95,7 +115,6 @@ dotnet run -- --report custom --from 2026-06-01 --to 2026-06-30 --output ../repo
 **Standard post-session run:**
 ```bash
 cd Vela.Analytics
-
 # Use Monday of the current week as --since to filter archived closed positions
 ./run_reconcile.sh --since 2026-06-16
 ```
@@ -109,12 +128,11 @@ Backfill fuzzy-matches pre-migration rows (no OrderId) to DB records by symbol, 
 
 **After the Friday weekly archive:**
 
-The archive strips closed rows from the working CSV. Running the tool after archive will show `DB_ONLY` for every position closed that week — this is expected and the tool prints a note explaining it. The 22 archived closed positions are not real discrepancies.
+The archive strips closed rows from the working CSV. Running the tool after archive will show `DB_ONLY` for every position closed that week — this is expected and the tool prints a note explaining it. The archived closed positions are not real discrepancies.
 
 ```bash
 # Post-archive run still works — DB_ONLY closed are explained automatically
 ./run_reconcile.sh --since 2026-06-16
-
 # Write discrepancy report to a file for review
 ./run_reconcile.sh --since 2026-06-16 --output reconcile_2026-06-20.csv
 ```
@@ -128,6 +146,7 @@ The archive strips closed rows from the working CSV. Running the tool after arch
 ## Running the Backtest
 
 ### Setup (first time only)
+
 ```bash
 cd Vela.Analytics
 python3 -m venv .venv
@@ -136,7 +155,9 @@ pip install psycopg2-binary
 ```
 
 ### Daily backtest
+
 Run after market close for any individual trading day:
+
 ```bash
 cd Vela.Analytics
 ./run_backtest.sh --mode daily --date 2026-06-09
@@ -145,39 +166,44 @@ cd Vela.Analytics
 Writes 21 scenario CSVs + summary to `reports/backtest/week_2026-06-09/daily/2026-06-09/`.
 
 ### Weekly backtest
+
 **Always run the daily for each trading day before running the weekly.** The weekly mode generates all five daily folders internally in one pass, then produces the week-level summary on top. Running daily separately during the week gives you incremental results as each session closes; running weekly at the end rolls everything up.
 
 **Recommended end-of-week workflow (Friday after close):**
+
 ```bash
 cd Vela.Analytics
-
 # Run daily for each day of the week that had trades
 ./run_backtest.sh --mode daily --date 2026-06-09   # Monday
 ./run_backtest.sh --mode daily --date 2026-06-10   # Tuesday
 ./run_backtest.sh --mode daily --date 2026-06-11   # Wednesday
 ./run_backtest.sh --mode daily --date 2026-06-12   # Thursday
 ./run_backtest.sh --mode daily --date 2026-06-13   # Friday
-
-# Then run weekly, this regenerates all daily folders AND produces the week summary
+# Then run weekly — regenerates all daily folders AND produces the week summary
 ./run_backtest.sh --mode weekly --date 2026-06-09
 ```
 
-The `--date` for weekly can be any date within the target week, the script calculates Monday automatically.
+The `--date` for weekly can be any date within the target week; the script calculates Monday automatically.
 
 **If you only want to run once on Friday:**
+
 ```bash
 ./run_backtest.sh --mode weekly --date 2026-06-09
 ```
+
 This generates all five daily folders plus the week summary in a single pass. Use this if you skipped the daily runs during the week.
 
 ### Custom date
+
 ```bash
 ./run_backtest.sh --mode daily --date 2026-05-15
 ./run_backtest.sh --mode weekly --date 2026-05-12
 ```
 
 ### Environment (optional)
+
 By default the scripts connect to `localhost` with `vela_user`. Override with:
+
 ```bash
 export VELA_CONNECTION_STRING="host=myhost dbname=vela user=myuser password=mypass"
 ./run_backtest.sh --mode weekly --date 2026-06-09
