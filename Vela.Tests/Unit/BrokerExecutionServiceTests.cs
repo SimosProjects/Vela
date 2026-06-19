@@ -950,4 +950,86 @@ public class BrokerExecutionServiceTests
         outcome.Should().Be(ForceCloseOutcome.Closed);
         _guard.GetOpenTrades().Should().BeEmpty();
     }
+
+    // -- Options alert staleness check --
+
+    [Fact]
+    public async Task HandleEntryAsync_OptionsAlertStaleness_ExceedsThreshold_Skips()
+    {
+        // OptionsAlertStalenessMaxSlippagePct = 8%. PricePaid is 12% above ActualPriceAtTimeOfAlert.
+        // The options-specific threshold fires and blocks the entry before PlaceOrderAsync is called.
+        var service = BuildService(new RiskEngineOptions
+        {
+            OptionsAlertStalenessMaxSlippagePct = 8.0m,
+        });
+
+        var alert = BuildAlert(
+            pricePaid: 5.60m,
+            actualPriceAtTimeOfAlert: 5.00m);
+
+        await service.HandleEntryAsync(alert, CallClassification());
+
+        _brokerMock.Verify(b => b.PlaceOrderAsync(
+            It.IsAny<TradeOrder>(), default), Times.Never);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_OptionsAlertStaleness_WithinThreshold_Proceeds()
+    {
+        // OptionsAlertStalenessMaxSlippagePct = 8%. PricePaid is 5% above, within threshold.
+        var service = BuildService(new RiskEngineOptions
+        {
+            OptionsAlertStalenessMaxSlippagePct = 8.0m,
+        });
+
+        var alert = BuildAlert(
+            pricePaid: 5.25m,
+            actualPriceAtTimeOfAlert: 5.00m);
+
+        await service.HandleEntryAsync(alert, CallClassification());
+
+        _brokerMock.Verify(b => b.PlaceOrderAsync(
+            It.IsAny<TradeOrder>(), default), Times.Once);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_OptionsAlertStaleness_NullActualPrice_Proceeds()
+    {
+        // When ActualPriceAtTimeOfAlert is null the staleness check is skipped regardless
+        // of OptionsAlertStalenessMaxSlippagePct. The limit order provides price protection.
+        var service = BuildService(new RiskEngineOptions
+        {
+            OptionsAlertStalenessMaxSlippagePct = 8.0m,
+        });
+
+        var alert = BuildAlert(
+            pricePaid: 10.00m,
+            actualPriceAtTimeOfAlert: null);
+
+        await service.HandleEntryAsync(alert, CallClassification());
+
+        _brokerMock.Verify(b => b.PlaceOrderAsync(
+            It.IsAny<TradeOrder>(), default), Times.Once);
+    }
+
+    [Fact]
+    public async Task HandleEntryAsync_OptionsAlertStaleness_Disabled_FallsBackToGeneral()
+    {
+        // OptionsAlertStalenessMaxSlippagePct = 0 disables the options gate. Falls back to
+        // AlertStalenessMaxSlippagePct (25%). 12% staleness is within the 25% fallback.
+        var service = BuildService(new RiskEngineOptions
+        {
+            OptionsAlertStalenessMaxSlippagePct = 0m,
+            AlertStalenessMaxSlippagePct        = 25.0m,
+        });
+
+        var alert = BuildAlert(
+            pricePaid: 5.60m,
+            actualPriceAtTimeOfAlert: 5.00m);
+
+        await service.HandleEntryAsync(alert, CallClassification());
+
+        _brokerMock.Verify(b => b.PlaceOrderAsync(
+            It.IsAny<TradeOrder>(), default), Times.Once);
+    }
 }
