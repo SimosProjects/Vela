@@ -7,6 +7,8 @@ namespace Vela.Worker;
 /// <summary>
 /// Polls the Xtrades API for new alerts on a regular interval and processes them
 /// through the normalization, classification, and risk evaluation pipeline.
+/// Exit alerts (STC/BTC) are separated from the entry pipeline and routed directly
+/// to HandleExitAsync without risk evaluation, matching the SignalR processing path.
 /// </summary>
 public class AlertPollingService : BackgroundService
 {
@@ -76,7 +78,6 @@ public class AlertPollingService : BackgroundService
 
         try
         {
-            // Scoped per cycle so the DbContext is never shared across poll cycles
             using var scope = _scopeFactory.CreateScope();
             var repository = scope.ServiceProvider.GetRequiredService<IAlertRepository>();
 
@@ -85,7 +86,6 @@ public class AlertPollingService : BackgroundService
             _metrics.AlertsFetched.Add(alerts.Count);
             _logger.LogDebug("Fetched {Count} alerts from API.", alerts.Count);
 
-            // Single batch query then filter in memory, more efficient than one query per alert
             var incomingIds = alerts
                 .Where(a => a.Id is not null)
                 .Select(a => a.Id!)
@@ -103,13 +103,49 @@ public class AlertPollingService : BackgroundService
             if (newAlerts.Count == 0)
                 return;
 
-            var processed = newAlerts
+            // Separate exit alerts before the entry pipeline. STC/BTC alerts don't need risk
+            // evaluation or the IsProcessable gate, they only need to match symbol and trader
+            // to an open position via HandleExitAsync. Processing them here ensures they are
+            // never filtered by normalizer checks that apply to entry alerts.
+            //
+            // IMPORTANT: this path only fires if GetAlertsAsync returns STC/BTC type alerts
+            // from the Xtrades REST endpoint. If exit alerts are not appearing in logs, review
+            // IAlertApiClient to verify the API query includes exit alert types. The confirmed
+            // bug (Jun 23 2026) is that Fibonaccizer's SPY STC arrived during a 37-min SignalR
+            // gap and was never received by the REST poller, root cause under investigation.
+            var exitAlerts  = newAlerts.Where(a => a.Side?.ToLower() is "stc" or "btc").ToList();
+            var entryAlerts = newAlerts.Where(a => a.Side?.ToLower() is not ("stc" or "btc")).ToList();
+
+            // Process exits
+            var exitEntities = new List<AlertEntity>();
+            foreach (var rawExit in exitAlerts)
+            {
+                try
+                {
+                    var normalized = _normalizer.Normalize(rawExit);
+                    var riskResult = _riskEngine.Evaluate(normalized);
+                    exitEntities.Add(AlertMapper.ToEntity(normalized, riskResult));
+
+                    _logger.LogInformation(
+                        "REST exit alert [{Side}] {Symbol} by {Trader} — routing to HandleExitAsync",
+                        rawExit.Side, rawExit.Symbol, rawExit.UserName);
+
+                    await _execution.HandleExitAsync(normalized, stoppingToken);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "REST exit alert processing failed for {Symbol}.", rawExit.Symbol);
+                }
+            }
+
+            // Process entries through full pipeline
+            var processed = entryAlerts
                 .Where(_normalizer.IsProcessable)
                 .Select(_normalizer.Normalize)
-                .Select(alerts => (
-                    Alert: alerts,
-                    Classification: AlertClassifier.Classify(alerts),
-                    RiskResult: _riskEngine.Evaluate(alerts)
+                .Select(a => (
+                    Alert: a,
+                    Classification: AlertClassifier.Classify(a),
+                    RiskResult: _riskEngine.Evaluate(a)
                 ))
                 .ToList();
 
@@ -119,7 +155,6 @@ public class AlertPollingService : BackgroundService
             _metrics.AlertsApproved.Add(approved.Count);
             _metrics.AlertsRejected.Add(rejected.Count);
 
-            // Only log pipeline summary when there is something approved, otherwise too noisy
             if (approved.Count > 0)
                 _logger.LogInformation("Pipeline complete. Approved: {Approved}, Rejected: {Rejected}",
                     approved.Count, rejected.Count);
@@ -139,20 +174,13 @@ public class AlertPollingService : BackgroundService
                     await _execution.HandleEntryAsync(alert, classification, isAverage: true, stoppingToken);
             }
 
-            // Exits are processed from all alerts, not just approved ones
-            foreach (var (alert, _, _) in processed)
-            {
-                if (alert.Side?.ToLower() is "stc" or "btc")
-                    await _execution.HandleExitAsync(alert, stoppingToken);
-            }
-
             sw.Stop();
             _metrics.PollDurationMs.Record(sw.ElapsedMilliseconds,
                 new TagList { { "result", "success" } });
 
-            // Both approved and rejected are persisted so we can audit risk decisions later
-            var entities = processed.Select(p => AlertMapper.ToEntity(p.Alert, p.RiskResult)).ToList();
-            await repository.SaveManyAsync(entities, stoppingToken);
+            // Persist both exits and entries for deduplication on future poll cycles
+            var entryEntities = processed.Select(p => AlertMapper.ToEntity(p.Alert, p.RiskResult)).ToList();
+            await repository.SaveManyAsync([..exitEntities, ..entryEntities], stoppingToken);
         }
         catch (OperationCanceledException)
         {
@@ -164,8 +192,6 @@ public class AlertPollingService : BackgroundService
             _metrics.PollDurationMs.Record(sw.ElapsedMilliseconds,
                 new TagList { { "result", "auth_error" } });
 
-            // Distinct from transient errors — this will repeat every poll interval until resolved.
-            // The operator must update XTRADES_TOKEN and restart the Worker.
             _logger.LogError(
                 "Xtrades REST API returned {StatusCode} — XTRADES_TOKEN has likely expired or been revoked. " +
                 "No alerts will be received until the token is updated and the Worker is restarted.",

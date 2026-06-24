@@ -16,7 +16,7 @@ public class PositionSizerTests
 
     private static Alert BuildAlert(string side, string type, string direction,
         decimal? pricePaid, string? contractSymbol = null, decimal? strike = null,
-        string expiration = "2026-06-20T00:00:00") =>
+        string expiration = "2027-09-17T00:00:00") =>
         new(
             Id: Guid.NewGuid().ToString(),
             UserId: null,
