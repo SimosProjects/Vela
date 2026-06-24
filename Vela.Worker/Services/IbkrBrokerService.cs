@@ -316,7 +316,7 @@ public class IbkrBrokerService : IBrokerService
 
     /// <summary>
     /// Returns the total market value of all open positions.
-    /// Used by <see cref="TradeGuard"/> to calculate current exposure before new orders.
+    /// Used by <see cref="TradeGuard"/> to verify current exposure before new orders.
     /// </summary>
     public async Task<decimal> GetOpenPositionsValueAsync(CancellationToken ct = default)
     {
@@ -485,8 +485,9 @@ public class IbkrBrokerService : IBrokerService
 
                 // A [202] rejection racing with the fill window may arrive 1-3 seconds after the
                 // OCE fires. Poll with fixed delays rather than a single check so a delayed
-                // rejection is caught before reaching VerifyPendingFillAsync. Fixed delays (no ct)
-                // ensure the loop completes even when the outer token is concurrently cancelled.
+                // rejection is caught before reaching the position verification step.
+                // Fixed delays (no ct) ensure the loop completes even when the outer token is
+                // concurrently cancelled.
                 string? rejectionReason = null;
                 for (var attempt = 0; attempt < 6 && rejectionReason is null; attempt++)
                 {
@@ -539,6 +540,39 @@ public class IbkrBrokerService : IBrokerService
                 finally
                 {
                     _connection.Client.cancelPositions();
+                }
+
+                // Position not found on first check. Wait 30s and retry once before declaring
+                // rejection. Three consecutive sessions (GOOGL, AA, PLTR) showed reqPositions
+                // propagation delays of 3-25 minutes. The 30s retry catches fast cases (PLTR
+                // appeared in ~3 min). Very slow propagations (GOOGL 17min, AA 25min) still
+                // fall to the periodic reconciler which creates a MANUAL tracking record.
+                if (verifiedQty <= 0)
+                {
+                    _logger.LogDebug(
+                        "No position found for {Symbol} on first check — waiting 30s for IBKR propagation before final rejection.",
+                        order.Symbol);
+
+                    await Task.Delay(TimeSpan.FromSeconds(30), ct);
+
+                    var retryPosTcs = _connection.Wrapper.RegisterPositionCallback(posKey);
+                    _connection.Client.reqPositions();
+
+                    try
+                    {
+                        using var retryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        retryCts.CancelAfter(_options.TimeoutMs);
+                        var (_, retryQty) = await retryPosTcs.Task.WaitAsync(retryCts.Token);
+                        verifiedQty = retryQty;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _connection.Wrapper.UnregisterPositionCallback(posKey);
+                    }
+                    finally
+                    {
+                        _connection.Client.cancelPositions();
+                    }
                 }
 
                 if (verifiedQty > 0)

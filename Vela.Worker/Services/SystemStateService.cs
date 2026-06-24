@@ -46,8 +46,13 @@ public class SystemStateService : BackgroundService
     // True once the user has explicitly toggled BlockCalls from the dashboard this session.
     // When false, the override was seeded automatically from the regime and the system is
     // allowed to auto-clear it if the computed regime no longer requires blocking.
-    // Reset to false on every Worker startup via LoadRegimeFromDatabaseAsync.
+    // Reset to false on every regime checkpoint and Worker startup.
     private bool _blockCallsSetManually = false;
+
+    // Set by UpdateRegime() when a regime checkpoint fires. Signals WriteHeartbeatAsync
+    // that in-memory overrides are authoritative this cycle and should be written to DB,
+    // rather than reading DB overrides into memory (the normal direction between checkpoints).
+    private volatile bool _regimeFreshlyUpdated = false;
 
     /// <summary>
     /// Fired whenever the pause state read from the database differs from the
@@ -96,6 +101,11 @@ public class SystemStateService : BackgroundService
     /// Called by MarketConditionsLogger immediately after SetRegime.
     /// Pass the EFFECTIVE regime values (after the downgrade-only rule), not the computed ones,
     /// so the heartbeat uses the locked-in tier for display while BlockCalls reflects reality.
+    ///
+    /// Each call is treated as an authoritative regime checkpoint. All three override flags
+    /// (BlockCalls, BlockHigh, BlockLotto) are reset to their regime-derived values and
+    /// persisted to DB on the next heartbeat. Manual dashboard overrides between checkpoints
+    /// are valid only until the next checkpoint runs.
     /// </summary>
     public void UpdateRegime(
         string tier,
@@ -122,6 +132,47 @@ public class SystemStateService : BackgroundService
             _vixDelta         = vixDelta;
             _chopScore        = chopScore;
         }
+
+        // Each regime checkpoint is authoritative. Reset all override flags to match the
+        // computed regime, clearing any manual overrides set since the last checkpoint.
+        // BlockCalls uses the computed regime value (param); BlockHigh and BlockLotto use
+        // the effective held tier so they follow the downgrade-only rule.
+        var isChoppyOrBearish = tier is "Choppy" or "Bearish";
+
+        if (_blockCallsOverride != blockCalls)
+        {
+            _blockCallsOverride = blockCalls;
+            BlockCallsOverrideChanged?.Invoke(blockCalls);
+            _logger.LogInformation(
+                "Regime checkpoint: block calls reset to {Value} from {Tier} tier",
+                blockCalls, tier);
+        }
+
+        // Always reset the manual flag on a checkpoint so auto-clear can fire correctly
+        // between now and the next checkpoint if the computed regime improves further.
+        _blockCallsSetManually = false;
+
+        if (_blockHighOverride != isChoppyOrBearish)
+        {
+            _blockHighOverride = isChoppyOrBearish;
+            BlockHighOverrideChanged?.Invoke(isChoppyOrBearish);
+            _logger.LogInformation(
+                "Regime checkpoint: block high reset to {Value} from {Tier} tier",
+                isChoppyOrBearish, tier);
+        }
+
+        if (_blockLottoOverride != isChoppyOrBearish)
+        {
+            _blockLottoOverride = isChoppyOrBearish;
+            BlockLottoOverrideChanged?.Invoke(isChoppyOrBearish);
+            _logger.LogInformation(
+                "Regime checkpoint: block lotto reset to {Value} from {Tier} tier",
+                isChoppyOrBearish, tier);
+        }
+
+        // Signal the next heartbeat to write the fresh override values to DB rather than
+        // reading old DB values back into memory, since memory is now authoritative.
+        _regimeFreshlyUpdated = true;
     }
 
     /// <summary>
@@ -219,24 +270,7 @@ public class SystemStateService : BackgroundService
                     "SystemStateService: applied manual regime override to {Tier}", tier);
             }
 
-            // Auto-clear the BlockCalls override when the regime no longer requires blocking
-            // and the user has not manually set the toggle this session. This handles the case
-            // where the regime seeds BlockCalls ON at startup (e.g. Bearish) but improves
-            // mid-session to Choppy or Bullish, calls should unblock automatically rather than
-            // requiring manual dashboard intervention.
-            // Note: blockCalls here is the COMPUTED regime value (not the locked-in tier),
-            // so it reflects genuine conditions even while the tier is held conservatively.
-            if (!blockCalls && _blockCallsOverride && !_blockCallsSetManually)
-            {
-                row.BlockCallsOverride  = false;
-                _blockCallsOverride     = false;
-                BlockCallsOverrideChanged?.Invoke(false);
-                _logger.LogInformation(
-                    "Block calls override auto-cleared — {Tier} regime no longer requires blocking",
-                    tier);
-            }
-
-            // Propagate pause state to execution layer if it changed since last heartbeat.
+            // Pause state always propagates regardless of regime checkpoint status.
             var isPaused = row.IsPaused;
             if (isPaused != _isPaused)
             {
@@ -248,40 +282,68 @@ public class SystemStateService : BackgroundService
                     isPaused ? "rejected" : "accepted");
             }
 
-            // Propagate block calls override to regime service if it changed.
-            // Any DB change detected here is treated as a user action, preventing subsequent
-            // auto-clears from undoing the user's explicit choice this session.
-            var blockCallsOverride = row.BlockCallsOverride;
-            if (blockCallsOverride != _blockCallsOverride)
+            if (_regimeFreshlyUpdated)
             {
-                _blockCallsOverride    = blockCallsOverride;
-                _blockCallsSetManually = true;
-                BlockCallsOverrideChanged?.Invoke(blockCallsOverride);
-                _logger.LogWarning(
-                    "Dashboard: call entries {State} via manual override",
-                    blockCallsOverride ? "BLOCKED" : "unblocked");
+                // Regime checkpoint just fired — in-memory overrides are authoritative.
+                // Write them to DB so a Worker restart picks up the correct regime-derived
+                // state rather than a stale previous-day manual override.
+                row.BlockCallsOverride = _blockCallsOverride;
+                row.BlockHighOverride  = _blockHighOverride;
+                row.BlockLottoOverride = _blockLottoOverride;
+                _regimeFreshlyUpdated  = false;
             }
-
-            // Propagate block high override if it changed.
-            var blockHighOverride = row.BlockHighOverride;
-            if (blockHighOverride != _blockHighOverride)
+            else
             {
-                _blockHighOverride = blockHighOverride;
-                BlockHighOverrideChanged?.Invoke(blockHighOverride);
-                _logger.LogWarning(
-                    "Dashboard: high risk entries {State} via manual override",
-                    blockHighOverride ? "BLOCKED" : "unblocked");
-            }
+                // Between regime checkpoints, DB is authoritative for override flags.
+                // Dashboard writes go DB → memory via the change detection below.
 
-            // Propagate block lotto override if it changed.
-            var blockLottoOverride = row.BlockLottoOverride;
-            if (blockLottoOverride != _blockLottoOverride)
-            {
-                _blockLottoOverride = blockLottoOverride;
-                BlockLottoOverrideChanged?.Invoke(blockLottoOverride);
-                _logger.LogWarning(
-                    "Dashboard: lotto entries {State} via manual override",
-                    blockLottoOverride ? "BLOCKED" : "unblocked");
+                // Auto-clear BlockCalls when the computed regime no longer requires blocking
+                // and the user has not manually toggled it since the last checkpoint.
+                if (!blockCalls && _blockCallsOverride && !_blockCallsSetManually)
+                {
+                    row.BlockCallsOverride = false;
+                    _blockCallsOverride    = false;
+                    BlockCallsOverrideChanged?.Invoke(false);
+                    _logger.LogInformation(
+                        "Block calls override auto-cleared — {Tier} regime no longer requires blocking",
+                        tier);
+                }
+
+                // Propagate block calls override to regime service if DB changed.
+                // Any DB change detected here is a user action — set the manual flag so
+                // auto-clear does not undo it before the next checkpoint.
+                var blockCallsOverride = row.BlockCallsOverride;
+                if (blockCallsOverride != _blockCallsOverride)
+                {
+                    _blockCallsOverride    = blockCallsOverride;
+                    _blockCallsSetManually = true;
+                    BlockCallsOverrideChanged?.Invoke(blockCallsOverride);
+                    _logger.LogWarning(
+                        "Dashboard: call entries {State} via manual override",
+                        blockCallsOverride ? "BLOCKED" : "unblocked");
+                }
+
+                // Propagate block high override if DB changed.
+                var blockHighOverride = row.BlockHighOverride;
+                if (blockHighOverride != _blockHighOverride)
+                {
+                    _blockHighOverride = blockHighOverride;
+                    BlockHighOverrideChanged?.Invoke(blockHighOverride);
+                    _logger.LogWarning(
+                        "Dashboard: high risk entries {State} via manual override",
+                        blockHighOverride ? "BLOCKED" : "unblocked");
+                }
+
+                // Propagate block lotto override if DB changed.
+                var blockLottoOverride = row.BlockLottoOverride;
+                if (blockLottoOverride != _blockLottoOverride)
+                {
+                    _blockLottoOverride = blockLottoOverride;
+                    BlockLottoOverrideChanged?.Invoke(blockLottoOverride);
+                    _logger.LogWarning(
+                        "Dashboard: lotto entries {State} via manual override",
+                        blockLottoOverride ? "BLOCKED" : "unblocked");
+                }
             }
 
             row.RegimeTier       = tier;

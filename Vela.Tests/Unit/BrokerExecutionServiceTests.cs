@@ -130,7 +130,7 @@ public class BrokerExecutionServiceTests
         decimal? strike = 450,
         string userName = "TestTrader",
         decimal? actualPriceAtTimeOfAlert = null,
-        string expiration = "2026-06-20T00:00:00") =>
+        string expiration = "2027-09-17T00:00:00") =>
         new(
             Id: Guid.NewGuid().ToString(),
             UserId: null,

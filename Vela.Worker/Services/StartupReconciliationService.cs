@@ -279,9 +279,8 @@ public class StartupReconciliationService
             if (HasDbMatch(ibkrPos, dbPositions)) continue;
 
             _logger.LogInformation(
-                "Startup reconciliation — untracked position: {Symbol} {SecType} qty {Qty} avgCost ${Cost:F2}. " +
-                "Creating manual tracking record.",
-                ibkrPos.Symbol, ibkrPos.SecType, ibkrPos.Quantity, ibkrPos.AvgCost);
+                "Periodic reconciliation — new untracked position: {Symbol} {SecType} qty {Qty}. Creating manual tracking record.",
+                ibkrPos.Symbol, ibkrPos.SecType, ibkrPos.Quantity);
 
             var manualPos = BuildManualPosition(ibkrPos);
             await _repo.SaveAsync(manualPos, ct);
@@ -360,8 +359,15 @@ public class StartupReconciliationService
 
     private static OpenPosition BuildManualPosition(IbkrPosition ibkrPos)
     {
-        var isOptions  = ibkrPos.SecType == "OPT";
-        var multiplier = isOptions ? 100m : 1m;
+        var isOptions = ibkrPos.SecType == "OPT";
+
+        // IBKR's position() callback returns avgCost for options as the per-contract cost,
+        // which is already multiplied by 100 internally (e.g. a $10.15 premium returns avgCost 1015).
+        // Divide by 100 to recover the per-share premium that matches how trade_metrics stores prices.
+        // For stocks avgCost is already per-share so no adjustment is needed.
+        var entryPrice  = isOptions ? ibkrPos.AvgCost / 100m : ibkrPos.AvgCost;
+        var multiplier  = isOptions ? 100m : 1m;
+        var entryAmount = entryPrice * ibkrPos.Quantity * multiplier;
 
         return new OpenPosition
         {
@@ -377,8 +383,8 @@ public class StartupReconciliationService
             Strike          = null,
             Expiration      = null,
             Quantity        = ibkrPos.Quantity,
-            EntryPrice      = ibkrPos.AvgCost,
-            EntryAmount     = ibkrPos.AvgCost * ibkrPos.Quantity * multiplier,
+            EntryPrice      = entryPrice,
+            EntryAmount     = entryAmount,
             StopPrice       = 0m,
             TargetPrice     = 0m,
             OpenedAt        = DateTimeOffset.UtcNow,
@@ -413,8 +419,6 @@ public class StartupReconciliationService
 
         var localSymbol = ibkrPos.LocalSymbol.Replace(" ", "");
 
-        // Skip alphabetic symbol prefix to reach the 6-digit YYMMDD expiry date.
-        // IBKR LocalSymbol format: TSLA260620C00450000 (after stripping spaces)
         var i = 0;
         while (i < localSymbol.Length && char.IsLetter(localSymbol[i])) i++;
         if (i + 6 > localSymbol.Length) return false;
@@ -432,9 +436,6 @@ public class StartupReconciliationService
         return expiryDate == todayEt;
     }
 
-    // Matches a DB position to an IBKR position by symbol and contract.
-    // Options match on LocalSymbol with spaces stripped — IBKR pads tickers to 6 chars.
-    // Stocks match on symbol only.
     private static IbkrPosition? FindIbkrPositionForDb(
         List<IbkrPosition> ibkrPositions,
         OpenPosition dbPos)
