@@ -65,4 +65,12 @@ public class AlertRepository : IAlertRepository
 
         return existing.ToHashSet();
     }
+
+    /// <inheritdoc/>
+    public async Task UpdateRiskReasonAsync(string id, string riskReason, CancellationToken ct = default)
+    {
+        await _dbContext.Alerts
+            .Where(a => a.Id == id)
+            .ExecuteUpdateAsync(s => s.SetProperty(a => a.RiskReason, riskReason), ct);
+    }
 }

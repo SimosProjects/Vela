@@ -1,13 +1,14 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId
-2026-06-22,12:07:12,,,RDW,229,13.08,2995.32,2579,+0.00%,,,,,Open,Open,hypothesis2304,83,,,,7422
+2026-06-22,12:07:12,2026-06-24,09:31:59,RDW,229,13.08,2995.32,,,11.75,2690.75,,,Closed,StoppedOut,hypothesis2304,83,,-304.57,-10.17%,7422
 2026-06-22,13:57:59,,,SPCX,18,166.65,2999.70,2164,+0.09%,,,,,Open,Open,Theo,81,,,,7542
-2026-06-22,14:29:08,,,PURR,319,9.43,3008.17,2104,+0.32%,,,,,Open,Open,Theo,81,Top Analyst VIII,,,7572
+2026-06-22,14:29:08,2026-06-24,09:30:12,PURR,319,9.43,3008.17,,,7.99,2548.81,,,Closed,StoppedOut,Theo,81,,-459.36,-15.27%,7572
 2026-06-23,10:28:02,,,CCL,53,28.25,1497.25,2144,-0.04%,,,,,Open,Open,SLAM,78,Contributor II,,,7704
-2026-06-23,10:28:27,,,LUNR,70,21.33,1493.10,2113,+0.00%,,,,,Open,Open,P0lar,91,,,,7714
+2026-06-23,10:28:27,2026-06-24,10:19:37,LUNR,70,21.33,1493.10,,,19.39,1357.30,,,Closed,StoppedOut,P0lar,91,,-135.80,-9.10%,7714
 2026-06-23,11:30:26,2026-06-23,11:39:25,FCUV,271,5.47,1482.37,2117,-0.91%,5.33,1444.43,,,Closed,StoppedOut,yoyomun,88,,-37.94,-2.56%,7744
+2026-06-24,10:10:58,,,ASPC,202,11.50,2323.00,2119,+3.42%,,,,,Open,Open,bahamut2785,85,,,,8056
 
 ,,SUMMARY
-,,Total Trades,6
-,,Open,5,Closed,1
-,,Wins,0,Losses,1,Win Rate,0.0%
-,,Total P&L,-37.94
+,,Total Trades,7
+,,Open,3,Closed,4
+,,Wins,0,Losses,4,Win Rate,0.0%
+,,Total P&L,-937.67
