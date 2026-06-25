@@ -61,6 +61,7 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
 });
 
 app.MapAlertEndpoints();
+app.MapSpyglassEndpoints();
 app.MapConfigEndpoints();
 app.MapDashboardEndpoints();
 app.MapFallbackToFile("index.html");

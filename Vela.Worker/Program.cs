@@ -158,6 +158,7 @@ else
 builder.Services.AddHostedService<PositionMonitorService>();
 builder.Services.AddHostedService<AlertPollingService>();
 builder.Services.AddHostedService<SignalRListenerService>();
+builder.Services.AddHostedService<SpyglassAlertConsumerService>();
 
 // Consumes dashboard force-close requests from force_close_requests and runs them through
 // BrokerExecutionService. Lives in the Worker because the single IBKR session is here.

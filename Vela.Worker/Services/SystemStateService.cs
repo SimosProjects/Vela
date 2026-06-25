@@ -133,42 +133,37 @@ public class SystemStateService : BackgroundService
             _chopScore        = chopScore;
         }
 
-        // Each regime checkpoint is authoritative. Reset all override flags to match the
-        // computed regime, clearing any manual overrides set since the last checkpoint.
-        // BlockCalls uses the computed regime value (param); BlockHigh and BlockLotto use
-        // the effective held tier so they follow the downgrade-only rule.
+        // Each regime checkpoint is authoritative. Always fire all three override events
+        // unconditionally, even when the value hasn't changed, so MarketRegimeService
+        // is guaranteed to hold the correct state after every checkpoint. Conditional firing
+        // caused BlockHigh and BlockLotto to remain false all session when startup seeded them
+        // correctly in SystemStateService but the event never reached MarketRegimeService.
         var isChoppyOrBearish = tier is "Choppy" or "Bearish";
 
-        if (_blockCallsOverride != blockCalls)
-        {
-            _blockCallsOverride = blockCalls;
-            BlockCallsOverrideChanged?.Invoke(blockCalls);
+        _blockCallsOverride    = blockCalls;
+        _blockCallsSetManually = false;
+        BlockCallsOverrideChanged?.Invoke(blockCalls);
+
+        if (blockCalls != _blockCalls)
             _logger.LogInformation(
                 "Regime checkpoint: block calls reset to {Value} from {Tier} tier",
                 blockCalls, tier);
-        }
 
-        // Always reset the manual flag on a checkpoint so auto-clear can fire correctly
-        // between now and the next checkpoint if the computed regime improves further.
-        _blockCallsSetManually = false;
+        _blockHighOverride = isChoppyOrBearish;
+        BlockHighOverrideChanged?.Invoke(isChoppyOrBearish);
 
         if (_blockHighOverride != isChoppyOrBearish)
-        {
-            _blockHighOverride = isChoppyOrBearish;
-            BlockHighOverrideChanged?.Invoke(isChoppyOrBearish);
             _logger.LogInformation(
                 "Regime checkpoint: block high reset to {Value} from {Tier} tier",
                 isChoppyOrBearish, tier);
-        }
+
+        _blockLottoOverride = isChoppyOrBearish;
+        BlockLottoOverrideChanged?.Invoke(isChoppyOrBearish);
 
         if (_blockLottoOverride != isChoppyOrBearish)
-        {
-            _blockLottoOverride = isChoppyOrBearish;
-            BlockLottoOverrideChanged?.Invoke(isChoppyOrBearish);
             _logger.LogInformation(
                 "Regime checkpoint: block lotto reset to {Value} from {Tier} tier",
                 isChoppyOrBearish, tier);
-        }
 
         // Signal the next heartbeat to write the fresh override values to DB rather than
         // reading old DB values back into memory, since memory is now authoritative.
@@ -426,8 +421,12 @@ public class SystemStateService : BackgroundService
             }
             else
             {
+                // Value matches DB — still fire the event so MarketRegimeService is initialised.
+                // Without this, MarketRegimeService._blockCallsOverride stays at its default false
+                // because no event ever reaches it on this code path.
                 _blockCallsOverride    = row.BlockCallsOverride;
                 _blockCallsSetManually = false;
+                BlockCallsOverrideChanged?.Invoke(row.BlockCallsOverride);
             }
 
             var isChoppyOrBearish = row.RegimeTier is "Choppy" or "Bearish";
@@ -449,6 +448,7 @@ public class SystemStateService : BackgroundService
             else
             {
                 _blockHighOverride = row.BlockHighOverride;
+                BlockHighOverrideChanged?.Invoke(row.BlockHighOverride);
             }
 
             if (row.BlockLottoOverride != isChoppyOrBearish)
@@ -468,6 +468,7 @@ public class SystemStateService : BackgroundService
             else
             {
                 _blockLottoOverride = row.BlockLottoOverride;
+                BlockLottoOverrideChanged?.Invoke(row.BlockLottoOverride);
             }
 
             _logger.LogInformation(
