@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc;
 using Vela.Api.Models;
 using Vela.Worker.Data;
 
@@ -27,12 +28,11 @@ public static class SpyglassEndpoints
 
     private static async Task<IResult> HandleSpyglassAlerts(
         SpyglassEnvelope envelope,
-        IAlertRepository repo,
+        [FromServices] IAlertRepository repo,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
         var logger = loggerFactory.CreateLogger(nameof(SpyglassEndpoints));
-
         if (envelope.Alerts.Count == 0)
             return Results.Ok(new { accepted = 0 });
 
