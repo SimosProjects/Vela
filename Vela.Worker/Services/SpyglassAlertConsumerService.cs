@@ -1,27 +1,37 @@
 using Vela.Worker.Data;
+using Vela.Worker.Engine;
 using Vela.Worker.Services;
 
 namespace Vela.Worker;
 
 /// <summary>
-/// Background service that polls for Spyglass alerts written by Vela.Api and
-/// processes each pending alert by logging it and sending a Discord notification.
-/// Marks each processed alert as <c>spyglass_notified</c> so it is not re-processed.
-/// Phase 8 only: no broker execution. Execution will be wired in a later phase.
+/// Background service that polls for Spyglass alerts written by Vela.Api and routes
+/// each pending alert through the full risk, sizing, and broker execution pipeline.
+/// Marks each alert with the risk engine outcome so the alerts table reflects the
+/// same approved/rejected state as Xtrades alerts.
 /// </summary>
 public class SpyglassAlertConsumerService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly DiscordNotificationService _discord;
+    private readonly BrokerExecutionService _execution;
+    private readonly RiskEngineService _riskEngine;
+    private readonly IAlertNormalizer _normalizer;
     private readonly ILogger<SpyglassAlertConsumerService> _logger;
 
     public SpyglassAlertConsumerService(
         IServiceScopeFactory scopeFactory,
         DiscordNotificationService discord,
+        BrokerExecutionService execution,
+        RiskEngineService riskEngine,
+        IAlertNormalizer normalizer,
         ILogger<SpyglassAlertConsumerService> logger)
     {
         _scopeFactory = scopeFactory;
         _discord      = discord;
+        _execution    = execution;
+        _riskEngine   = riskEngine;
+        _normalizer   = normalizer;
         _logger       = logger;
     }
 
@@ -57,9 +67,9 @@ public class SpyglassAlertConsumerService : BackgroundService
 
             _logger.LogDebug("Spyglass consumer: found {Count} pending alert(s).", pending.Count);
 
-            foreach (var alert in pending)
+            foreach (var entity in pending)
             {
-                await ProcessAlertAsync(alert, repo, ct);
+                await ProcessAlertAsync(entity, repo, ct);
             }
         }
         catch (OperationCanceledException)
@@ -73,28 +83,82 @@ public class SpyglassAlertConsumerService : BackgroundService
     }
 
     private async Task ProcessAlertAsync(
-        AlertEntity alert,
+        AlertEntity entity,
         IAlertRepository repo,
         CancellationToken ct)
     {
         try
         {
+            var alert      = BuildAlert(entity);
+            var normalized = _normalizer.Normalize(alert);
+            var classification = AlertClassifier.Classify(normalized);
+            var riskResult     = _riskEngine.Evaluate(normalized);
+
+            // Update DB to reflect the actual risk outcome, same as Xtrades alerts
+            await repo.UpdateRiskResultAsync(entity.Id, riskResult.Approved, riskResult.Reason, ct);
+
+            if (!riskResult.Approved)
+            {
+                _logger.LogInformation(
+                    "Spyglass alert rejected: {Symbol} — {Reason}",
+                    entity.Symbol, riskResult.Reason);
+                return;
+            }
+
             _logger.LogInformation(
-                "Spyglass alert received: {Symbol} setups={Strategy} score={XScore} price={Price:F2}",
-                alert.Symbol, alert.Strategy, alert.XScore, alert.ActualPriceAtTimeOfAlert);
+                "Spyglass alert approved: {Symbol} setups={Strategy} price={Price:F2} — routing to execution.",
+                entity.Symbol, entity.Strategy, entity.ActualPriceAtTimeOfAlert);
 
-            await _discord.NotifyCriticalAsync(
-                title: $"Spyglass Alert: {alert.Symbol}",
-                message: $"{alert.OriginalMessage}\nPrice: {alert.ActualPriceAtTimeOfAlert:C}",
-                ct);
-
-            await repo.UpdateRiskReasonAsync(alert.Id, "spyglass_notified", ct);
+            await _discord.NotifyApprovedAlertAsync(normalized, classification, ct);
+            await _execution.HandleEntryAsync(normalized, classification, isAverage: false, ct);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
                 "Spyglass consumer: failed to process alert {Id} ({Symbol}) — will retry next cycle.",
-                alert.Id, alert.Symbol);
+                entity.Id, entity.Symbol);
         }
     }
+
+    // Reconstructs an Alert DTO from a persisted AlertEntity so the normal execution
+    // pipeline receives the same shape it would from AlertPollingService or SignalR.
+    // PricePaid is left null so the normalizer fills it from ActualPriceAtTimeOfAlert,
+    // producing 0% slippage — matching the market-order intent of Spyglass alerts.
+    private static Alert BuildAlert(AlertEntity entity) => new(
+        Id:                      entity.Id,
+        UserId:                  null,
+        UserName:                entity.UserName,
+        Symbol:                  entity.Symbol,
+        Type:                    entity.Type,
+        Direction:               entity.Direction,
+        Strike:                  null,
+        Expiration:              null,
+        OptionsContractSymbol:   null,
+        ContractDescription:     null,
+        Side:                    entity.Side,
+        Status:                  entity.Status,
+        Result:                  entity.Result,
+        ActualPriceAtTimeOfAlert: entity.ActualPriceAtTimeOfAlert,
+        ActualPriceAtTimeOfExit: null,
+        PricePaid:               null,
+        PriceAtExit:             null,
+        HighestPrice:            null,
+        LowestPrice:             null,
+        LastCheckedPrice:        entity.LastCheckedPrice,
+        Risk:                    entity.Risk,
+        LastKnownPercentProfit:  entity.LastKnownPercentProfit,
+        IsProfitableTrade:       entity.IsProfitableTrade,
+        XScore:                  entity.XScore,
+        CanAverage:              entity.CanAverage,
+        TimeOfEntryAlert:        entity.TimeOfEntryAlert?.ToString("o"),
+        TimeOfFullExitAlert:     null,
+        FormattedLength:         entity.FormattedLength,
+        IsSwing:                 entity.IsSwing,
+        IsBullish:               entity.IsBullish,
+        IsShort:                 entity.IsShort,
+        Strategy:                entity.Strategy,
+        OriginalMessage:         entity.OriginalMessage,
+        OriginalExitMessage:     null,
+        UserMeta:                null,
+        DiscordRank:             null);
 }
