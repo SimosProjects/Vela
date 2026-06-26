@@ -27,6 +27,11 @@ public class IbkrBrokerService : IBrokerService
     // Fill window for limit orders before the unfilled portion is cancelled
     private const int LimitOrderFillWindowSeconds = 10;
 
+    // How long to wait on execDetails after the fill window expires before falling back
+    // to reqPositions. ExecDetails fires within seconds of a fill even when the IBKR
+    // position book (reqPositions) takes 3-25 minutes to propagate the same fill.
+    private const int ExecDetailsPostCancelWaitSeconds = 60;
+
     private static readonly TimeZoneInfo EasternTime =
         TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
 
@@ -356,10 +361,11 @@ public class IbkrBrokerService : IBrokerService
     /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
     /// an OCA group containing a TRAIL stop. When the order has a LimitPrice set, a LMT order
     /// is placed with a shorter fill window (10s); unfilled remainder is cancelled before
-    /// BrokerExecutionService verifies the actual held quantity. Market orders retain the 15s
-    /// window with late-fill detection via ExecDetails. Partial fills are handled by reading
-    /// FilledQuantity from the orderStatus callback (normal path) or reqPositions (late fill
-    /// path) so the trail stop always matches the actual position size.
+    /// BrokerExecutionService verifies the actual fill via execDetails. ExecDetails fires within
+    /// seconds of a fill even when the IBKR position book (reqPositions) takes minutes to
+    /// propagate the same fill — this prevents the MANUAL tracking record fallback and ensures
+    /// the trail stop is always placed by the normal path. Market orders retain the 15s window
+    /// with the same execDetails late-fill detection.
     /// </summary>
     public async Task<BrokerOrderResult> PlaceOrderAsync(
         TradeOrder order,
@@ -385,8 +391,9 @@ public class IbkrBrokerService : IBrokerService
 
         var fillWindowSeconds = order.LimitPrice.HasValue ? LimitOrderFillWindowSeconds : 15;
 
-        // Register exec details TCS before placing, catches late fills that arrive
-        // after the fill window fires and the order cancel is sent to IBKR.
+        // Register exec details TCS before placing. For the normal fill path this is cleaned up
+        // immediately. For the fill-window-timeout path it becomes the primary fill detector:
+        // execDetails fires within seconds of a fill while reqPositions can take 3-25 minutes.
         var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId);
 
         // Place entry with a temporary fixed STP as bracket child so there is always
@@ -481,13 +488,11 @@ public class IbkrBrokerService : IBrokerService
                 _connection.Client.cancelOrder(orderId);
                 _connection.Client.cancelOrder(tempStopId);
                 _connection.Wrapper.UnregisterOrderCallback(orderId);
-                _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
                 // A [202] rejection racing with the fill window may arrive 1-3 seconds after the
                 // OCE fires. Poll with fixed delays rather than a single check so a delayed
-                // rejection is caught before reaching the position verification step.
-                // Fixed delays (no ct) ensure the loop completes even when the outer token is
-                // concurrently cancelled.
+                // rejection is caught before the execDetails wait. Fixed delays (no ct) ensure
+                // the loop completes even when the outer token is concurrently cancelled.
                 string? rejectionReason = null;
                 for (var attempt = 0; attempt < 6 && rejectionReason is null; attempt++)
                 {
@@ -497,6 +502,7 @@ public class IbkrBrokerService : IBrokerService
 
                 if (rejectionReason is not null)
                 {
+                    _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
                     _logger.LogWarning(
                         "IBKR limit order cancelled via price protection during fill window for {Symbol} — " +
                         "skipping position verification. Reason: {Reason}",
@@ -514,50 +520,120 @@ public class IbkrBrokerService : IBrokerService
                         RejectionReason: rejectionReason);
                 }
 
-                // No rejection reason after retries. Query the position to determine whether
-                // anything actually filled. If position is absent the order was cancelled with
-                // no fill, so return Rejected to prevent a ghost being recorded. If a position
-                // exists return Pending so VerifyPendingFillAsync records the actual fill.
-                var posKey = order.TradeType == TradeType.Options
+                // No rejection found, the fill window expired while the order may have been
+                // working. Use execDetails as the primary fill detector: it fires within seconds
+                // of an exchange fill even when reqPositions takes 3-25 minutes to propagate
+                // the same event. Waiting here catches fills that the fill window just missed
+                // and avoids creating a MANUAL tracking record via the periodic reconciler.
+                _logger.LogDebug(
+                    "IBKR fill window expired for {Symbol} — awaiting execDetails for up to {Wait}s.",
+                    order.Symbol, ExecDetailsPostCancelWaitSeconds);
+
+                try
+                {
+                    using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    execCts.CancelAfter(TimeSpan.FromSeconds(ExecDetailsPostCancelWaitSeconds));
+                    var execFillPrice = await lateExecTcs.Task.WaitAsync(execCts.Token);
+
+                    _logger.LogInformation(
+                        "IBKR execDetails confirmed fill for {Symbol} @ ${Price:F2} after fill window — " +
+                        "placing trail stop via normal path.",
+                        order.Symbol, execFillPrice);
+
+                    await Task.Delay(600, ct);
+
+                    // Verify actual quantity in case of partial fill before placing stop.
+                    var posKey = order.TradeType == TradeType.Options
+                        ? $"{order.Symbol}::{order.OptionsContractSymbol}"
+                        : $"{order.Symbol}::STK";
+
+                    var posTcs = _connection.Wrapper.RegisterPositionCallback(posKey);
+                    _connection.Client.reqPositions();
+
+                    int execFillQty;
+                    try
+                    {
+                        using var posCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        posCts.CancelAfter(_options.TimeoutMs);
+                        var (_, qty) = await posTcs.Task.WaitAsync(posCts.Token);
+                        execFillQty = qty > 0 ? qty : order.Quantity;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _connection.Wrapper.UnregisterPositionCallback(posKey);
+                        execFillQty = order.Quantity;
+                        _logger.LogWarning(
+                            "IBKR qty verification timed out for {Symbol} after execDetails — using ordered qty {Qty}.",
+                            order.Symbol, order.Quantity);
+                    }
+                    finally
+                    {
+                        _connection.Client.cancelPositions();
+                    }
+
+                    var trailStopId = orderId + 2;
+                    var finalStopId = await PlaceTrailWithFallbackAsync(
+                        order.Symbol, orderId.ToString(), trailStopId, contract,
+                        execFillQty, order.TrailPercent, ct);
+
+                    var multiplier = order.TradeType == TradeType.Options ? 100m : 1m;
+
+                    return new BrokerOrderResult(
+                        OrderId:       orderId.ToString(),
+                        StopOrderId:   finalStopId,
+                        TargetOrderId: null,
+                        FillPrice:     execFillPrice,
+                        FillQuantity:  execFillQty,
+                        FillAmount:    execFillPrice * execFillQty * multiplier,
+                        Status:        OrderStatus.Filled,
+                        FilledAt:      DateTimeOffset.UtcNow);
+                }
+                catch (OperationCanceledException)
+                {
+                    // execDetails did not fire within the wait window, genuine non-fill or
+                    // extremely slow propagation. Fall back to reqPositions as last resort.
+                    _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
+                    _logger.LogDebug(
+                        "IBKR execDetails timed out for {Symbol} — falling back to reqPositions check.",
+                        order.Symbol);
+                }
+
+                // reqPositions fallback: two checks separated by 30s. This path is now only
+                // reached when execDetails also timed out, making it genuinely rare.
+                var fallbackPosKey = order.TradeType == TradeType.Options
                     ? $"{order.Symbol}::{order.OptionsContractSymbol}"
                     : $"{order.Symbol}::STK";
 
-                var posTcs = _connection.Wrapper.RegisterPositionCallback(posKey);
-                _connection.Client.reqPositions();
-
                 int verifiedQty = 0;
+
+                var fallbackTcs = _connection.Wrapper.RegisterPositionCallback(fallbackPosKey);
+                _connection.Client.reqPositions();
                 try
                 {
                     using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     checkCts.CancelAfter(_options.TimeoutMs);
-                    var (_, qty) = await posTcs.Task.WaitAsync(checkCts.Token);
+                    var (_, qty) = await fallbackTcs.Task.WaitAsync(checkCts.Token);
                     verifiedQty = qty;
                 }
                 catch (OperationCanceledException)
                 {
-                    _connection.Wrapper.UnregisterPositionCallback(posKey);
+                    _connection.Wrapper.UnregisterPositionCallback(fallbackPosKey);
                 }
                 finally
                 {
                     _connection.Client.cancelPositions();
                 }
 
-                // Position not found on first check. Wait 30s and retry once before declaring
-                // rejection. Three consecutive sessions (GOOGL, AA, PLTR) showed reqPositions
-                // propagation delays of 3-25 minutes. The 30s retry catches fast cases (PLTR
-                // appeared in ~3 min). Very slow propagations (GOOGL 17min, AA 25min) still
-                // fall to the periodic reconciler which creates a MANUAL tracking record.
                 if (verifiedQty <= 0)
                 {
                     _logger.LogDebug(
-                        "No position found for {Symbol} on first check — waiting 30s for IBKR propagation before final rejection.",
+                        "No position found for {Symbol} on reqPositions check — waiting 30s before final check.",
                         order.Symbol);
 
                     await Task.Delay(TimeSpan.FromSeconds(30), ct);
 
-                    var retryPosTcs = _connection.Wrapper.RegisterPositionCallback(posKey);
+                    var retryPosTcs = _connection.Wrapper.RegisterPositionCallback(fallbackPosKey);
                     _connection.Client.reqPositions();
-
                     try
                     {
                         using var retryCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -567,7 +643,7 @@ public class IbkrBrokerService : IBrokerService
                     }
                     catch (OperationCanceledException)
                     {
-                        _connection.Wrapper.UnregisterPositionCallback(posKey);
+                        _connection.Wrapper.UnregisterPositionCallback(fallbackPosKey);
                     }
                     finally
                     {
@@ -578,7 +654,7 @@ public class IbkrBrokerService : IBrokerService
                 if (verifiedQty > 0)
                 {
                     _logger.LogInformation(
-                        "IBKR position confirmed for {Symbol} after limit timeout — qty {Qty}. " +
+                        "IBKR position confirmed for {Symbol} via reqPositions fallback — qty {Qty}. " +
                         "Entering pending verification.",
                         order.Symbol, verifiedQty);
 
@@ -594,7 +670,7 @@ public class IbkrBrokerService : IBrokerService
                 }
 
                 _logger.LogWarning(
-                    "IBKR limit order for {Symbol} cancelled — no position confirmed via reqPositions. " +
+                    "IBKR limit order for {Symbol} cancelled — no fill confirmed via execDetails or reqPositions. " +
                     "Treating as rejected to prevent ghost recording.",
                     order.Symbol);
 
@@ -607,7 +683,7 @@ public class IbkrBrokerService : IBrokerService
                     FillAmount:      0m,
                     Status:          OrderStatus.Rejected,
                     FilledAt:        DateTimeOffset.UtcNow,
-                    RejectionReason: "Cancelled — no position confirmed after fill window");
+                    RejectionReason: "Cancelled — no fill confirmed after fill window");
             }
 
             // Market order timeout: wait for a late ExecDetails callback before giving up.
