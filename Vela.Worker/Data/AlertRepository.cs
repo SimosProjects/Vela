@@ -73,4 +73,16 @@ public class AlertRepository : IAlertRepository
             .Where(a => a.Id == id)
             .ExecuteUpdateAsync(s => s.SetProperty(a => a.RiskReason, riskReason), ct);
     }
+
+    /// <inheritdoc/>
+    public async Task UpdateRiskResultAsync(
+        string id, bool riskApproved, string riskReason, CancellationToken ct = default)
+    {
+        await _dbContext.Alerts
+            .Where(a => a.Id == id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(a => a.RiskApproved, riskApproved)
+                .SetProperty(a => a.RiskReason, riskReason),
+                ct);
+    }
 }

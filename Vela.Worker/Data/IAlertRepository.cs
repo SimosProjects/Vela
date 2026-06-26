@@ -21,4 +21,11 @@ public interface IAlertRepository
 
     /// <summary>Updates the RiskReason field for a single alert by ID.</summary>
     Task UpdateRiskReasonAsync(string id, string riskReason, CancellationToken ct = default);
+
+    /// <summary>
+    /// Updates both RiskApproved and RiskReason for a single alert by ID.
+    /// Used by SpyglassAlertConsumerService after running Spyglass alerts through the risk engine,
+    /// so the alerts table reflects the same outcome shape as Xtrades alerts.
+    /// </summary>
+    Task UpdateRiskResultAsync(string id, bool riskApproved, string riskReason, CancellationToken ct = default);
 }
