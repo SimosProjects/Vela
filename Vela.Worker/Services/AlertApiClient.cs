@@ -1,4 +1,5 @@
 using System.Text.Json;
+
 namespace Vela.Worker.Services;
 
 /// <summary>
@@ -16,9 +17,10 @@ public class AlertApiClient : IAlertApiClient
     }
 
     /// <summary>
-    /// Fetches the most recent alerts from the Xtrades API.
-    /// Throws <see cref="AlertApiException"/> for any network, HTTP, or deserialization
-    /// failure so callers don't need to know the HTTP details.
+    /// Fetches recent entry alerts (BTO/AVG) from the Xtrades REST API ordered by
+    /// entry time descending. STC/BTC alerts are not included — they sort by exit time
+    /// and would fall off this page behind same-day entries.
+    /// Throws <see cref="AlertApiException"/> for any network, HTTP, or deserialization failure.
     /// On 401 or 403 the exception carries the status code so callers can distinguish
     /// an expired token from a transient error.
     /// </summary>
@@ -31,53 +33,32 @@ public class AlertApiClient : IAlertApiClient
             "&Page=1" +
             $"&PageSize={pageSize}" +
             "&OrderBy=TimeOfEntryAlertEpoch%20desc" +
+            "&Side=bto" +
             "&AlertType=all";
 
-        HttpResponseMessage response;
-        try
-        {
-            response = await _httpClient.GetAsync(path, cancellationToken);
-        }
-        catch (HttpRequestException ex)
-        {
-            // Covers DNS failure, refused connection, transport errors
-            throw new AlertApiException($"Network error: {ex.Message}", ex);
-        }
-        catch (TaskCanceledException ex)
-            when (!cancellationToken.IsCancellationRequested)
-        {
-            // HttpClient fires TaskCanceledException on timeout, not TimeoutException
-            throw new AlertApiException("Request timed out.", ex);
-        }
+        return await FetchAlertsAsync(path, cancellationToken);
+    }
 
-        if (!response.IsSuccessStatusCode)
-        {
-            var statusCode = (int)response.StatusCode;
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new AlertApiException(
-                $"HTTP {statusCode} {response.ReasonPhrase}: {body}",
-                statusCode);
-        }
+    /// <summary>
+    /// Fetches recent exit alerts (STC/BTC) from the Xtrades REST API ordered by exit
+    /// time descending. Uses a wider date window than the entry fetch so that exits for
+    /// positions opened earlier in the week are still returned. Called on every poll cycle
+    /// to catch exits that fired during a SignalR gap.
+    /// Throws <see cref="AlertApiException"/> for any network, HTTP, or deserialization failure.
+    /// </summary>
+    public async Task<List<Alert>> GetExitAlertsAsync(
+        CancellationToken cancellationToken = default,
+        int pageSize = 20)
+    {
+        var path = "/api/v2/alerts" +
+            "?DateSpec=Week" +
+            "&Page=1" +
+            $"&PageSize={pageSize}" +
+            "&OrderBy=TimeOfFullExitAlertEpoch%20desc" +
+            "&Side=stc" +
+            "&AlertType=all";
 
-        // 204 No Content means no alerts are available (expected outside market hours)
-        if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
-            return [];
-
-        var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        AlertsResponse? result;
-        try
-        {
-            result = JsonSerializer.Deserialize<AlertsResponse>(json,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        }
-        catch (JsonException ex)
-        {
-            throw new AlertApiException(
-                $"Failed to deserialize response: {ex.Message}", ex);
-        }
-
-        // Coalesce across the three candidate field names, whichever is populated wins
-        return result?.Alerts ?? result?.Data ?? result?.Items ?? [];
+        return await FetchAlertsAsync(path, cancellationToken);
     }
 
     /// <summary>
@@ -93,7 +74,7 @@ public class AlertApiClient : IAlertApiClient
         try
         {
             var response = await _httpClient.GetAsync(
-                "/api/v2/alerts?DateSpec=Today&Page=1&PageSize=1&OrderBy=TimeOfEntryAlertEpoch%20desc&AlertType=all",
+                "/api/v2/alerts?DateSpec=Today&Page=1&PageSize=1&OrderBy=TimeOfEntryAlertEpoch%20desc&Side=bto&AlertType=all",
                 cancellationToken);
 
             var statusCode = (int)response.StatusCode;
@@ -114,6 +95,55 @@ public class AlertApiClient : IAlertApiClient
         {
             return false;
         }
+    }
+
+    // -- Helpers --
+
+    private async Task<List<Alert>> FetchAlertsAsync(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        HttpResponseMessage response;
+        try
+        {
+            response = await _httpClient.GetAsync(path, cancellationToken);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new AlertApiException($"Network error: {ex.Message}", ex);
+        }
+        catch (TaskCanceledException ex)
+            when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new AlertApiException("Request timed out.", ex);
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var statusCode = (int)response.StatusCode;
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new AlertApiException(
+                $"HTTP {statusCode} {response.ReasonPhrase}: {body}",
+                statusCode);
+        }
+
+        if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
+            return [];
+
+        var json = await response.Content.ReadAsStringAsync(cancellationToken);
+        AlertsResponse? result;
+        try
+        {
+            result = JsonSerializer.Deserialize<AlertsResponse>(json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        }
+        catch (JsonException ex)
+        {
+            throw new AlertApiException(
+                $"Failed to deserialize response: {ex.Message}", ex);
+        }
+
+        return result?.Alerts ?? result?.Data ?? result?.Items ?? [];
     }
 }
 
