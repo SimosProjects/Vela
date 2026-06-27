@@ -5,10 +5,13 @@ using AlertApiException = Vela.Worker.Services.AlertApiException;
 namespace Vela.Worker;
 
 /// <summary>
-/// Polls the Xtrades API for new alerts on a regular interval and processes them
+/// Polls the Xtrades REST API for new alerts on a regular interval and processes them
 /// through the normalization, classification, and risk evaluation pipeline.
-/// Exit alerts (STC/BTC) are separated from the entry pipeline and routed directly
-/// to HandleExitAsync without risk evaluation, matching the SignalR processing path.
+/// Two API calls are made per cycle: one for entry alerts sorted by entry time, and one
+/// for exit alerts sorted by exit time. Combining them into one query causes exits to be
+/// buried below entries and fall off the page, which was the root cause of missed STC
+/// alerts during SignalR gaps. The existing alert ID deduplication table prevents the
+/// same exit from being processed by both REST and SignalR.
 /// </summary>
 public class AlertPollingService : BackgroundService
 {
@@ -81,44 +84,43 @@ public class AlertPollingService : BackgroundService
             using var scope = _scopeFactory.CreateScope();
             var repository = scope.ServiceProvider.GetRequiredService<IAlertRepository>();
 
-            var alerts = await _client.GetAlertsAsync(stoppingToken);
+            // Fetch entries and exits in parallel — independent sort orders, independent pages.
+            // Exits sort by TimeOfFullExitAlertEpoch so they are not buried behind entries.
+            var (entryAlerts, exitAlerts) = await FetchBothAsync(stoppingToken);
+            var allAlerts = entryAlerts.Concat(exitAlerts).ToList();
 
-            _metrics.AlertsFetched.Add(alerts.Count);
-            _logger.LogDebug("Fetched {Count} alerts from API.", alerts.Count);
+            _metrics.AlertsFetched.Add(allAlerts.Count);
+            _logger.LogDebug(
+                "Fetched {EntryCount} entry alert(s) and {ExitCount} exit alert(s) from API.",
+                entryAlerts.Count, exitAlerts.Count);
 
-            var incomingIds = alerts
+            var incomingIds = allAlerts
                 .Where(a => a.Id is not null)
                 .Select(a => a.Id!)
                 .ToList();
 
             var existingIds = await repository.GetExistingAlertIdsAsync(incomingIds, stoppingToken);
 
-            var newAlerts = alerts
+            var newAlerts = allAlerts
                 .Where(a => a.Id is not null && !existingIds.Contains(a.Id!))
                 .ToList();
 
             _metrics.AlertsNew.Add(newAlerts.Count);
-            _logger.LogDebug("New alerts after deduplication: {New} / {Total}", newAlerts.Count, alerts.Count);
+            _logger.LogDebug(
+                "New alerts after deduplication: {New} / {Total}", newAlerts.Count, allAlerts.Count);
 
             if (newAlerts.Count == 0)
                 return;
 
             // Separate exit alerts before the entry pipeline. STC/BTC alerts don't need risk
-            // evaluation or the IsProcessable gate, they only need to match symbol and trader
-            // to an open position via HandleExitAsync. Processing them here ensures they are
-            // never filtered by normalizer checks that apply to entry alerts.
-            //
-            // IMPORTANT: this path only fires if GetAlertsAsync returns STC/BTC type alerts
-            // from the Xtrades REST endpoint. If exit alerts are not appearing in logs, review
-            // IAlertApiClient to verify the API query includes exit alert types. The confirmed
-            // bug (Jun 23 2026) is that Fibonaccizer's SPY STC arrived during a 37-min SignalR
-            // gap and was never received by the REST poller, root cause under investigation.
-            var exitAlerts  = newAlerts.Where(a => a.Side?.ToLower() is "stc" or "btc").ToList();
-            var entryAlerts = newAlerts.Where(a => a.Side?.ToLower() is not ("stc" or "btc")).ToList();
+            // evaluation or the IsProcessable gate — they only need to match symbol and trader
+            // to an open position via HandleExitAsync.
+            var newExits   = newAlerts.Where(a => a.Side?.ToLower() is "stc" or "btc").ToList();
+            var newEntries = newAlerts.Where(a => a.Side?.ToLower() is not ("stc" or "btc")).ToList();
 
             // Process exits
             var exitEntities = new List<AlertEntity>();
-            foreach (var rawExit in exitAlerts)
+            foreach (var rawExit in newExits)
             {
                 try
                 {
@@ -139,7 +141,7 @@ public class AlertPollingService : BackgroundService
             }
 
             // Process entries through full pipeline
-            var processed = entryAlerts
+            var processed = newEntries
                 .Where(_normalizer.IsProcessable)
                 .Select(_normalizer.Normalize)
                 .Select(a => (
@@ -156,14 +158,17 @@ public class AlertPollingService : BackgroundService
             _metrics.AlertsRejected.Add(rejected.Count);
 
             if (approved.Count > 0)
-                _logger.LogInformation("Pipeline complete. Approved: {Approved}, Rejected: {Rejected}",
+                _logger.LogInformation(
+                    "Pipeline complete. Approved: {Approved}, Rejected: {Rejected}",
                     approved.Count, rejected.Count);
             else
-                _logger.LogDebug("Pipeline complete. Approved: 0, Rejected: {Rejected}", rejected.Count);
+                _logger.LogDebug(
+                    "Pipeline complete. Approved: 0, Rejected: {Rejected}", rejected.Count);
 
             foreach (var (alert, classification, _) in approved)
             {
-                _logger.LogInformation("APPROVED [{Category}] {Symbol} by {Trader} (xScore: {XScore})",
+                _logger.LogInformation(
+                    "APPROVED [{Category}] {Symbol} by {Trader} (xScore: {XScore})",
                     classification.Category, alert.Symbol, alert.UserName, alert.XScore);
 
                 await _discord.NotifyApprovedAlertAsync(alert, classification, stoppingToken);
@@ -178,7 +183,6 @@ public class AlertPollingService : BackgroundService
             _metrics.PollDurationMs.Record(sw.ElapsedMilliseconds,
                 new TagList { { "result", "success" } });
 
-            // Persist both exits and entries for deduplication on future poll cycles
             var entryEntities = processed.Select(p => AlertMapper.ToEntity(p.Alert, p.RiskResult)).ToList();
             await repository.SaveManyAsync([..exitEntities, ..entryEntities], stoppingToken);
         }
@@ -205,6 +209,50 @@ public class AlertPollingService : BackgroundService
 
             _logger.LogError(ex,
                 "Poll cycle failed. Will retry in {Interval}s.", _options.IntervalSeconds);
+        }
+    }
+
+    // -- Helpers --
+
+    // Fetches entries and exits concurrently. If either call fails, the exception is
+    // swallowed and an empty list is returned for that side so the other side still
+    // processes normally. A partial failure is logged at Warning level.
+    private async Task<(List<Alert> Entries, List<Alert> Exits)> FetchBothAsync(
+        CancellationToken ct)
+    {
+        var entryTask = FetchWithFallbackAsync(
+            () => _client.GetAlertsAsync(ct), "entry", ct);
+        var exitTask = FetchWithFallbackAsync(
+            () => _client.GetExitAlertsAsync(ct), "exit", ct);
+
+        await Task.WhenAll(entryTask, exitTask);
+        return (await entryTask, await exitTask);
+    }
+
+    private async Task<List<Alert>> FetchWithFallbackAsync(
+        Func<Task<List<Alert>>> fetch,
+        string label,
+        CancellationToken ct)
+    {
+        try
+        {
+            return await fetch();
+        }
+        catch (AlertApiException ex) when (ex.StatusCode is 401 or 403)
+        {
+            // Auth failure is re-thrown so the outer handler can surface it loudly
+            throw;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Alert polling: {Label} fetch failed this cycle — entries still processing normally.",
+                label);
+            return [];
         }
     }
 }

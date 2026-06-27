@@ -13,13 +13,22 @@ public class AlertApiPocClient : IAlertApiClient
 {
     private readonly HttpClient _httpClient;
 
-    private const string AlertsUrl =
+    private const string EntryAlertsUrl =
         "https://app.xtrades.net/api/v2/alerts" +
         "?DateSpec=Today" +
         "&Page=1" +
         "&PageSize=10" +
         "&OrderBy=TimeOfEntryAlertEpoch%20desc" +
         "&Side=bto" +
+        "&AlertType=all";
+
+    private const string ExitAlertsUrl =
+        "https://app.xtrades.net/api/v2/alerts" +
+        "?DateSpec=Week" +
+        "&Page=1" +
+        "&PageSize=20" +
+        "&OrderBy=TimeOfFullExitAlertEpoch%20desc" +
+        "&Side=stc" +
         "&AlertType=all";
 
     public AlertApiPocClient(string token)
@@ -34,17 +43,54 @@ public class AlertApiPocClient : IAlertApiClient
     }
 
     /// <summary>
-    /// Fetches the most recent alerts from the Xtrades API.
+    /// Fetches recent entry alerts (BTO) from the Xtrades API.
     /// Throws <see cref="AlertApiPocException"/> on any network, HTTP, or deserialization failure.
     /// </summary>
     public async Task<List<Alert>> GetAlertsAsync(
         CancellationToken cancellationToken = default,
         int pageSize = 10)
     {
+        return await FetchAsync(EntryAlertsUrl, cancellationToken);
+    }
+
+    /// <summary>
+    /// Fetches recent exit alerts (STC) from the Xtrades API ordered by exit time.
+    /// Uses a week-wide date window so exits for positions opened earlier in the week
+    /// are still returned. Throws <see cref="AlertApiPocException"/> on failure.
+    /// </summary>
+    public async Task<List<Alert>> GetExitAlertsAsync(
+        CancellationToken cancellationToken = default,
+        int pageSize = 20)
+    {
+        return await FetchAsync(ExitAlertsUrl, cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns true if the Xtrades API responds successfully with the current token.
+    /// Returns false for any non-success response or network failure.
+    /// </summary>
+    public async Task<bool> CheckConnectionAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var response = await _httpClient.GetAsync(EntryAlertsUrl, cancellationToken);
+            return response.IsSuccessStatusCode
+                || response.StatusCode == System.Net.HttpStatusCode.NoContent;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // -- Helpers --
+
+    private async Task<List<Alert>> FetchAsync(string url, CancellationToken cancellationToken)
+    {
         HttpResponseMessage response;
         try
         {
-            response = await _httpClient.GetAsync(AlertsUrl, cancellationToken);
+            response = await _httpClient.GetAsync(url, cancellationToken);
         }
         catch (HttpRequestException ex)
         {
@@ -75,24 +121,6 @@ public class AlertApiPocClient : IAlertApiClient
         }
 
         return result?.Alerts ?? result?.Data ?? result?.Items ?? [];
-    }
-
-    /// <summary>
-    /// Returns true if the Xtrades API responds successfully with the current token.
-    /// Returns false for any non-success response or network failure.
-    /// </summary>
-    public async Task<bool> CheckConnectionAsync(CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            var response = await _httpClient.GetAsync(AlertsUrl, cancellationToken);
-            return response.IsSuccessStatusCode
-                || response.StatusCode == System.Net.HttpStatusCode.NoContent;
-        }
-        catch
-        {
-            return false;
-        }
     }
 }
 
