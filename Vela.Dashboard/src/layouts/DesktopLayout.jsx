@@ -15,9 +15,11 @@ import { LogPanel }            from '../components/LogPanel.jsx';
 
 export function DesktopLayout({
   data, paused,
+  allowOverrideBlocks,
   blockCalls, regimeBlocksCalls,
   blockHigh, blockLotto,
-  onTogglePause, onToggleBlockCalls, onToggleBlockHigh, onToggleBlockLotto,
+  onTogglePause, onToggleAllowOverrideBlocks,
+  onToggleBlockCalls, onToggleBlockHigh, onToggleBlockLotto,
   onForceClose, lastUpdated,
 }) {
   const { timestamp, positions, closedToday, regime, account, riskConfig, traders, system } = data;
@@ -51,11 +53,13 @@ export function DesktopLayout({
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <RegimePanel regime={regime} />
             <ControlsPanel
+              allowOverrideBlocks={allowOverrideBlocks}
               blockCalls={blockCalls}
               regimeBlocksCalls={regimeBlocksCalls}
               blockHigh={blockHigh}
               blockLotto={blockLotto}
               paused={paused}
+              onToggleAllowOverrideBlocks={onToggleAllowOverrideBlocks}
               onTogglePause={onTogglePause}
               onToggleBlockCalls={onToggleBlockCalls}
               onToggleBlockHigh={onToggleBlockHigh}

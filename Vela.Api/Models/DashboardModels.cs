@@ -55,6 +55,7 @@ public record SystemStatusResponse(
     bool WorkerRunning,
     bool MarketOpen,
     bool IsPaused,
+    bool AllowOverrideBlocks,
     bool BlockCallsOverride,
     bool BlockHighOverride,
     bool BlockLottoOverride,

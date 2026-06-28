@@ -27,6 +27,7 @@ public class SystemState
     [System.ComponentModel.DataAnnotations.Schema.Column("force_regime")]
     public string? ForceRegime { get; set; }
     public bool IsPaused { get; set; }
+    public bool AllowOverrideBlocks { get; set; }
     public bool BlockCallsOverride { get; set; }
     public bool BlockHighOverride  { get; set; }
     public bool BlockLottoOverride { get; set; }

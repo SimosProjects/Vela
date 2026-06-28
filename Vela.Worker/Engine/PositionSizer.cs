@@ -22,6 +22,11 @@ namespace Vela.Worker.Engine;
 //
 // Trader restrictions — if a trader appears in RestrictedTraders, their budget is scaled
 // by the configured allocation percentage (0 = blocked, 25 = 25% of normal budget, etc).
+//
+// MaxBudget fallback — when OptionsMaxBudget or StockMaxBudget is > 0 and the
+// regime-adjusted budget cannot afford any contracts, the sizer falls back to exactly
+// 1 contract if the single-contract cost is at or below the configured ceiling.
+// Regime scaling is bypassed on this path since the goal is guaranteed execution.
 public class PositionSizer
 {
     private readonly RiskEngineOptions _options;
@@ -29,8 +34,8 @@ public class PositionSizer
     private readonly ILogger<PositionSizer> _logger;
 
     private const decimal OptionsStopMultiplier = 0.50m;
-    private const decimal StockStopMultiplier   = 0.85m;
-    private const int     MinQuantity           = 1;
+    private const decimal StockStopMultiplier = 0.85m;
+    private const int MinQuantity = 1;
 
     public PositionSizer(IOptions<RiskEngineOptions> options, ILogger<PositionSizer> logger, MarketRegimeService? regime = null)
     {
@@ -53,9 +58,9 @@ public class PositionSizer
         var tradeType = classification.Category switch
         {
             AlertCategory.CallOptionEntry or
-            AlertCategory.PutOptionEntry  => TradeType.Options,
-            AlertCategory.StockEntry      => TradeType.Stock,
-            _                             => (TradeType?)null
+            AlertCategory.PutOptionEntry => TradeType.Options,
+            AlertCategory.StockEntry => TradeType.Stock,
+            _ => (TradeType?)null
         };
 
         if (tradeType is null)
@@ -76,8 +81,8 @@ public class PositionSizer
             ? effectiveRisk switch
             {
                 "lotto" => isAverage ? _options.OptionsLottoAverageBudget : _options.OptionsLottoBudget,
-                "high"  => isAverage ? _options.OptionsHighAverageBudget  : _options.OptionsHighBudget,
-                _       => isAverage ? _options.OptionsAverageBudget      : _options.OptionsInitialBudget,
+                "high" => isAverage ? _options.OptionsHighAverageBudget : _options.OptionsHighBudget,
+                _ => isAverage ? _options.OptionsAverageBudget : _options.OptionsInitialBudget,
             }
             : (isAverage ? _options.StockAverageBudget : _options.StockInitialBudget);
 
@@ -108,28 +113,49 @@ public class PositionSizer
 
         if (quantity < MinQuantity)
         {
-            if (isOptions)
+            var contractCost = isOptions ? price.Value * 100 : price.Value;
+            var maxBudget = isOptions ? _options.OptionsMaxBudget : _options.StockMaxBudget;
+
+            if (maxBudget > 0 && contractCost <= maxBudget)
             {
-                _logger.LogWarning(
-                    "PositionSizer null — {Symbol}: ${Price:F2}/contract = ${Cost:F0} per contract, " +
-                    "budget is ${Budget:F0} (risk={Risk}, trader={Trader}). Need ${Need:F0} for 1 contract.",
+                // Normal budget (after regime scaling) cannot afford any contracts, but the
+                // single-contract cost is within the configured ceiling — execute 1 contract.
+                // Regime scaling is intentionally bypassed on this path.
+                _logger.LogInformation(
+                    "PositionSizer: {Symbol} below normal budget — executing 1 contract via MaxBudget " +
+                    "(cost:{Cost:F0} <= max:{Max:F0}, risk={Risk}, trader={Trader})",
                     alert.Symbol,
-                    price.Value,
-                    price.Value * 100,
-                    budget,
+                    contractCost,
+                    maxBudget,
                     effectiveRisk,
-                    string.IsNullOrEmpty(userName) ? "unknown" : userName,
-                    price.Value * 100);
+                    string.IsNullOrEmpty(userName) ? "unknown" : userName);
+                quantity = MinQuantity;
             }
             else
             {
-                _logger.LogWarning(
-                    "PositionSizer null — {Symbol}: ${Price:F2}/share, budget is ${Budget:F0}. " +
-                    "Need ${Need:F0} for 1 share.",
-                    alert.Symbol, price.Value, budget, price.Value);
-            }
+                if (isOptions)
+                {
+                    _logger.LogWarning(
+                        "PositionSizer null — {Symbol}: ${Price:F2}/contract = ${Cost:F0} per contract, " +
+                        "budget is ${Budget:F0} (risk={Risk}, trader={Trader}). Need ${Need:F0} for 1 contract.",
+                        alert.Symbol,
+                        price.Value,
+                        price.Value * 100,
+                        budget,
+                        effectiveRisk,
+                        string.IsNullOrEmpty(userName) ? "unknown" : userName,
+                        price.Value * 100);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "PositionSizer null — {Symbol}: ${Price:F2}/share, budget is ${Budget:F0}. " +
+                        "Need ${Need:F0} for 1 share.",
+                        alert.Symbol, price.Value, budget, price.Value);
+                }
 
-            return null;
+                return null;
+            }
         }
 
         var stopPrice = isOptions
@@ -141,31 +167,31 @@ public class PositionSizer
             : price.Value * (decimal)_options.StockTargetMultiple;
 
         var trailPercent = ResolveTrailPercent(isOptions, effectiveRisk);
-        var limitPrice   = ComputeLimitPrice(isOptions, effectiveRisk, price.Value);
+        var limitPrice = ComputeLimitPrice(isOptions, effectiveRisk, price.Value);
 
         var budgetUsed = isOptions
             ? quantity * price.Value * 100
             : quantity * price.Value;
 
         return new TradeOrder(
-            AlertId:               alert.Id ?? string.Empty,
-            UserName:              alert.UserName ?? string.Empty,
-            Symbol:                alert.Symbol   ?? string.Empty,
-            TradeType:             tradeType.Value,
+            AlertId: alert.Id ?? string.Empty,
+            UserName: alert.UserName ?? string.Empty,
+            Symbol: alert.Symbol ?? string.Empty,
+            TradeType: tradeType.Value,
             OptionsContractSymbol: alert.OptionsContractSymbol,
-            Direction:             alert.Direction,
-            Strike:                alert.Strike,
-            Expiration:            alert.Expiration,
-            Quantity:              quantity,
-            EstimatedEntryPrice:   price.Value,
-            BudgetUsed:            budgetUsed,
-            StopPrice:             stopPrice,
-            TargetPrice:           targetPrice,
-            TrailPercent:          trailPercent,
-            LimitPrice:            limitPrice,
-            IsAverage:             isAverage,
-            XScore:                (decimal)(alert.XScore ?? 0),
-            DiscordRank:           alert.DiscordRank);
+            Direction: alert.Direction,
+            Strike: alert.Strike,
+            Expiration: alert.Expiration,
+            Quantity: quantity,
+            EstimatedEntryPrice: price.Value,
+            BudgetUsed: budgetUsed,
+            StopPrice: stopPrice,
+            TargetPrice: targetPrice,
+            TrailPercent: trailPercent,
+            LimitPrice: limitPrice,
+            IsAverage: isAverage,
+            XScore: (decimal)(alert.XScore ?? 0),
+            DiscordRank: alert.DiscordRank);
     }
 
     // -- Helpers --
@@ -180,10 +206,10 @@ public class PositionSizer
         if (!DateTimeOffset.TryParse(alert.Expiration, out var expiry))
             return alert.Risk?.ToLowerInvariant() ?? "standard";
 
-        var et         = TimeZoneInfo.ConvertTime(
+        var et = TimeZoneInfo.ConvertTime(
             DateTimeOffset.UtcNow,
             TimeZoneInfo.FindSystemTimeZoneById("America/New_York"));
-        var todayEt    = DateOnly.FromDateTime(et.DateTime);
+        var todayEt = DateOnly.FromDateTime(et.DateTime);
         var expiryDate = DateOnly.FromDateTime(expiry.DateTime);
 
         if (expiryDate == todayEt)
@@ -199,12 +225,12 @@ public class PositionSizer
     private double ResolveTrailPercent(bool isOptions, string effectiveRisk) =>
         (isOptions, effectiveRisk) switch
         {
-            (true,  "lotto") => _options.OptionsLottoTrailPct,
-            (true,  "high")  => _options.OptionsHighTrailPct,
-            (true,  _)       => _options.OptionsStandardTrailPct,
+            (true, "lotto") => _options.OptionsLottoTrailPct,
+            (true, "high") => _options.OptionsHighTrailPct,
+            (true, _) => _options.OptionsStandardTrailPct,
             (false, "lotto") => _options.StockLottoTrailPct,
-            (false, "high")  => _options.StockHighTrailPct,
-            (false, _)       => _options.StockStandardTrailPct,
+            (false, "high") => _options.StockHighTrailPct,
+            (false, _) => _options.StockStandardTrailPct,
         };
 
     // Returns the limit order ceiling price for the given risk tier and entry price.

@@ -136,8 +136,14 @@ public class RiskEngineOptions
 
     public decimal OptionsInitialBudget { get; init; } = 2_000m;
     public decimal OptionsAverageBudget { get; init; } = 1_000m;
-    public decimal StockInitialBudget   { get; init; } = 3_000m;
-    public decimal StockAverageBudget   { get; init; } = 1_500m;
+    public decimal StockInitialBudget { get; init; } = 3_000m;
+    public decimal StockAverageBudget { get; init; } = 1_500m;
+
+    // Hard ceiling for a single-contract fallback when the regime-adjusted budget cannot
+    // afford any contracts. When > 0 and the contract cost is at or below this value,
+    // the sizer executes exactly 1 contract regardless of regime sizing. 0 = disabled.
+    public decimal OptionsMaxBudget { get; init; } = 0m;
+    public decimal StockMaxBudget { get; init; } = 0m;
 
     [Range(0, 1000, ErrorMessage = "OptionCloseThresholdPct must be between 0 and 1000.")]
     public double OptionCloseThresholdPct { get; init; } = 50.0;
