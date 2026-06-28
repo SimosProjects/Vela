@@ -54,7 +54,7 @@ public class AlertApiClient : IAlertApiClient
             "?DateSpec=Week" +
             "&Page=1" +
             $"&PageSize={pageSize}" +
-            "&OrderBy=TimeOfFullExitAlertEpoch%20desc" +
+            "&OrderBy=id%20desc" +
             "&Side=stc" +
             "&AlertType=all";
 

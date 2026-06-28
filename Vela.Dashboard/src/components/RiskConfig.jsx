@@ -178,38 +178,40 @@ export function RiskConfig({ blockHigh = true, blockLotto = true }) {
         />
       )}
 
-      <NumericRow label="Min xScore"          value={draft.minXScore}           onChange={v => set('minXScore', v)}           step={1}   min={0}  />
-      <FlagRow    label="Allow high risk"      on={!blockHigh} />
-      <FlagRow    label="Allow lotto (0DTE)"   on={!blockLotto} />
+      <NumericRow label="Min xScore"        value={draft.minXScore}           onChange={v => set('minXScore', v)}           step={1}   min={0}  />
+      <FlagRow    label="Allow high risk"    on={!blockHigh} />
+      <FlagRow    label="Allow lotto (0DTE)" on={!blockLotto} />
 
       <SubHeader>Options — Budgets</SubHeader>
-      <NumericRow label="Initial"              value={draft.optionsInitialBudget}      onChange={v => set('optionsInitialBudget', v)}      prefix="$" step={100} min={0} />
-      <NumericRow label="Average"              value={draft.optionsAverageBudget}      onChange={v => set('optionsAverageBudget', v)}      prefix="$" step={100} min={0} />
-      <NumericRow label="High initial"         value={draft.optionsHighBudget}         onChange={v => set('optionsHighBudget', v)}         prefix="$" step={100} min={0} />
-      <NumericRow label="High average"         value={draft.optionsHighAverageBudget}  onChange={v => set('optionsHighAverageBudget', v)}  prefix="$" step={100} min={0} />
-      <NumericRow label="Lotto initial"        value={draft.optionsLottoBudget}        onChange={v => set('optionsLottoBudget', v)}        prefix="$" step={50}  min={0} />
-      <NumericRow label="Lotto average"        value={draft.optionsLottoAverageBudget} onChange={v => set('optionsLottoAverageBudget', v)} prefix="$" step={50}  min={0} />
+      <NumericRow label="Initial"            value={draft.optionsInitialBudget}      onChange={v => set('optionsInitialBudget', v)}      prefix="$" step={100} min={0} />
+      <NumericRow label="Average"            value={draft.optionsAverageBudget}      onChange={v => set('optionsAverageBudget', v)}      prefix="$" step={100} min={0} />
+      <NumericRow label="High initial"       value={draft.optionsHighBudget}         onChange={v => set('optionsHighBudget', v)}         prefix="$" step={100} min={0} />
+      <NumericRow label="High average"       value={draft.optionsHighAverageBudget}  onChange={v => set('optionsHighAverageBudget', v)}  prefix="$" step={100} min={0} />
+      <NumericRow label="Lotto initial"      value={draft.optionsLottoBudget}        onChange={v => set('optionsLottoBudget', v)}        prefix="$" step={50}  min={0} />
+      <NumericRow label="Lotto average"      value={draft.optionsLottoAverageBudget} onChange={v => set('optionsLottoAverageBudget', v)} prefix="$" step={50}  min={0} />
+      <NumericRow label="Max (1-contract)"   value={draft.optionsMaxBudget}          onChange={v => set('optionsMaxBudget', v)}          prefix="$" step={500} min={0} />
 
       <SubHeader>Options — Trails &amp; Target</SubHeader>
-      <NumericRow label="Standard trail"       value={draft.optionsStandardTrailPct}   onChange={v => set('optionsStandardTrailPct', v)}   suffix="%" step={1} min={1} />
-      <NumericRow label="High trail"           value={draft.optionsHighTrailPct}       onChange={v => set('optionsHighTrailPct', v)}       suffix="%" step={1} min={1} />
-      <NumericRow label="Lotto trail"          value={draft.optionsLottoTrailPct}      onChange={v => set('optionsLottoTrailPct', v)}      suffix="%" step={1} min={1} />
-      <NumericRow label="Target multiple"      value={draft.optionsTargetMultiple}     onChange={v => set('optionsTargetMultiple', v)}     suffix="×" step={0.5} min={1} />
+      <NumericRow label="Standard trail"     value={draft.optionsStandardTrailPct}   onChange={v => set('optionsStandardTrailPct', v)}   suffix="%" step={1} min={1} />
+      <NumericRow label="High trail"         value={draft.optionsHighTrailPct}       onChange={v => set('optionsHighTrailPct', v)}       suffix="%" step={1} min={1} />
+      <NumericRow label="Lotto trail"        value={draft.optionsLottoTrailPct}      onChange={v => set('optionsLottoTrailPct', v)}      suffix="%" step={1} min={1} />
+      <NumericRow label="Target multiple"    value={draft.optionsTargetMultiple}     onChange={v => set('optionsTargetMultiple', v)}     suffix="×" step={0.5} min={1} />
 
       <SubHeader>Stocks — Budgets</SubHeader>
-      <NumericRow label="Initial"              value={draft.stockInitialBudget}        onChange={v => set('stockInitialBudget', v)}        prefix="$" step={100} min={0} />
-      <NumericRow label="Average"              value={draft.stockAverageBudget}        onChange={v => set('stockAverageBudget', v)}        prefix="$" step={100} min={0} />
+      <NumericRow label="Initial"            value={draft.stockInitialBudget}        onChange={v => set('stockInitialBudget', v)}        prefix="$" step={100} min={0} />
+      <NumericRow label="Average"            value={draft.stockAverageBudget}        onChange={v => set('stockAverageBudget', v)}        prefix="$" step={100} min={0} />
+      <NumericRow label="Max (1-contract)"   value={draft.stockMaxBudget}            onChange={v => set('stockMaxBudget', v)}            prefix="$" step={500} min={0} />
 
       <SubHeader>Stocks — Trails &amp; Target</SubHeader>
-      <NumericRow label="Standard trail"       value={draft.stockStandardTrailPct}     onChange={v => set('stockStandardTrailPct', v)}     suffix="%" step={1} min={1} />
-      <NumericRow label="High trail"           value={draft.stockHighTrailPct}         onChange={v => set('stockHighTrailPct', v)}         suffix="%" step={1} min={1} />
-      <NumericRow label="Lotto trail"          value={draft.stockLottoTrailPct}        onChange={v => set('stockLottoTrailPct', v)}        suffix="%" step={1} min={1} />
-      <NumericRow label="Target multiple"      value={draft.stockTargetMultiple}       onChange={v => set('stockTargetMultiple', v)}       suffix="×" step={0.5} min={1} />
+      <NumericRow label="Standard trail"     value={draft.stockStandardTrailPct}     onChange={v => set('stockStandardTrailPct', v)}     suffix="%" step={1} min={1} />
+      <NumericRow label="High trail"         value={draft.stockHighTrailPct}         onChange={v => set('stockHighTrailPct', v)}         suffix="%" step={1} min={1} />
+      <NumericRow label="Lotto trail"        value={draft.stockLottoTrailPct}        onChange={v => set('stockLottoTrailPct', v)}        suffix="%" step={1} min={1} />
+      <NumericRow label="Target multiple"    value={draft.stockTargetMultiple}       onChange={v => set('stockTargetMultiple', v)}       suffix="×" step={0.5} min={1} />
 
       <SubHeader>Limits</SubHeader>
       {/* Loss limits stored as negative; display as positive so user types $30000 not -$30000 */}
-      <NumericRow label="Max daily loss"       value={Math.abs(draft.dailyLossLimit)}     onChange={v => setLoss('dailyLossLimit', v)}     prefix="$" step={500} min={0} />
-      <NumericRow label="Max chop-day loss"    value={Math.abs(draft.chopDailyLossLimit)} onChange={v => setLoss('chopDailyLossLimit', v)} prefix="$" step={500} min={0} />
+      <NumericRow label="Max daily loss"     value={Math.abs(draft.dailyLossLimit)}     onChange={v => setLoss('dailyLossLimit', v)}     prefix="$" step={500} min={0} />
+      <NumericRow label="Max chop-day loss"  value={Math.abs(draft.chopDailyLossLimit)} onChange={v => setLoss('chopDailyLossLimit', v)} prefix="$" step={500} min={0} />
     </Card>
   );
 }

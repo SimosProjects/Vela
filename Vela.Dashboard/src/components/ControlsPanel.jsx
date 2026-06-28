@@ -44,13 +44,16 @@ function ToggleRow({ label, sublabel, on, onChange }) {
   );
 }
 
-/// Session Controls panel — all three toggles fully controlled from App.jsx.
+/// Session Controls panel — all toggles fully controlled from App.jsx.
+/// allowOverrideBlocks: when true, regime checkpoints will not reset block settings.
 /// regimeBlocksCalls: whether Bearish regime drove the initial block calls state (for sublabel).
 export function ControlsPanel({
+  allowOverrideBlocks = false,
   blockCalls = false, regimeBlocksCalls = false,
   blockHigh  = false,
   blockLotto = false,
   paused     = false,
+  onToggleAllowOverrideBlocks,
   onTogglePause, onToggleBlockCalls, onToggleBlockHigh, onToggleBlockLotto,
 }) {
   return (
@@ -67,6 +70,22 @@ export function ControlsPanel({
       </div>
 
       <ToggleRow
+        label="Override regime"
+        sublabel={allowOverrideBlocks
+          ? 'Block settings pinned — regime checkpoints ignored'
+          : 'Regime controls block settings at each checkpoint'}
+        on={allowOverrideBlocks}
+        onChange={onToggleAllowOverrideBlocks}
+      />
+      {allowOverrideBlocks && (
+        <div style={{ marginTop: 6, padding: '4px 8px', borderRadius: 4, background: 'rgba(99,190,123,0.07)', border: '1px solid rgba(99,190,123,0.22)', fontSize: 11, color: B.gr }}>
+          🔒 Block settings pinned — regime will not reset them
+        </div>
+      )}
+
+      <div style={{ height: '0.5px', background: B.bd, margin: '10px 0' }} />
+
+      <ToggleRow
         label="Block call entries"
         sublabel={blockCalls
           ? regimeBlocksCalls ? 'Active — seeded by Bearish regime' : 'Manual override active'
@@ -74,7 +93,6 @@ export function ControlsPanel({
         on={blockCalls}
         onChange={onToggleBlockCalls}
       />
-
       {blockCalls && (
         <div style={{ marginTop: 6, padding: '4px 8px', borderRadius: 4, background: 'rgba(210,153,34,0.07)', border: `1px solid rgba(210,153,34,0.22)`, fontSize: 11, color: B.am }}>
           ⚠ New call entries will be rejected by the risk engine
@@ -101,7 +119,6 @@ export function ControlsPanel({
 
       <div style={{ height: '0.5px', background: B.bd, margin: '12px 0' }} />
 
-      {/* Pause Trading button */}
       <button
         onClick={onTogglePause}
         style={{
@@ -125,7 +142,6 @@ export function ControlsPanel({
         <span style={{ width: 7, height: 7, borderRadius: '50%', background: paused ? B.rd : B.gr, flexShrink: 0 }} />
         {paused ? 'RESUME TRADING' : 'PAUSE TRADING'}
       </button>
-
       {paused && (
         <div style={{ marginTop: 6, fontSize: 11, color: B.mu, textAlign: 'center' }}>
           New entries halted — open positions unaffected

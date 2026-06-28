@@ -47,6 +47,8 @@ export default function App() {
   const { data, lastUpdated, error }  = usePolling(10000);
   const [actionMsg, setActionMsg] = useState(null);
 
+  const [allowOverrideBlocks, onToggleAllowOverrideBlocks, syncAllowOverrideBlocks] =
+    useSessionToggle(null, '/api/dashboard/allow-override-blocks', 'allowOverrideBlocks');
   const [blockCalls, onToggleBlockCalls, syncBlockCalls]   = useSessionToggle(null, '/api/dashboard/block-calls', 'blockCallsOverride');
   const [blockHigh,  onToggleBlockHigh,  syncBlockHigh]    = useSessionToggle(null, '/api/dashboard/block-high',  'blockHighOverride');
   const [blockLotto, onToggleBlockLotto, syncBlockLotto]   = useSessionToggle(null, '/api/dashboard/block-lotto', 'blockLottoOverride');
@@ -56,10 +58,11 @@ export default function App() {
     if (data.system?.isPaused !== undefined) setPaused(data.system.isPaused);
   }, [data.system?.isPaused]);
 
-  // Sync all three toggles from regime on each poll (unless user has overridden this session)
-  useEffect(() => { syncBlockCalls(data.regime?.blockCalls ?? false); },  [data.regime?.blockCalls]);
-  useEffect(() => { syncBlockHigh(data.system?.blockHighOverride ?? false); },  [data.system?.blockHighOverride]);
-  useEffect(() => { syncBlockLotto(data.system?.blockLottoOverride ?? false); }, [data.system?.blockLottoOverride]);
+  // Sync all toggles from API state on each poll (unless user has overridden this session)
+  useEffect(() => { syncAllowOverrideBlocks(data.system?.allowOverrideBlocks ?? false); }, [data.system?.allowOverrideBlocks]);
+  useEffect(() => { syncBlockCalls(data.regime?.blockCalls ?? false); },                  [data.regime?.blockCalls]);
+  useEffect(() => { syncBlockHigh(data.system?.blockHighOverride ?? false); },             [data.system?.blockHighOverride]);
+  useEffect(() => { syncBlockLotto(data.system?.blockLottoOverride ?? false); },           [data.system?.blockLottoOverride]);
 
   const onTogglePause = async () => {
     try {
@@ -95,12 +98,14 @@ export default function App() {
   const layoutProps = {
     data,
     paused,
+    allowOverrideBlocks,
     blockCalls,
     regimeBlocksCalls,
     blockHigh,
     blockLotto,
     lastUpdated,
     onTogglePause,
+    onToggleAllowOverrideBlocks,
     onToggleBlockCalls,
     onToggleBlockHigh,
     onToggleBlockLotto,
