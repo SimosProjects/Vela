@@ -35,6 +35,9 @@ public static class DashboardEndpoints
         group.MapPost("/pause", TogglePause).WithName("TogglePause")
              .WithSummary("Flips is_paused in system_state. Worker reads this at each poll cycle.");
 
+        group.MapPost("/allow-override-blocks", ToggleAllowOverrideBlocks).WithName("ToggleAllowOverrideBlocks")
+             .WithSummary("Toggles allow_override_blocks. When enabled, regime checkpoints do not reset block settings and values persist across restarts.");
+
         group.MapPost("/block-calls", ToggleBlockCalls).WithName("ToggleBlockCalls")
              .WithSummary("Flips block_calls_override in system_state. Applied by the Worker within 30 seconds.");
 
@@ -146,16 +149,17 @@ public static class DashboardEndpoints
         );
 
         var system = new SystemStatusResponse(
-            IbkrConnected:      state?.IbkrConnected ?? false,
-            XtradesConnected:   xtradesConnected,
-            WorkerRunning:      workerRunning,
-            MarketOpen:         marketOpen,
-            IsPaused:           state?.IsPaused ?? false,
-            BlockCallsOverride: state?.BlockCallsOverride ?? false,
-            BlockHighOverride:  state?.BlockHighOverride ?? false,
-            BlockLottoOverride: state?.BlockLottoOverride ?? false,
-            WorkerHeartbeat:    state?.WorkerHeartbeat,
-            LastAlertAt:        lastAlertAt
+            IbkrConnected:       state?.IbkrConnected ?? false,
+            XtradesConnected:    xtradesConnected,
+            WorkerRunning:       workerRunning,
+            MarketOpen:          marketOpen,
+            IsPaused:            state?.IsPaused ?? false,
+            AllowOverrideBlocks: state?.AllowOverrideBlocks ?? false,
+            BlockCallsOverride:  state?.BlockCallsOverride ?? false,
+            BlockHighOverride:   state?.BlockHighOverride ?? false,
+            BlockLottoOverride:  state?.BlockLottoOverride ?? false,
+            WorkerHeartbeat:     state?.WorkerHeartbeat,
+            LastAlertAt:         lastAlertAt
         );
 
         return Results.Ok(new DashboardStateResponse(regime, account, system));
@@ -285,6 +289,21 @@ public static class DashboardEndpoints
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.IsPaused, newPaused), ct);
 
         return Results.Ok(new { isPaused = newPaused });
+    }
+
+    private static async Task<IResult> ToggleAllowOverrideBlocks(VelaDbContext db, CancellationToken ct)
+    {
+        var state = await db.SystemState.FirstOrDefaultAsync(s => s.Id == 1, ct);
+        if (state is null)
+            return Results.NotFound("system_state row not yet initialised — is the Worker running?");
+
+        var newValue = !state.AllowOverrideBlocks;
+
+        await db.SystemState
+            .Where(s => s.Id == 1)
+            .ExecuteUpdateAsync(s => s.SetProperty(x => x.AllowOverrideBlocks, newValue), ct);
+
+        return Results.Ok(new { allowOverrideBlocks = newValue });
     }
 
     private static async Task<IResult> ToggleBlockCalls(VelaDbContext db, CancellationToken ct)
