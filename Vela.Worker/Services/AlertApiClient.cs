@@ -54,7 +54,7 @@ public class AlertApiClient : IAlertApiClient
             "?DateSpec=Week" +
             "&Page=1" +
             $"&PageSize={pageSize}" +
-            "&OrderBy=id%20desc" +
+            "&OrderBy=AlertOpenClosedDateEpoch%20desc" +
             "&Side=stc" +
             "&AlertType=all";
 
