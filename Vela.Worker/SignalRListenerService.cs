@@ -57,14 +57,14 @@ public class SignalRListenerService : BackgroundService
         IHttpClientFactory httpClientFactory,
         SystemStateService systemState)
     {
-        _normalizer        = normalizer;
-        _riskEngine        = riskEngine;
-        _scopeFactory      = scopeFactory;
-        _logger            = logger;
-        _discord           = discord;
-        _execution         = execution;
+        _normalizer = normalizer;
+        _riskEngine = riskEngine;
+        _scopeFactory = scopeFactory;
+        _logger = logger;
+        _discord = discord;
+        _execution = execution;
         _httpClientFactory = httpClientFactory;
-        _systemState       = systemState;
+        _systemState = systemState;
 
         _token = Environment.GetEnvironmentVariable("XTRADES_TOKEN")
             ?? throw new InvalidOperationException(
@@ -92,7 +92,6 @@ public class SignalRListenerService : BackgroundService
         while (!stoppingToken.IsCancellationRequested)
         {
             HubConnection? connection = null;
-            // CTS used to force-close the connection when the watchdog fires
             using var watchdogCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
             try
@@ -159,7 +158,6 @@ public class SignalRListenerService : BackgroundService
                     "SignalR connected. Hub: {Hub}, ConnectionId: {Id}",
                     HubName, connection.ConnectionId);
 
-                // Monitor connection health — check every 60s for silent stale subscription
                 while (connection.State != HubConnectionState.Disconnected
                        && !watchdogCts.Token.IsCancellationRequested)
                 {
@@ -183,8 +181,6 @@ public class SignalRListenerService : BackgroundService
                             "Forcing reconnect to recover stale hub subscription.",
                             stoppingToken);
 
-                        // Cancel watchdog loop — outer finally disposes the connection,
-                        // triggering the reconnect cycle
                         await watchdogCts.CancelAsync();
                         break;
                     }
@@ -200,8 +196,6 @@ public class SignalRListenerService : BackgroundService
             }
             catch (AlertApiException ex) when (ex.StatusCode is 401 or 403)
             {
-                // Negotiate returned 401/403 — token is expired or revoked.
-                // Will retry with backoff but each attempt will fail the same way until resolved.
                 _logger.LogError(
                     "Xtrades SignalR negotiate returned {StatusCode} — XTRADES_TOKEN has likely expired or been revoked. " +
                     "No SignalR alerts will be received until the token is updated and the Worker is restarted.",
@@ -248,7 +242,7 @@ public class SignalRListenerService : BackgroundService
         }
 
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        var doc  = JsonDocument.Parse(json);
+        var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
         var url = root.GetProperty("url").GetString()
@@ -306,9 +300,9 @@ public class SignalRListenerService : BackgroundService
             return;
         }
 
-        var normalized     = _normalizer.Normalize(alert);
+        var normalized = _normalizer.Normalize(alert);
         var classification = AlertClassifier.Classify(normalized);
-        var riskResult     = _riskEngine.Evaluate(normalized);
+        var riskResult = _riskEngine.Evaluate(normalized);
 
         var isSideRejection = !riskResult.Approved &&
             (riskResult.Reason?.Contains("stc", StringComparison.OrdinalIgnoreCase) == true ||
@@ -331,19 +325,30 @@ public class SignalRListenerService : BackgroundService
                 riskResult.Approved ? "APPROVED" : $"REJECTED: {riskResult.Reason}");
         }
 
-        // Dedup check before execution: if the alert ID already exists in the DB, the polling
-        // path already processed this alert. Skip execution entirely to prevent a second
-        // market sell on the same exit from creating a ghost short.
         using var scope = _scopeFactory.CreateScope();
         var repository = scope.ServiceProvider.GetRequiredService<IAlertRepository>();
-        var entity     = AlertMapper.ToEntity(normalized, riskResult);
+        var entity = AlertMapper.ToEntity(normalized, riskResult);
 
         var existingIds = await repository.GetExistingAlertIdsAsync([entity.Id], stoppingToken);
         if (existingIds.Contains(entity.Id))
         {
-            _logger.LogDebug(
-                "SignalR alert {Id} already processed by polling path — skipping duplicate.",
-                entity.Id);
+            // Exit alerts must still reach HandleExitAsync even when the ID was already saved
+            // as a BTO entry. Xtrades reuses the same alert ID for BTO and STC, so the dedup
+            // check would otherwise silently swallow every exit whose entry was already persisted.
+            // HandleExitAsync's TryMarkClosing prevents actual double-closes at the broker level.
+            if (normalized.Side?.ToLower() is "stc" or "btc")
+            {
+                _logger.LogInformation(
+                    "SignalR exit alert [{Category}] {Symbol} by {Trader} — ID previously seen as entry, routing to HandleExitAsync.",
+                    classification.Category, normalized.Symbol, normalized.UserName);
+                await _execution.HandleExitAsync(normalized, stoppingToken);
+            }
+            else
+            {
+                _logger.LogDebug(
+                    "SignalR alert {Id} already processed by polling path — skipping duplicate.",
+                    entity.Id);
+            }
             return;
         }
 
@@ -377,10 +382,10 @@ public class SignalRListenerService : BackgroundService
 
     private async Task RetryWithBackoffAsync(int attempt, CancellationToken stoppingToken)
     {
-        var maxDelay    = TimeSpan.FromSeconds(60);
+        var maxDelay = TimeSpan.FromSeconds(60);
         var baseSeconds = Math.Pow(2, Math.Min(attempt, 6));
-        var jitter      = Random.Shared.NextDouble() * 0.3;
-        var delay       = TimeSpan.FromSeconds(baseSeconds * (1 + jitter));
+        var jitter = Random.Shared.NextDouble() * 0.3;
+        var delay = TimeSpan.FromSeconds(baseSeconds * (1 + jitter));
 
         if (delay > maxDelay) delay = maxDelay;
 
@@ -404,8 +409,8 @@ public class ExponentialBackoffRetryPolicy : IRetryPolicy
             return null;
 
         var baseSeconds = Math.Pow(2, retryContext.PreviousRetryCount);
-        var jitter      = Random.Shared.NextDouble() * 0.3;
-        var delay       = TimeSpan.FromSeconds(baseSeconds * (1 + jitter));
+        var jitter = Random.Shared.NextDouble() * 0.3;
+        var delay = TimeSpan.FromSeconds(baseSeconds * (1 + jitter));
 
         return delay < MaxDelay ? delay : MaxDelay;
     }

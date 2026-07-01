@@ -1,10 +1,10 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId
-2026-06-22,13:57:59,,,SPCX,18,166.65,2999.70,2164,+0.09%,,,,,Open,Open,Theo,81,,,,7542
-2026-06-23,10:28:02,,,CCL,53,28.25,1497.25,2144,-0.04%,,,,,Open,Open,SLAM,78,Contributor II,,,7704
-2026-06-24,10:10:58,,,ASPC,202,11.50,2323.00,2119,+3.42%,,,,,Open,Open,bahamut2785,85,,,,8056
-2026-06-25,13:09:40,,,SBSW,254,8.85,2247.90,5094,+0.00%,,,,,Open,Open,Theo,81,Top Analyst VIII,,,8428
-2026-06-25,14:17:50,,,MSFL,170,13.27,2255.90,2116,+0.53%,,,,,Open,Open,Krazy 👶 🐐,77,Top Analyst X,,,8498
-2026-06-26,10:48:33,,,METU,76,19.58,1488.08,2155,+0.41%,,,,,Open,Open,Krazy 👶 🐐,77,,,,8538
+2026-06-30,10:30:48,,,JPM,12,329.50,3954.00,5016,-0.02%,,,,,Open,Open,SPYGLASS,100,,,,8845
+2026-06-30,10:30:53,,,LRCX,9,431.10,3879.90,2965,+0.06%,,,,,Open,Open,SPYGLASS,100,,,,8855
+2026-06-30,10:30:57,,,UNH,9,416.21,3745.89,2448,+0.07%,,,,,Open,Open,SPYGLASS,100,,,,8865
+2026-06-30,10:31:01,,,BAC,69,57.18,3945.42,2181,-0.02%,,,,,Open,Open,SPYGLASS,100,,,,8875
+2026-06-30,10:31:05,,,DELL,9,432.47,3892.23,2189,+0.03%,,,,,Open,Open,SPYGLASS,100,,,,8885
+2026-06-30,13:05:24,,,POET,398,10.09,4015.82,2399,+0.40%,,,,,Open,Open,Krazy 👶 🐐,77,,,,8925
 
 ,,SUMMARY
 ,,Total Trades,6

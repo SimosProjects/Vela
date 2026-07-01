@@ -85,5 +85,9 @@ public record Alert(
 
     // Nested user metadata, source for DiscordRank after normalization
     [property: JsonPropertyName("userMeta")]                         AlertUserMeta? UserMeta = null,
-    string? DiscordRank = null
+    string? DiscordRank = null,
+    // Computed price target supplied by the alert source. When non-null and above the
+    // entry price, PositionSizer uses this directly instead of the configured multiplier.
+    // Populated by Spyglass based on setup type; always null for Xtrades alerts.
+    [property: JsonPropertyName("priceTarget")]                      decimal? PriceTarget = null
 );

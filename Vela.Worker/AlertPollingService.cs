@@ -10,8 +10,12 @@ namespace Vela.Worker;
 /// Two API calls are made per cycle: one for entry alerts sorted by entry time, and one
 /// for exit alerts sorted by exit time. Combining them into one query causes exits to be
 /// buried below entries and fall off the page, which was the root cause of missed STC
-/// alerts during SignalR gaps. The existing alert ID deduplication table prevents the
-/// same exit from being processed by both REST and SignalR.
+/// alerts during SignalR gaps.
+///
+/// Exit alerts bypass the ID deduplication check that applies to entries. Xtrades reuses
+/// the same alert ID for a BTO entry and its corresponding STC exit, so an exit arriving
+/// with a previously-saved BTO ID would be incorrectly filtered as a duplicate. The actual
+/// safeguard against double-closes is HandleExitAsync's TryMarkClosing mechanism.
 /// </summary>
 public class AlertPollingService : BackgroundService
 {
@@ -85,54 +89,64 @@ public class AlertPollingService : BackgroundService
             var repository = scope.ServiceProvider.GetRequiredService<IAlertRepository>();
 
             // Fetch entries and exits in parallel — independent sort orders, independent pages.
-            // Exits sort by TimeOfFullExitAlertEpoch so they are not buried behind entries.
             var (entryAlerts, exitAlerts) = await FetchBothAsync(stoppingToken);
-            var allAlerts = entryAlerts.Concat(exitAlerts).ToList();
 
-            _metrics.AlertsFetched.Add(allAlerts.Count);
+            _metrics.AlertsFetched.Add(entryAlerts.Count + exitAlerts.Count);
             _logger.LogDebug(
                 "Fetched {EntryCount} entry alert(s) and {ExitCount} exit alert(s) from API.",
                 entryAlerts.Count, exitAlerts.Count);
 
-            var incomingIds = allAlerts
+            // Query existing IDs for both entries and exits. Exits need this so we can avoid
+            // re-inserting over an existing BTO row when the same ID is reused for the STC.
+            var incomingEntryIds = entryAlerts
                 .Where(a => a.Id is not null)
                 .Select(a => a.Id!)
                 .ToList();
 
-            var existingIds = await repository.GetExistingAlertIdsAsync(incomingIds, stoppingToken);
+            var incomingExitIds = exitAlerts
+                .Where(a => a.Id is not null)
+                .Select(a => a.Id!)
+                .ToList();
 
-            var newAlerts = allAlerts
+            var existingIds = await repository.GetExistingAlertIdsAsync(
+                incomingEntryIds.Concat(incomingExitIds).Distinct().ToList(), stoppingToken);
+
+            // Entries are deduped: skip any ID already seen to avoid re-processing.
+            var newEntries = entryAlerts
                 .Where(a => a.Id is not null && !existingIds.Contains(a.Id!))
                 .ToList();
 
-            _metrics.AlertsNew.Add(newAlerts.Count);
+            // Exits are NOT deduped: process all regardless of whether the ID exists.
+            // Xtrades reuses the same alert ID for BTO and STC — filtering by existing ID
+            // would silently swallow every exit whose entry was already persisted.
+            var exits = exitAlerts.ToList();
+
+            _metrics.AlertsNew.Add(newEntries.Count);
             _logger.LogDebug(
-                "New alerts after deduplication: {New} / {Total}", newAlerts.Count, allAlerts.Count);
+                "New entry alerts after deduplication: {New} / {Total}", newEntries.Count, entryAlerts.Count);
 
-            if (newAlerts.Count == 0)
+            if (exits.Count == 0 && newEntries.Count == 0)
                 return;
-
-            // Separate exit alerts before the entry pipeline. STC/BTC alerts don't need risk
-            // evaluation or the IsProcessable gate — they only need to match symbol and trader
-            // to an open position via HandleExitAsync.
-            var newExits   = newAlerts.Where(a => a.Side?.ToLower() is "stc" or "btc").ToList();
-            var newEntries = newAlerts.Where(a => a.Side?.ToLower() is not ("stc" or "btc")).ToList();
 
             // Process exits
             var exitEntities = new List<AlertEntity>();
-            foreach (var rawExit in newExits)
+            foreach (var rawExit in exits)
             {
                 try
                 {
                     var normalized = _normalizer.Normalize(rawExit);
                     var riskResult = _riskEngine.Evaluate(normalized);
-                    exitEntities.Add(AlertMapper.ToEntity(normalized, riskResult));
 
                     _logger.LogInformation(
                         "REST exit alert [{Side}] {Symbol} by {Trader} — routing to HandleExitAsync",
                         rawExit.Side, rawExit.Symbol, rawExit.UserName);
 
                     await _execution.HandleExitAsync(normalized, stoppingToken);
+
+                    // Only save if genuinely new — skip if the ID already exists as a BTO row
+                    // to avoid a primary key conflict or unintentionally overwriting entry data.
+                    if (rawExit.Id is not null && !existingIds.Contains(rawExit.Id))
+                        exitEntities.Add(AlertMapper.ToEntity(normalized, riskResult));
                 }
                 catch (Exception ex)
                 {
@@ -240,7 +254,6 @@ public class AlertPollingService : BackgroundService
         }
         catch (AlertApiException ex) when (ex.StatusCode is 401 or 403)
         {
-            // Auth failure is re-thrown so the outer handler can surface it loudly
             throw;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)

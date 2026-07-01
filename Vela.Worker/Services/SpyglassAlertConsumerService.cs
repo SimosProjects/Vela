@@ -28,11 +28,11 @@ public class SpyglassAlertConsumerService : BackgroundService
         ILogger<SpyglassAlertConsumerService> logger)
     {
         _scopeFactory = scopeFactory;
-        _discord      = discord;
-        _execution    = execution;
-        _riskEngine   = riskEngine;
-        _normalizer   = normalizer;
-        _logger       = logger;
+        _discord = discord;
+        _execution = execution;
+        _riskEngine = riskEngine;
+        _normalizer = normalizer;
+        _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -55,7 +55,7 @@ public class SpyglassAlertConsumerService : BackgroundService
         try
         {
             using var scope = _scopeFactory.CreateScope();
-            var db   = scope.ServiceProvider.GetRequiredService<VelaDbContext>();
+            var db = scope.ServiceProvider.GetRequiredService<VelaDbContext>();
             var repo = scope.ServiceProvider.GetRequiredService<IAlertRepository>();
 
             var pending = await db.Alerts
@@ -89,12 +89,11 @@ public class SpyglassAlertConsumerService : BackgroundService
     {
         try
         {
-            var alert      = BuildAlert(entity);
+            var alert = BuildAlert(entity);
             var normalized = _normalizer.Normalize(alert);
             var classification = AlertClassifier.Classify(normalized);
-            var riskResult     = _riskEngine.Evaluate(normalized);
+            var riskResult = _riskEngine.Evaluate(normalized);
 
-            // Update DB to reflect the actual risk outcome, same as Xtrades alerts
             await repo.UpdateRiskResultAsync(entity.Id, riskResult.Approved, riskResult.Reason, ct);
 
             if (!riskResult.Approved)
@@ -106,8 +105,11 @@ public class SpyglassAlertConsumerService : BackgroundService
             }
 
             _logger.LogInformation(
-                "Spyglass alert approved: {Symbol} setups={Strategy} price={Price:F2} — routing to execution.",
-                entity.Symbol, entity.Strategy, entity.ActualPriceAtTimeOfAlert);
+                "Spyglass alert approved: {Symbol} setups={Strategy} price={Price:F2}{Target} — routing to execution.",
+                entity.Symbol,
+                entity.Strategy,
+                entity.ActualPriceAtTimeOfAlert,
+                entity.PriceTarget.HasValue ? $" target={entity.PriceTarget:F2}" : string.Empty);
 
             await _discord.NotifyApprovedAlertAsync(normalized, classification, ct);
             await _execution.HandleEntryAsync(normalized, classification, isAverage: false, ct);
@@ -124,41 +126,44 @@ public class SpyglassAlertConsumerService : BackgroundService
     // pipeline receives the same shape it would from AlertPollingService or SignalR.
     // PricePaid is left null so the normalizer fills it from ActualPriceAtTimeOfAlert,
     // producing 0% slippage — matching the market-order intent of Spyglass alerts.
+    // PriceTarget flows through so PositionSizer uses the Spyglass-computed target
+    // instead of the configured StockTargetMultiple.
     private static Alert BuildAlert(AlertEntity entity) => new(
-        Id:                      entity.Id,
-        UserId:                  null,
-        UserName:                entity.UserName,
-        Symbol:                  entity.Symbol,
-        Type:                    entity.Type,
-        Direction:               entity.Direction,
-        Strike:                  null,
-        Expiration:              null,
-        OptionsContractSymbol:   null,
-        ContractDescription:     null,
-        Side:                    entity.Side,
-        Status:                  entity.Status,
-        Result:                  entity.Result,
+        Id:                       entity.Id,
+        UserId:                   null,
+        UserName:                 entity.UserName,
+        Symbol:                   entity.Symbol,
+        Type:                     entity.Type,
+        Direction:                entity.Direction,
+        Strike:                   null,
+        Expiration:               null,
+        OptionsContractSymbol:    null,
+        ContractDescription:      null,
+        Side:                     entity.Side,
+        Status:                   entity.Status,
+        Result:                   entity.Result,
         ActualPriceAtTimeOfAlert: entity.ActualPriceAtTimeOfAlert,
-        ActualPriceAtTimeOfExit: null,
-        PricePaid:               null,
-        PriceAtExit:             null,
-        HighestPrice:            null,
-        LowestPrice:             null,
-        LastCheckedPrice:        entity.LastCheckedPrice,
-        Risk:                    entity.Risk,
-        LastKnownPercentProfit:  entity.LastKnownPercentProfit,
-        IsProfitableTrade:       entity.IsProfitableTrade,
-        XScore:                  entity.XScore,
-        CanAverage:              entity.CanAverage,
-        TimeOfEntryAlert:        entity.TimeOfEntryAlert?.ToString("o"),
-        TimeOfFullExitAlert:     null,
-        FormattedLength:         entity.FormattedLength,
-        IsSwing:                 entity.IsSwing,
-        IsBullish:               entity.IsBullish,
-        IsShort:                 entity.IsShort,
-        Strategy:                entity.Strategy,
-        OriginalMessage:         entity.OriginalMessage,
-        OriginalExitMessage:     null,
-        UserMeta:                null,
-        DiscordRank:             null);
+        ActualPriceAtTimeOfExit:  null,
+        PricePaid:                null,
+        PriceAtExit:              null,
+        HighestPrice:             null,
+        LowestPrice:              null,
+        LastCheckedPrice:         entity.LastCheckedPrice,
+        PriceTarget:              entity.PriceTarget,
+        Risk:                     entity.Risk,
+        LastKnownPercentProfit:   entity.LastKnownPercentProfit,
+        IsProfitableTrade:        entity.IsProfitableTrade,
+        XScore:                   entity.XScore,
+        CanAverage:               entity.CanAverage,
+        TimeOfEntryAlert:         entity.TimeOfEntryAlert?.ToString("o"),
+        TimeOfFullExitAlert:      null,
+        FormattedLength:          entity.FormattedLength,
+        IsSwing:                  entity.IsSwing,
+        IsBullish:                entity.IsBullish,
+        IsShort:                  entity.IsShort,
+        Strategy:                 entity.Strategy,
+        OriginalMessage:          entity.OriginalMessage,
+        OriginalExitMessage:      null,
+        UserMeta:                 null,
+        DiscordRank:              null);
 }

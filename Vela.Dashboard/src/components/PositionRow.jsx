@@ -20,7 +20,7 @@ export function PositionRow({ position, isLast }) {
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 5 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          {direction !== 'none' && (
+          {(direction === 'call' || direction === 'put') && (
             <Pill color={dirColor(direction)}>{direction === 'call' ? 'C' : 'P'}</Pill>
           )}
           <span style={{ fontSize: 13, fontWeight: 600, color: B.tx }}>{contract}</span>
@@ -41,7 +41,6 @@ export function PositionRow({ position, isLast }) {
           </span>
         </div>
       </div>
-
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 4, fontSize: 11 }}>
         <div>
           <div style={{ color: B.mu2 }}>Entry</div>
@@ -62,7 +61,6 @@ export function PositionRow({ position, isLast }) {
           <div style={{ color: B.mu }}>{fmtTime(openedAt)}</div>
         </div>
       </div>
-
       <div style={{ marginTop: 5, fontSize: 10, color: B.mu }}>
         {trader} · xScore <span style={{ color: B.tx }}>{xScore}</span>
       </div>
