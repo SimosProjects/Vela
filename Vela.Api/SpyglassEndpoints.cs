@@ -37,13 +37,6 @@ public static class SpyglassEndpoints
         if (envelope.Alerts.Count == 0)
             return Results.Ok(new { accepted = 0 });
 
-        // Id is composed from symbol and the scan's EmittedAt timestamp rather than trusting
-        // item.Id verbatim. Spyglass's own Id appears to be keyed to the setup's origin date,
-        // not the scan that detected it, so a persistent setup re-flagged on a later scan
-        // reused the same Id and silently collided with the earlier scan's finalized row.
-        // Composing the Id per scan cycle ensures every scan is evaluated fresh.
-        // TradeGuard's per-symbol position cap remains the safeguard against duplicate entries
-        // when a prior alert for the same symbol already resulted in an open position.
         var entities = envelope.Alerts.Select(item => new AlertEntity
         {
             Id = $"spyglass-{item.Symbol}-{envelope.EmittedAt:yyyyMMddHHmmssfff}-{item.Id}",
@@ -58,6 +51,7 @@ public static class SpyglassEndpoints
             FormattedLength = "SWING",
             ActualPriceAtTimeOfAlert = item.CurrentPrice,
             PricePaid = null,
+            PriceTarget = item.PriceTarget,
             TimeOfEntryAlert = envelope.EmittedAt.ToUniversalTime(),
             Strategy = string.Join(", ", item.Setups),
             OriginalMessage = $"SPYGLASS: {item.Symbol} {string.Join("+", item.Setups)} score={item.Score:F3}",

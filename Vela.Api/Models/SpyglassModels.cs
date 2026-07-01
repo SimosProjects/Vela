@@ -7,7 +7,11 @@ public record SpyglassAlertItem(
     string AsOf,
     double Score,
     IReadOnlyList<string> Setups,
-    decimal CurrentPrice);
+    decimal CurrentPrice,
+    // Computed price target based on the setup type. Null when the setup cannot
+    // produce a reliable projection (e.g. insufficient historical data).
+    // Used by PositionSizer directly instead of the configured StockTargetMultiple.
+    decimal? PriceTarget);
 
 /// <summary>
 /// Envelope posted by Spyglass at the end of each scan cycle.

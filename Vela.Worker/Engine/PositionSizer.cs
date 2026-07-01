@@ -27,6 +27,10 @@ namespace Vela.Worker.Engine;
 // regime-adjusted budget cannot afford any contracts, the sizer falls back to exactly
 // 1 contract if the single-contract cost is at or below the configured ceiling.
 // Regime scaling is bypassed on this path since the goal is guaranteed execution.
+//
+// Price target — when Alert.PriceTarget is non-null and above the entry price, it is used
+// directly as the target instead of the configured multiplier. Populated by Spyglass based
+// on setup type; always null for Xtrades alerts which use the multiplier as before.
 public class PositionSizer
 {
     private readonly RiskEngineOptions _options;
@@ -162,9 +166,23 @@ public class PositionSizer
             ? price.Value * OptionsStopMultiplier
             : price.Value * StockStopMultiplier;
 
-        var targetPrice = isOptions
-            ? price.Value * (decimal)_options.OptionsTargetMultiple
-            : price.Value * (decimal)_options.StockTargetMultiple;
+        // Use the alert's computed price target when provided and above entry price.
+        // Falls back to the configured multiplier for all Xtrades alerts (PriceTarget is always null)
+        // and any Spyglass alert where the setup cannot produce a reliable projection.
+        var targetPrice = alert.PriceTarget.HasValue && alert.PriceTarget.Value > price.Value
+            ? alert.PriceTarget.Value
+            : isOptions
+                ? price.Value * (decimal)_options.OptionsTargetMultiple
+                : price.Value * (decimal)_options.StockTargetMultiple;
+
+        if (alert.PriceTarget.HasValue && alert.PriceTarget.Value > price.Value)
+            _logger.LogDebug(
+                "PositionSizer: {Symbol} using alert-supplied target {Target:F2} (multiplier would give {Multiplier:F2})",
+                alert.Symbol,
+                alert.PriceTarget.Value,
+                isOptions
+                    ? price.Value * (decimal)_options.OptionsTargetMultiple
+                    : price.Value * (decimal)_options.StockTargetMultiple);
 
         var trailPercent = ResolveTrailPercent(isOptions, effectiveRisk);
         var limitPrice = ComputeLimitPrice(isOptions, effectiveRisk, price.Value);
