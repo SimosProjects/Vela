@@ -58,6 +58,7 @@ public class VelaDbContext : DbContext
             entity.Property(a => a.PriceAtExit).HasColumnName("price_at_exit");
             entity.Property(a => a.LastCheckedPrice).HasColumnName("last_checked_price");
             entity.Property(a => a.LastKnownPercentProfit).HasColumnName("last_known_percent_profit");
+            entity.Property(a => a.PriceTarget).HasColumnName("price_target");
             entity.Property(a => a.Risk).HasColumnName("risk");
             entity.Property(a => a.IsProfitableTrade).HasColumnName("is_profitable_trade");
             entity.Property(a => a.CanAverage).HasColumnName("can_average");

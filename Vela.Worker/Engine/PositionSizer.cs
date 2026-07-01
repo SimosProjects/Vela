@@ -209,7 +209,8 @@ public class PositionSizer
             LimitPrice: limitPrice,
             IsAverage: isAverage,
             XScore: (decimal)(alert.XScore ?? 0),
-            DiscordRank: alert.DiscordRank);
+            DiscordRank: alert.DiscordRank,
+            HasComputedTarget: alert.PriceTarget.HasValue && alert.PriceTarget.Value > price.Value);
     }
 
     // -- Helpers --

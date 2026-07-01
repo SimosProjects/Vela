@@ -137,10 +137,11 @@ public class StartupReconciliationServiceTests
     }
 
     [Fact]
-    public async Task RunAsync_WhenIbkrConfirmsFlat_DeletesDbGhosts()
+    public async Task RunAsync_WhenIbkrReportsEmptyButDbHasPositions_SkipsWithoutDeletingDb()
     {
-        // IBKR returns empty with TimedOut=false — account is confirmed flat.
-        // Any DB positions are ghosts and must be removed.
+        // IBKR returns empty with TimedOut=false, but DB has an open position — this is not
+        // proof of a flat account, Gateway may have returned a stale empty response. Must not
+        // treat the DB position as a confirmed ghost.
         var (svc, broker, repo) = BuildService();
 
         repo.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>()))
@@ -148,11 +149,23 @@ public class StartupReconciliationServiceTests
 
         await svc.RunAsync();
 
-        // TSLA in DB but not in IBKR — confirmed ghost, should be deleted
-        repo.Verify(r => r.DeleteAsync("2906", It.IsAny<CancellationToken>()), Times.Once);
+        repo.Verify(r => r.DeleteAsync(
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         broker.Verify(b => b.ClosePositionAsync(
             It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), It.IsAny<CancellationToken>()),
             Times.Never);
+    }
+
+    [Fact]
+    public async Task RunAsync_WhenIbkrAndDbBothReportFlat_ProceedsWithoutError()
+    {
+        // IBKR returns empty and DB agrees the account is flat — genuinely nothing to reconcile.
+        var (svc, broker, repo) = BuildService();
+
+        await svc.Invoking(s => s.RunAsync()).Should().NotThrowAsync();
+
+        repo.Verify(r => r.DeleteAsync(
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
