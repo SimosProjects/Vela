@@ -61,12 +61,12 @@ public class StartupReconciliationService
 
             if (snapshot.TimedOut)
             {
-                _logger.LogError(
+                _logger.LogWarning(
                     "Startup reconciliation — GetAllPositions timed out. " +
-                    "Cannot verify account state. Aborting reconciliation.");
+                    "Cannot verify account state. Skipping reconciliation.");
 
                 await _discord.NotifyCriticalAsync(
-                    "⚠️ Startup Reconciliation Aborted — Gateway Timeout",
+                    "⚠️ Startup Reconciliation Skipped — Gateway Timeout",
                     "Could not retrieve IBKR positions within the timeout window. " +
                     "Account state could not be verified. Manual review required before trading.",
                     ct);
@@ -74,6 +74,26 @@ public class StartupReconciliationService
             }
 
             var dbPositions = await _repo.GetAllAsync(ct);
+
+            // A 0-position response is not, by itself, proof of a flat account — Gateway can
+            // return a stale/empty snapshot without signalling a timeout. Only trust it when the
+            // DB agrees the account is flat; otherwise treat every DB position as an unverified
+            // ghost candidate and skip rather than risk deleting real open positions.
+            if (snapshot.Positions.Count == 0 && dbPositions.Count > 0)
+            {
+                _logger.LogWarning(
+                    "Startup reconciliation — IBKR reported 0 positions but DB has {DbCount} open " +
+                    "position(s). Gateway may be returning a stale empty response. Skipping reconciliation.",
+                    dbPositions.Count);
+
+                await _discord.NotifyCriticalAsync(
+                    "⚠️ Startup Reconciliation Skipped — Suspicious Empty Position Response",
+                    $"IBKR reported 0 positions but the database has {dbPositions.Count} open " +
+                    "position(s) tracked. This may indicate a stale Gateway response rather than a " +
+                    "genuinely flat account. Manual review required before trading.",
+                    ct);
+                return;
+            }
 
             _logger.LogInformation(
                 "Startup reconciliation — IBKR: {IbkrCount} positions, DB: {DbCount} positions.",

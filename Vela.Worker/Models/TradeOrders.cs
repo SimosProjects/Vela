@@ -32,5 +32,7 @@ public record TradeOrder(
     // xScore of the trader at time of alert, threaded through for TradeRecord and CSV.
     decimal XScore = 0m,
     // Discord rank of the trader at time of alert, persisted for post-trade analysis.
-    string? DiscordRank = null
+    string? DiscordRank = null,
+    // True when TargetPrice was derived from Alert.PriceTarget rather than the configured multiplier.
+    bool HasComputedTarget = false
 );
