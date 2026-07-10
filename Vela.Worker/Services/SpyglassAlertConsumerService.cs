@@ -19,6 +19,9 @@ public class SpyglassAlertConsumerService : BackgroundService
     private readonly IAlertNormalizer _normalizer;
     private readonly ILogger<SpyglassAlertConsumerService> _logger;
 
+    private static readonly TimeZoneInfo EasternTime =
+        TimeZoneInfo.FindSystemTimeZoneById("America/New_York");
+
     public SpyglassAlertConsumerService(
         IServiceScopeFactory scopeFactory,
         DiscordNotificationService discord,
@@ -69,7 +72,7 @@ public class SpyglassAlertConsumerService : BackgroundService
 
             foreach (var entity in pending)
             {
-                await ProcessAlertAsync(entity, repo, ct);
+                await ProcessAlertAsync(entity, db, repo, ct);
             }
         }
         catch (OperationCanceledException)
@@ -84,11 +87,37 @@ public class SpyglassAlertConsumerService : BackgroundService
 
     private async Task ProcessAlertAsync(
         AlertEntity entity,
+        VelaDbContext db,
         IAlertRepository repo,
         CancellationToken ct)
     {
         try
         {
+            // Block re-entry on a symbol already traded and closed today (ET).
+            // Prevents the scanner re-flagging a symbol whose position closed at target
+            // or stop earlier in the same session from opening a second position.
+            // ClosedAt comparisons stay in SQL; the ET conversion runs client-side
+            // since TimeZoneInfo.ConvertTime cannot be translated by the Npgsql provider.
+            var todayEt = DateOnly.FromDateTime(
+                TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, EasternTime).DateTime);
+
+            var closedTimesToday = await db.TradeMetrics
+                .Where(t => t.Symbol == entity.Symbol && t.ClosedAt.HasValue)
+                .Select(t => t.ClosedAt!.Value)
+                .ToListAsync(ct);
+
+            var tradedToday = closedTimesToday.Any(closedAt =>
+                DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(closedAt, EasternTime).DateTime) == todayEt);
+
+            if (tradedToday)
+            {
+                _logger.LogInformation(
+                    "Spyglass alert skipped: {Symbol} already traded and closed today.",
+                    entity.Symbol);
+                await repo.UpdateRiskResultAsync(entity.Id, false, "symbol_traded_today", ct);
+                return;
+            }
+
             var alert = BuildAlert(entity);
             var normalized = _normalizer.Normalize(alert);
             var classification = AlertClassifier.Classify(normalized);

@@ -24,6 +24,7 @@ public class AlertPollingService : BackgroundService
     private readonly RiskEngineService _riskEngine;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly PollingOptions _options;
+    private readonly RiskEngineOptions _riskEngineOptions;
     private readonly ILogger<AlertPollingService> _logger;
     private readonly AlertMetrics _metrics;
     private readonly DiscordNotificationService _discord;
@@ -35,6 +36,7 @@ public class AlertPollingService : BackgroundService
         RiskEngineService riskEngine,
         IServiceScopeFactory scopeFactory,
         IOptions<PollingOptions> options,
+        IOptions<RiskEngineOptions> riskEngineOptions,
         ILogger<AlertPollingService> logger,
         AlertMetrics metrics,
         DiscordNotificationService discord,
@@ -45,6 +47,7 @@ public class AlertPollingService : BackgroundService
         _riskEngine = riskEngine;
         _scopeFactory = scopeFactory;
         _options = options.Value;
+        _riskEngineOptions = riskEngineOptions.Value;
         _logger = logger;
         _metrics = metrics;
         _discord = discord;
@@ -134,6 +137,32 @@ public class AlertPollingService : BackgroundService
             {
                 try
                 {
+                    // Skip exits from non-approved traders — the exit fetch is platform-wide and
+                    // returns STC/BTC alerts from all traders. Unapproved traders never have open
+                    // positions in TradeGuard so routing their exits is always a no-op.
+                    // SPYGLASS exits are always allowed through since they bypass xScore gating.
+                    var traderName = rawExit.UserName ?? string.Empty;
+                    var isApproved = traderName == "SPYGLASS" ||
+                        _riskEngineOptions.ApprovedTraders.Contains(traderName, StringComparer.OrdinalIgnoreCase);
+
+                    if (!isApproved)
+                    {
+                        _logger.LogDebug(
+                            "REST exit alert [{Side}] {Symbol} by {Trader} — skipping, trader not approved.",
+                            rawExit.Side, rawExit.Symbol, traderName);
+                        continue;
+                    }
+
+                    // The exit fetch uses Side=stc but Xtrades occasionally returns BTO alerts
+                    // sorted by AlertOpenClosedDateEpoch — skip anything that isn't a genuine exit.
+                    if (rawExit.Side?.ToLower() is not ("stc" or "btc"))
+                    {
+                        _logger.LogDebug(
+                            "REST exit fetch returned [{Side}] alert for {Symbol} by {Trader} — skipping, not an exit side.",
+                            rawExit.Side, rawExit.Symbol, rawExit.UserName);
+                        continue;
+                    }
+
                     var normalized = _normalizer.Normalize(rawExit);
                     var riskResult = _riskEngine.Evaluate(normalized);
 
