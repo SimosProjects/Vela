@@ -1,13 +1,15 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Shares,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId
-2026-06-30,10:30:48,,,JPM,12,329.50,3954.00,5016,-0.02%,,,,,Open,Open,SPYGLASS,100,,,,8845
-2026-06-30,10:30:53,,,LRCX,9,431.10,3879.90,2965,+0.06%,,,,,Open,Open,SPYGLASS,100,,,,8855
-2026-06-30,10:30:57,,,UNH,9,416.21,3745.89,2448,+0.07%,,,,,Open,Open,SPYGLASS,100,,,,8865
-2026-06-30,10:31:01,,,BAC,69,57.18,3945.42,2181,-0.02%,,,,,Open,Open,SPYGLASS,100,,,,8875
-2026-06-30,10:31:05,,,DELL,9,432.47,3892.23,2189,+0.03%,,,,,Open,Open,SPYGLASS,100,,,,8885
-2026-06-30,13:05:24,,,POET,398,10.09,4015.82,2399,+0.40%,,,,,Open,Open,Krazy 👶 🐐,77,,,,8925
+2026-07-07,10:31:11,2026-07-08,09:35:28,DELL,9,407.17,3664.53,,,438.76,3948.84,,,Closed,TargetHit,SPYGLASS,100,,+284.31,+7.76%,9895
+2026-07-07,10:31:15,,,ELV,9,416.07,3744.63,2287,-0.15%,,,,,Open,Open,SPYGLASS,100,,,,9905
+2026-07-07,10:31:20,,,JPM,11,340.40,3744.40,3353,+0.07%,,,,,Open,Open,SPYGLASS,100,,,,9915
+2026-07-07,10:31:24,,,LLY,3,1237.00,3711.00,2247,-0.01%,,,,,Open,Open,SPYGLASS,100,,,,9925
+2026-07-07,10:31:28,,,UNH,9,425.34,3828.06,2296,+0.09%,,,,,Open,Open,SPYGLASS,100,,,,9935
+2026-07-08,10:31:01,,,AXP,11,340.60,3746.60,3444,-0.06%,,,,,Open,Open,SPYGLASS,100,,,,10156
+2026-07-08,10:31:05,,,DELL,9,421.19,3790.71,2144,+0.36%,,,,,Open,Open,SPYGLASS,100,,,,10166
+2026-07-08,10:31:09,,,GE,11,359.83,3958.13,2085,-0.02%,,,,,Open,Open,SPYGLASS,100,,,,10176
 
 ,,SUMMARY
-,,Total Trades,6
-,,Open,6,Closed,0
-,,Wins,0,Losses,0,Win Rate,0.0%
-,,Total P&L,+0.00
+,,Total Trades,8
+,,Open,7,Closed,1
+,,Wins,1,Losses,0,Win Rate,100.0%
+,,Total P&L,+284.31
