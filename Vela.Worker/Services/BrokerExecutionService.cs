@@ -854,6 +854,7 @@ public class BrokerExecutionService
             IsAverage                 = isAverage,
             AlertReceivedAt           = alertReceivedAt,
             OrderSubmittedAt          = orderSubmittedAt,
+            SessionLocation           = Environment.GetEnvironmentVariable("TRADING_LOCATION"),
             OrderFilledAt             = result.FilledAt,
             LatencyMs                 = (int)(result.FilledAt - alertReceivedAt).TotalMilliseconds,
             AlertedPrice              = alertedPrice,
