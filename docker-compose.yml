@@ -63,10 +63,30 @@ services:
       - vela-net
     restart: unless-stopped
 
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - vela-net
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   trades_data:
   reports_data:
+  grafana_data:
 networks:
   vela-net:
     driver: bridge

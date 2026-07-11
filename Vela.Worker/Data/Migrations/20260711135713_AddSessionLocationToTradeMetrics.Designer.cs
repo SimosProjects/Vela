@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Vela.Worker.Data;
@@ -11,9 +12,11 @@ using Vela.Worker.Data;
 namespace Vela.Worker.Data.Migrations
 {
     [DbContext(typeof(VelaDbContext))]
-    partial class VelaDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260711135713_AddSessionLocationToTradeMetrics")]
+    partial class AddSessionLocationToTradeMetrics
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

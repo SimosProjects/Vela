@@ -31,6 +31,10 @@ public class TradeMetric
     // When PlaceOrderAsync was called at the broker
     public DateTimeOffset OrderSubmittedAt { get; set; }
 
+    // Geographic origin of this Worker process at entry time, used to compare
+    // execution quality (latency, slippage) across deployment locations
+    public string? SessionLocation { get; set; }
+
     // When IBKR confirmed the fill
     public DateTimeOffset OrderFilledAt { get; set; }
 

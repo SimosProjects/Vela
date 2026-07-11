@@ -96,6 +96,7 @@ public class VelaDbContext : DbContext
             entity.Property(m => m.IsAverage).HasColumnName("is_average");
             entity.Property(m => m.AlertReceivedAt).HasColumnName("alert_received_at");
             entity.Property(m => m.OrderSubmittedAt).HasColumnName("order_submitted_at");
+            entity.Property(m => m.SessionLocation).HasColumnName("session_location");
             entity.Property(m => m.OrderFilledAt).HasColumnName("order_filled_at");
             entity.Property(m => m.LatencyMs).HasColumnName("latency_ms");
             entity.Property(m => m.AlertedPrice).HasColumnName("alerted_price");

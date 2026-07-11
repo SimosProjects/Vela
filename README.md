@@ -3,6 +3,7 @@
 ![.NET](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-Dashboards-F46800?logo=grafana&logoColor=white)
 ![CI](https://img.shields.io/badge/CI-GitHub%20Actions-2088FF?logo=githubactions&logoColor=white)
 
 An event-driven automated trading platform that ingests trade alerts, evaluates them against a configurable risk policy, and executes approved orders through Interactive Brokers.
@@ -15,6 +16,8 @@ An event-driven automated trading platform that ingests trade alerts, evaluates 
 - Xtrades ingestion through a real-time SignalR feed and REST polling
 - Rule-based, configuration-driven risk engine
 - Containerized with Docker; CI/CD via GitHub Actions
+- Grafana dashboards tracking execution quality (entry/exit latency,
+  slippage, win rate) by geographic deployment location
 - Simulation, paper, and live trading modes (simulation by default)
 
 ## Architecture At A Glance
@@ -41,6 +44,9 @@ The system is organized around an execution core that owns the full path from al
 - Daily market-regime assessment that automatically tightens risk posture in unfavourable conditions
 - A single serialized broker session that respects the single-threaded TWS client contract
 - Multi-architecture container images with automated CI/CD
+- Geographic execution-quality tracking via a `session_location` field on
+  every trade record, surfaced through Grafana dashboards querying
+  PostgreSQL directly
 
 ## Architecture
 
@@ -62,6 +68,8 @@ Full design detail, including the four architectural views and the architectural
 - Daily market-regime assessment that can tighten risk posture automatically
 - Discord notifications across separate channels for signals, executions, health, and critical events
 - PostgreSQL persistence with open positions held as the source of truth for recovery
+- Grafana dashboards (PostgreSQL-backed) for entry/exit latency, slippage,
+  and win-rate analysis segmented by deployment location
 - Simulation-first execution with a runtime toggle for paper and live trading
 - Read API for querying ingested alerts, with output caching and health checks
 
@@ -78,19 +86,25 @@ Full design detail, including the four architectural views and the architectural
 | Resilience | Microsoft.Extensions.Http.Resilience |
 | Logging | Serilog (console and file) |
 | Notifications | Discord webhooks |
+| Observability | Grafana (provisioned PostgreSQL datasource and dashboards) |
 | API tooling | OpenAPI / Swagger |
+| Frontend | React, Vite |
 | Testing | xUnit, Moq, FluentAssertions, Testcontainers |
 | Packaging and CI/CD | Docker, Docker Compose, GitHub Actions, GitHub Container Registry |
 
 ## Repository Structure
 
-The solution (`Vela.sln`) contains five projects with distinct responsibilities.
+The solution (`Vela.sln`) contains five projects with distinct responsibilities. A sixth component, Vela.Dashboard, sits alongside the solution as a separate Node project.
 
 - **Vela.AlertPoC** — Shared domain library. Owns the alert model, the alert classifier, and the risk engine with its rules. Referenced by the execution core and the tests.
 - **Vela.Worker** — The execution core. Owns ingestion, risk evaluation, position sizing, trade execution, position management, scheduling, broker integration, and persistence (the EF Core `DbContext` and migrations live here).
 - **Vela.Api** — A read-only HTTP API over ingested alerts, with filtering, pagination, output caching, and health endpoints.
 - **Vela.Analytics** — A console application that produces performance reports from recorded trade outcomes.
 - **Vela.Tests** — Unit tests for the risk engine, position sizing, and execution, plus integration tests against a containerized PostgreSQL instance and the API host.
+- **Vela.Dashboard** — React + Vite single-page app served as static
+  files by Vela.Api. Provides the operational UI: live positions, closed
+  trades, market regime and account state, and controls for pause,
+  risk-block overrides, and force-closing positions.
 
 ## Risk Controls
 
@@ -128,6 +142,8 @@ DISCORD_HEALTH_WEBHOOK_URL
 DISCORD_SUMMARY_WEBHOOK_URL
 DISCORD_CRITICAL_WEBHOOK_URL
 POSTGRES_PASSWORD
+TRADING_LOCATION     # geographic tag applied to trades at entry (e.g. Thailand)
+GRAFANA_ADMIN_PASSWORD
 Ibkr__AccountId
 IBKR_ENABLED        # false for simulation; true to enable Interactive Brokers
 ```
@@ -159,6 +175,30 @@ docker compose up --build
 ```
 
 Through Docker Compose the API is exposed on `http://localhost:5141`, with Swagger available in the development environment.
+
+### Dashboards
+
+Start Grafana alongside Postgres:
+
+```bash
+docker compose up -d grafana
+```
+
+Grafana is available at `http://localhost:3000` (user `admin`, password
+from `GRAFANA_ADMIN_PASSWORD`). The Postgres datasource and trade
+performance dashboard are provisioned automatically from
+`grafana/provisioning/` on startup.
+
+### Vela.Dashboard (operational UI)
+
+```bash
+cd Vela.Dashboard
+npm install
+npm run build      # outputs into Vela.Api/wwwroot, served by the API
+```
+
+For active frontend development, `npm run dev` runs a Vite dev server on
+`:5173` that proxies `/api/*` requests to the running Vela.Api instance.
 
 ## Testing
 
