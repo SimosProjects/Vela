@@ -122,6 +122,13 @@ public interface IBrokerService
         string symbol,
         int barCount,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns a live snapshot of account-level figures directly from IB Gateway.
+    /// Always issues a fresh request, never cached or backed by a database value.
+    /// TimedOut=true means Gateway did not respond within the timeout window.
+    /// </summary>
+    Task<AccountSnapshot> GetAccountSnapshotAsync(CancellationToken ct = default);
 }
 
 /// <summary>
@@ -159,4 +166,18 @@ public record IbkrOpenOrder(
     string Action,
     string OrderType,
     double Quantity,
-    string Status);
+    string Status,
+    double? AuxPrice,
+    double? LmtPrice);
+
+/// <summary>
+/// Live account-level snapshot returned by GetAccountSnapshotAsync.
+/// TimedOut=true indicates Gateway did not respond within the timeout window,
+/// callers must not treat the zeroed values as real account figures in this case.
+/// </summary>
+public record AccountSnapshot(
+    decimal NetLiquidation,
+    decimal TotalCash,
+    decimal BuyingPower,
+    decimal TodayPnL,
+    bool TimedOut);

@@ -203,4 +203,13 @@ public class NullBrokerService : IBrokerService
         _logger.LogDebug("[NullBroker] GetHistoricalBars {Symbol} -> empty (simulation)", symbol);
         return Task.FromResult(new List<HistoricalBar>());
     }
+
+    /// <summary>
+    /// Returns a zeroed snapshot, no Gateway available in simulation.
+    /// </summary>
+    public Task<AccountSnapshot> GetAccountSnapshotAsync(CancellationToken ct = default)
+    {
+        _logger.LogDebug("[NullBroker] GetAccountSnapshot -> zeroed snapshot (simulation)");
+        return Task.FromResult(new AccountSnapshot(0, 0, 0, 0, false));
+    }
 }
