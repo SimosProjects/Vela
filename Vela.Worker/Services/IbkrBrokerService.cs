@@ -358,6 +358,62 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// Returns a live snapshot of NetLiquidation, TotalCashValue, and BuyingPower via a
+    /// batch reqAccountSummary call, plus TodayPnL via a separate single-shot reqPnL call.
+    /// Always issues fresh requests to IB Gateway, never cached or DB-backed.
+    /// </summary>
+    public async Task<AccountSnapshot> GetAccountSnapshotAsync(CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return new AccountSnapshot(0m, 0m, 0m, 0m, false);
+
+        var summaryReqId = NextReqId();
+        var summaryTcs = _connection.Wrapper.RegisterAccountSnapshotCallback(summaryReqId);
+        _connection.Client.reqAccountSummary(summaryReqId, "All", "NetLiquidation,TotalCashValue,BuyingPower");
+
+        var pnlReqId = NextReqId();
+        var pnlTcs = _connection.Wrapper.RegisterPnLCallback(pnlReqId);
+        _connection.Client.reqPnL(pnlReqId, _options.AccountId, "");
+
+        try
+        {
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(_options.TimeoutMs);
+
+            var summaryTask = summaryTcs.Task.WaitAsync(cts.Token);
+            var pnlTask = pnlTcs.Task.WaitAsync(cts.Token);
+            await Task.WhenAll(summaryTask, pnlTask);
+
+            var values = summaryTask.Result;
+
+            decimal Parse(string tag) =>
+                values.TryGetValue(tag, out var raw) && decimal.TryParse(raw, out var parsed) ? parsed : 0m;
+
+            _logger.LogDebug(
+                "IBKR GetAccountSnapshot — NetLiq: {NetLiq} Cash: {Cash} BP: {BP} PnL: {PnL}",
+                Parse("NetLiquidation"), Parse("TotalCashValue"), Parse("BuyingPower"), pnlTask.Result);
+
+            return new AccountSnapshot(
+                NetLiquidation: Parse("NetLiquidation"),
+                TotalCash:      Parse("TotalCashValue"),
+                BuyingPower:    Parse("BuyingPower"),
+                TodayPnL:       (decimal)pnlTask.Result,
+                TimedOut:       false);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogWarning("IBKR GetAccountSnapshot timed out");
+            _connection.Wrapper.UnregisterAccountSnapshotCallback(summaryReqId);
+            _connection.Wrapper.UnregisterPnLCallback(pnlReqId);
+            return new AccountSnapshot(0m, 0m, 0m, 0m, true);
+        }
+        finally
+        {
+            _connection.Client.cancelAccountSummary(summaryReqId);
+            _connection.Client.cancelPnL(pnlReqId);
+        }
+    }
+
+    /// <summary>
     /// Places a bracket entry order then, once confirmed filled, replaces the fixed stop with
     /// an OCA group containing a TRAIL stop and optionally a LMT profit target.
     /// Spyglass stock entries with a computed price target receive trail + target in OCA;

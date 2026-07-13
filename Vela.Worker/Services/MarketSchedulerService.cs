@@ -472,59 +472,20 @@ public class MarketSchedulerService : BackgroundService
 
         _logger.LogInformation("Market scheduler firing position summary.");
 
-        var openTrades = _guard.GetOpenTrades();
-        var balance    = await _broker.GetAccountBalanceAsync(ct);
-        var openValue  = await _broker.GetOpenPositionsValueAsync(ct);
+        var account   = await _broker.GetAccountSnapshotAsync(ct);
+        var positions = await _broker.GetAllPositionsAsync(ct);
+        var orders    = await _broker.GetAllOpenOrdersAsync(ct);
 
-        var effectiveBalance   = balance * (1m + (decimal)_riskOptions.MarginPct);
-        var maxDailyDeployment = effectiveBalance * (decimal)(_riskOptions.MaxDailyExposurePct / 100.0);
-        var exposurePct        = effectiveBalance > 0
-            ? openValue / effectiveBalance * 100
-            : 0m;
-
-        var accountSummary =
-            $"Balance: **${balance:N2}**\n" +
-            $"Open Positions: **{openTrades.Count}** (${openValue:N2})\n" +
-            $"Exposure: **{exposurePct:F1}% / {_riskOptions.MaxDailyExposurePct}%** (cap ${maxDailyDeployment:N2})";
-
-        var openSection = openTrades.Count > 0
-            ? string.Join("\n", openTrades.Select(t =>
-                t.TradeType == TradeType.Options
-                    ? $"{t.Symbol} {t.Direction?.ToUpper()} {t.Strike} {FormatExpiration(t.Expiration)} x{t.Quantity} @ ${t.EntryPrice:F2}"
-                    : $"{t.Symbol} x{t.Quantity} @ ${t.EntryPrice:F2}"))
-            : "No open positions";
-
-        var closedToday   = ReadClosedTodayFromCsv();
-        var closedSection = closedToday.Count > 0
-            ? string.Join("\n", closedToday.Select(t =>
-            {
-                var sign = t.PnL >= 0 ? "+" : "";
-                return $"{t.Symbol} x{t.Quantity} | Entry: ${t.EntryPrice:F2} Exit: ${t.ExitPrice:F2} " +
-                       $"({sign}{t.PnLPercent:F1}%) {t.Result}";
-            }))
-            : "No closed trades today";
-
-        var dailyPnl = closedToday.Sum(t => t.PnL ?? 0);
-        var pnlSign  = dailyPnl >= 0 ? "+" : "";
-
-        var fields = new[]
+        if (account.TimedOut || positions.TimedOut || orders.TimedOut)
         {
-            Field("Account Summary", accountSummary),
-            Field("Open Positions",  openSection),
-            Field("Closed Today",    closedSection),
-            Field("Daily P&L",       $"**{pnlSign}${dailyPnl:N2}**"),
-        };
+            _logger.LogWarning("Position summary skipped — one or more IB queries timed out.");
+            return;
+        }
 
-        var embed = new
-        {
-            title  = "📊 POSITION SUMMARY",
-            color  = 0x9B59B6,
-            fields,
-            footer = new { text = "Vela Summary" },
-            timestamp = DateTimeOffset.UtcNow.ToString("o")
-        };
+        var message = DiscordNotificationService.BuildSnapshotMessage(
+            account, positions.Positions, orders.Orders);
 
-        await PostToWebhookAsync(_summaryWebhookUrl, embed, ct);
+        await _discord.NotifyIbSnapshotAsync(message, ct);
     }
 
     private async Task<string> CheckIbkrAsync(CancellationToken ct)
@@ -587,109 +548,6 @@ public class MarketSchedulerService : BackgroundService
         }
     }
 
-    private List<TradeRecord> ReadClosedTodayFromCsv()
-    {
-        var tradesDir = _config["Trades:Directory"]
-            ?? Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "trades");
-
-        tradesDir = Path.GetFullPath(tradesDir);
-
-        var today  = DateOnly.FromDateTime(GetEasternTime().DateTime);
-        var trades = new List<TradeRecord>();
-
-        trades.AddRange(ReadClosedTodayFromFile(
-            Path.Combine(tradesDir, "options_trades.csv"), TradeType.Options, today));
-
-        trades.AddRange(ReadClosedTodayFromFile(
-            Path.Combine(tradesDir, "stocks_trades.csv"), TradeType.Stock, today));
-
-        return trades;
-    }
-
-    private static List<TradeRecord> ReadClosedTodayFromFile(
-        string path, TradeType tradeType, DateOnly today)
-    {
-        if (!File.Exists(path))
-            return [];
-
-        var trades = new List<TradeRecord>();
-        var lines  = File.ReadAllLines(path);
-
-        foreach (var line in lines.Skip(1))
-        {
-            if (string.IsNullOrWhiteSpace(line) || line.StartsWith(",,"))
-                continue;
-
-            var cols = line.Split(',');
-
-            var statusIndex     = tradeType == TradeType.Options ? 18 : 14;
-            var closedDateIndex = 2;
-
-            if (cols.Length <= statusIndex) continue;
-            if (cols[statusIndex] != "Closed") continue;
-            if (!DateOnly.TryParse(cols[closedDateIndex], out var closedDate)) continue;
-            if (closedDate != today) continue;
-
-            var entryPriceIndex  = tradeType == TradeType.Options ? 10 : 6;
-            var exitPriceIndex   = tradeType == TradeType.Options ? 14 : 10;
-            var xScoreIndex      = tradeType == TradeType.Options ? 21 : 17;
-            var discordRankIndex = tradeType == TradeType.Options ? 22 : 18;
-            var pnlIndex         = tradeType == TradeType.Options ? 23 : 19;
-            var pnlPctIndex      = tradeType == TradeType.Options ? 24 : 20;
-            var resultIndex      = tradeType == TradeType.Options ? 19 : 15;
-            var qtyIndex         = tradeType == TradeType.Options ? 9  : 5;
-
-            decimal.TryParse(cols[entryPriceIndex], System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out var entryPrice);
-            decimal.TryParse(cols[exitPriceIndex], System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out var exitPrice);
-            decimal.TryParse(cols.Length > xScoreIndex ? cols[xScoreIndex] : "0",
-                System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out var xScore);
-            var discordRank = cols.Length > discordRankIndex
-                ? cols[discordRankIndex].Trim()
-                : string.Empty;
-            decimal.TryParse(cols.Length > pnlIndex ? cols[pnlIndex].TrimStart('+') : "0",
-                System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out var pnl);
-            decimal.TryParse(cols.Length > pnlPctIndex ? cols[pnlPctIndex].TrimStart('+').TrimEnd('%') : "0",
-                System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out var pnlPct);
-            int.TryParse(cols[qtyIndex], out var qty);
-            Enum.TryParse<TradeOutcome>(cols[resultIndex], out var result);
-
-            trades.Add(new TradeRecord
-            {
-                AlertId         = string.Empty,
-                OrderId         = string.Empty,
-                StopOrderId     = null,
-                TargetOrderId   = null,
-                UserName        = cols[0],
-                XScore          = xScore,
-                DiscordRank     = string.IsNullOrEmpty(discordRank) ? null : discordRank,
-                Symbol          = cols[4],
-                TradeType       = tradeType,
-                OptionsContract = null,
-                Direction       = null,
-                Strike          = null,
-                Expiration      = null,
-                Quantity        = qty,
-                EntryPrice      = entryPrice,
-                EntryAmount     = 0,
-                StopPrice       = 0,
-                TargetPrice     = 0,
-                ExitPrice       = exitPrice,
-                PnL             = pnl,
-                PnLPercent      = pnlPct,
-                Status          = TradeStatus.Closed,
-                Result          = result,
-                OpenedAt        = DateTimeOffset.UtcNow,
-            });
-        }
-
-        return trades;
-    }
-
     private (int Hour, int Minute, string Task)[] BuildSchedule()
     {
         var cutoff = TimeOnly.TryParse(_riskOptions.SameDayExpiryAutoCloseCutoff, out var t)
@@ -699,18 +557,21 @@ public class MarketSchedulerService : BackgroundService
         return
         [
             (9,           0,            "HealthCheck"),
-            (9,           15,           "PositionSummary"),
+            (9,           0,            "PositionSummary"),   // pre-market, before 9:30 open
             (9,           20,           "MarketConditions"),
             (11,          0,            "MarketConditions"),
+            (11,          0,            "PositionSummary"),
             (11,          23,           "HealthCheck"),
             (13,          0,            "MarketConditions"),
+            (13,          0,            "PositionSummary"),
             (13,          17,           "HealthCheck"),
             (cutoff.Hour, cutoff.Minute,"SameDayExpiryClose"),
             (14,          0,            "MarketConditions"),
             (15,          0,            "OneDteProfitClose"),
+            (15,          0,            "PositionSummary"),
             (15,          55,           "OneDteLottoConvert"),
             (16,          5,            "HealthCheck"),
-            (16,          15,           "PositionSummary"),
+            (16,          5,            "PositionSummary"),   // just after 4:00 close
             (16,          20,           "WeeklyReport"),
             (16,          25,           "MonthlyReport"),
             (16,          30,           "WeeklyArchive"),
@@ -751,14 +612,6 @@ public class MarketSchedulerService : BackgroundService
         TimeZoneInfo.ConvertTime(
             DateTimeOffset.UtcNow,
             TimeZoneInfo.FindSystemTimeZoneById("America/New_York"));
-
-    private static string FormatExpiration(string? expiration)
-    {
-        if (expiration is null) return "";
-        return DateTimeOffset.TryParse(expiration, out var dt)
-            ? dt.ToString("MMM dd yyyy")
-            : expiration;
-    }
 
     private static object Field(string name, string value) =>
         new { name, value, inline = false };

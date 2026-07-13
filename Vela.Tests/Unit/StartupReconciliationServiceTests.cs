@@ -409,7 +409,7 @@ public class StartupReconciliationServiceTests
 
         broker.Setup(b => b.GetAllOpenOrdersAsync(It.IsAny<CancellationToken>()))
               .ReturnsAsync(new OrdersSnapshot(
-                  [new IbkrOpenOrder(1001, "TSLA", "OPT", null, "SELL", "TRAIL", 2, "PreSubmitted")],
+                  [new IbkrOpenOrder(1001, "TSLA", "OPT", null, "SELL", "TRAIL", 2, "PreSubmitted", null, null)],
                   false));
         broker.Setup(b => b.IsKnownOrder(1001)).Returns(true);
 
@@ -434,7 +434,7 @@ public class StartupReconciliationServiceTests
 
         broker.Setup(b => b.GetAllOpenOrdersAsync(It.IsAny<CancellationToken>()))
               .ReturnsAsync(new OrdersSnapshot(
-                  [new IbkrOpenOrder(9999, "AMD", "STK", null, "BUY", "MKT", 10, "Submitted")],
+                  [new IbkrOpenOrder(9999, "AMD", "STK", null, "BUY", "MKT", 10, "Submitted", null, null)],
                   false));
         broker.Setup(b => b.IsKnownOrder(9999)).Returns(false);
 

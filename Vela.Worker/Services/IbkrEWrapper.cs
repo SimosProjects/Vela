@@ -36,6 +36,12 @@ public class IbkrEWrapper : EWrapper
     private readonly List<IbkrOpenOrder> _openOrdersBuffer = new();
     private TaskCompletionSource<List<IbkrOpenOrder>>? _openOrdersTcs;
 
+    // Batch account summary snapshot, keyed by reqId, accumulates tags until accountSummaryEnd fires
+    private readonly Dictionary<int, Dictionary<string, string>> _accountSnapshotBuffers = new();
+    private readonly Dictionary<int, TaskCompletionSource<Dictionary<string, string>>> _accountSnapshotCallbacks = new();
+    // Single-shot PnL callbacks keyed by reqId, resolved on the first pnl() callback
+    private readonly Dictionary<int, TaskCompletionSource<double>> _pnlCallbacks = new();
+
     private Action? _onConnectionClosed;
     private readonly Lock _lock = new();
 
@@ -114,6 +120,13 @@ public class IbkrEWrapper : EWrapper
             {
                 tcs.TrySetResult(value);
                 _accountCallbacks.Remove(reqId);
+            }
+
+            // Accumulate into batch buffer (used by GetAccountSnapshotAsync)
+            if (tag is "NetLiquidation" or "TotalCashValue" or "BuyingPower" &&
+                _accountSnapshotBuffers.TryGetValue(reqId, out var buffer))
+            {
+                buffer[tag] = value;
             }
         }
     }
@@ -228,14 +241,16 @@ public class IbkrEWrapper : EWrapper
             if (_openOrdersTcs is not null)
             {
                 _openOrdersBuffer.Add(new IbkrOpenOrder(
-                    OrderId:     orderId,
-                    Symbol:      contract.Symbol,
-                    SecType:     contract.SecType,
+                    OrderId: orderId,
+                    Symbol: contract.Symbol,
+                    SecType: contract.SecType,
                     LocalSymbol: contract.LocalSymbol,
-                    Action:      order.Action,
-                    OrderType:   order.OrderType,
-                    Quantity:    order.TotalQuantity,
-                    Status:      orderState.Status));
+                    Action: order.Action,
+                    OrderType: order.OrderType,
+                    Quantity: order.TotalQuantity,
+                    Status: orderState.Status,
+                    AuxPrice: order.AuxPrice == double.MaxValue ? null : order.AuxPrice,
+                    LmtPrice: order.LmtPrice == double.MaxValue ? null : order.LmtPrice));
             }
         }
     }
@@ -465,6 +480,53 @@ public class IbkrEWrapper : EWrapper
     }
 
     /// <summary>
+    /// Registers a batch account summary request. NetLiquidation, TotalCashValue, and
+    /// BuyingPower tags accumulate until accountSummaryEnd fires. Used by GetAccountSnapshotAsync.
+    /// </summary>
+    public TaskCompletionSource<Dictionary<string, string>> RegisterAccountSnapshotCallback(int reqId)
+    {
+        var tcs = new TaskCompletionSource<Dictionary<string, string>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_lock)
+        {
+            _accountSnapshotBuffers[reqId] = new Dictionary<string, string>();
+            _accountSnapshotCallbacks[reqId] = tcs;
+        }
+        return tcs;
+    }
+
+    /// <summary>
+    /// Removes the batch account snapshot callback that timed out before accountSummaryEnd fired.
+    /// </summary>
+    public void UnregisterAccountSnapshotCallback(int reqId)
+    {
+        lock (_lock)
+        {
+            _accountSnapshotCallbacks.Remove(reqId);
+            _accountSnapshotBuffers.Remove(reqId);
+        }
+    }
+
+    /// <summary>
+    /// Registers a single-shot PnL callback, resolved on the first pnl() callback for this reqId.
+    /// Used by GetAccountSnapshotAsync to fetch TodayPnL.
+    /// </summary>
+    public TaskCompletionSource<double> RegisterPnLCallback(int reqId)
+    {
+        var tcs = new TaskCompletionSource<double>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_lock) { _pnlCallbacks[reqId] = tcs; }
+        return tcs;
+    }
+
+    /// <summary>
+    /// Removes a PnL callback that timed out before Gateway responded.
+    /// </summary>
+    public void UnregisterPnLCallback(int reqId)
+    {
+        lock (_lock) { _pnlCallbacks.Remove(reqId); }
+    }
+
+    /// <summary>
     /// Returns a task that completes when Gateway sends the first nextValidId callback.
     /// </summary>
     public Task<int> WaitForNextValidIdAsync() => _nextValidIdReady.Task;
@@ -548,7 +610,22 @@ public class IbkrEWrapper : EWrapper
             // and returns Rejected instead of Pending. That keeps VerifyPendingFillAsync from
             // recording a ghost for an order that was held and never actually filled. An order
             // that does fill once the locate completes resolves normally and ignores this.
-            lock (_lock) { _rejectionReasons[id] = errorMsg; }
+            lock (_lock)
+            {
+                _rejectionReasons[id] = errorMsg;
+
+                // Also resolve any pending stop rejection check. A trail/target stop order that
+                // is held on a 404 will not resolve _stopRejectionCallbacks any other way, so
+                // PlaceTrailWithFallbackAsync and PlaceTrailWithTargetAsync would otherwise treat
+                // the 600ms silence as acceptance and register a stop that was never actually
+                // live at IBKR. Treating an unresolved 404 as a rejection for this check trades
+                // an extra fallback attempt for never leaving a position silently unprotected.
+                if (_stopRejectionCallbacks.TryGetValue(id, out var stopRejTcs))
+                {
+                    stopRejTcs.TrySetResult(errorMsg);
+                    _stopRejectionCallbacks.Remove(id);
+                }
+            }
 
             _logger.LogWarning(
                 "IBKR Order held while locating [404] Id {Id} — {Message}", id, errorMsg);
@@ -700,7 +777,19 @@ public class IbkrEWrapper : EWrapper
     public void tickOptionComputation(int tickerId, int field, double impliedVolatility, double delta, double optPrice, double pvDividend, double gamma, double vega, double theta, double undPrice) { }
     public void tickSnapshotEnd(int tickerId) { }
     public void currentTime(long time) { }
-    public void accountSummaryEnd(int reqId) { }
+    public void accountSummaryEnd(int reqId)
+    {
+        lock (_lock)
+        {
+            if (_accountSnapshotCallbacks.TryGetValue(reqId, out var tcs) &&
+                _accountSnapshotBuffers.TryGetValue(reqId, out var buffer))
+            {
+                tcs.TrySetResult(new Dictionary<string, string>(buffer));
+                _accountSnapshotCallbacks.Remove(reqId);
+                _accountSnapshotBuffers.Remove(reqId);
+            }
+        }
+    }
     public void bondContractDetails(int reqId, ContractDetails contract) { }
     public void updateAccountValue(string key, string value, string currency, string accountName) { }
     public void updatePortfolio(Contract contract, double position, double marketPrice, double marketValue, double averageCost, double unrealizedPNL, double realizedPNL, string accountName) { }
@@ -749,7 +838,17 @@ public class IbkrEWrapper : EWrapper
     public void rerouteMktDataReq(int reqId, int conId, string exchange) { }
     public void rerouteMktDepthReq(int reqId, int conId, string exchange) { }
     public void marketRule(int marketRuleId, PriceIncrement[] priceIncrements) { }
-    public void pnl(int reqId, double dailyPnL, double unrealizedPnL, double realizedPnL) { }
+    public void pnl(int reqId, double dailyPnL, double unrealizedPnL, double realizedPnL)
+    {
+        lock (_lock)
+        {
+            if (_pnlCallbacks.TryGetValue(reqId, out var tcs))
+            {
+                tcs.TrySetResult(dailyPnL);
+                _pnlCallbacks.Remove(reqId);
+            }
+        }
+    }
     public void pnlSingle(int reqId, int pos, double dailyPnL, double unrealizedPnL, double realizedPnL, double value) { }
     public void historicalTicks(int reqId, HistoricalTick[] ticks, bool done) { }
     public void historicalTicksBidAsk(int reqId, HistoricalTickBidAsk[] ticks, bool done) { }
