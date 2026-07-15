@@ -140,6 +140,26 @@ public class NullBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// No-op protective stop placement for testing. Always returns null.
+    /// </summary>
+    public Task<string?> PlaceProtectiveStopAsync(
+        string symbol,
+        TradeType tradeType,
+        string? optionsContractSymbol,
+        string? direction,
+        decimal? strike,
+        string? expiration,
+        int quantity,
+        double trailPercent,
+        CancellationToken ct = default)
+    {
+        _logger.LogDebug(
+            "[NullBroker] PlaceProtectiveStop {Symbol} — trail: {Trail}% (simulated, returns null)",
+            optionsContractSymbol ?? symbol, trailPercent);
+        return Task.FromResult<string?>(null);
+    }
+
+    /// <summary>
     /// No-op order cancellation for testing.
     /// </summary>
     public Task CancelOrderAsync(int orderId, CancellationToken ct = default) =>

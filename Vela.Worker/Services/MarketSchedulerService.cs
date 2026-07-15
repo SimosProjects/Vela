@@ -1,5 +1,6 @@
 using Vela.Worker.Configuration;
 using Vela.Worker.Engine;
+using Vela.Worker.Formatting;
 using Vela.Worker.Models;
 
 namespace Vela.Worker.Services;
@@ -482,7 +483,7 @@ public class MarketSchedulerService : BackgroundService
             return;
         }
 
-        var message = DiscordNotificationService.BuildSnapshotMessage(
+        var message = IbSnapshotFormatter.BuildSnapshotMessage(
             account, positions.Positions, orders.Orders);
 
         await _discord.NotifyIbSnapshotAsync(message, ct);

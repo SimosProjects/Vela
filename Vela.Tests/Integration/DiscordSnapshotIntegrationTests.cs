@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Vela.Worker.Formatting;
 using Vela.Worker.Services;
 
 namespace Vela.Tests.Integration;
@@ -40,7 +41,7 @@ public class DiscordSnapshotIntegrationTests
             new(2, "NVDA", "STK", null, "SELL", "LMT",   100, "Submitted", null,   188.00),
         };
 
-        var message = DiscordNotificationService.BuildSnapshotMessage(account, positions, orders);
+        var message = IbSnapshotFormatter.BuildSnapshotMessage(account, positions, orders);
 
         await discord.NotifyIbSnapshotAsync(message);
     }

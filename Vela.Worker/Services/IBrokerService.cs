@@ -98,6 +98,24 @@ public interface IBrokerService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Places a standalone TRAIL stop (SELL, no OCA group, no ParentId) on an existing IBKR
+    /// position that currently has no resting protection. Unlike the entry-time trail helpers,
+    /// this takes contract primitives directly rather than a TradeOrder, the caller is acting
+    /// on a position discovered independently rather than a fresh entry.
+    /// Returns the order ID on success, or null if IBKR rejects it within the detection window.
+    /// </summary>
+    Task<string?> PlaceProtectiveStopAsync(
+        string symbol,
+        TradeType tradeType,
+        string? optionsContractSymbol,
+        string? direction,
+        decimal? strike,
+        string? expiration,
+        int quantity,
+        double trailPercent,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Returns the net liquidation value of the account.
     /// Used by TradeGuard for exposure checks before placing orders.
     /// </summary>
