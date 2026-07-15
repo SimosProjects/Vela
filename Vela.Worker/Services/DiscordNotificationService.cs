@@ -103,7 +103,15 @@ public class DiscordNotificationService
             };
 
             var payload = new { embeds = new[] { embed } };
-            await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
+            var response = await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger.LogWarning(
+                    "Order filled Discord POST failed: {StatusCode} — {Body}",
+                    response.StatusCode, body);
+            }
         }
         catch (Exception ex)
         {
@@ -146,7 +154,15 @@ public class DiscordNotificationService
             };
 
             var payload = new { embeds = new[] { embed } };
-            await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
+            var response = await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger.LogWarning(
+                    "Position closed Discord POST failed: {StatusCode} — {Body}",
+                    response.StatusCode, body);
+            }
         }
         catch (Exception ex)
         {
@@ -193,7 +209,15 @@ public class DiscordNotificationService
             };
 
             var payload = new { embeds = new[] { embed } };
-            await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
+            var response = await _httpClient.PostAsJsonAsync(_executionWebhookUrl, payload, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger.LogWarning(
+                    "Partial close Discord POST failed: {StatusCode} — {Body}",
+                    response.StatusCode, body);
+            }
         }
         catch (Exception ex)
         {
@@ -225,7 +249,15 @@ public class DiscordNotificationService
             };
 
             var payload = new { embeds = new[] { embed } };
-            await _httpClient.PostAsJsonAsync(_criticalWebhookUrl, payload, cancellationToken);
+            var response = await _httpClient.PostAsJsonAsync(_criticalWebhookUrl, payload, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger.LogWarning(
+                    "Critical Discord POST failed: {StatusCode} — {Body}",
+                    response.StatusCode, body);
+            }
         }
         catch (Exception ex)
         {
@@ -244,7 +276,15 @@ public class DiscordNotificationService
         try
         {
             var payload = new { content = $"```\n{content}\n```" };
-            await _httpClient.PostAsJsonAsync(_summaryWebhookUrl, payload, cancellationToken);
+            var response = await _httpClient.PostAsJsonAsync(_summaryWebhookUrl, payload, cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger.LogWarning(
+                    "IB snapshot Discord POST failed: {StatusCode} — {Body}",
+                    response.StatusCode, body);
+            }
         }
         catch (Exception ex)
         {

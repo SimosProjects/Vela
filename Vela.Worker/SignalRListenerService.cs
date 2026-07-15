@@ -338,10 +338,16 @@ public class SignalRListenerService : BackgroundService
             // HandleExitAsync's TryMarkClosing prevents actual double-closes at the broker level.
             if (normalized.Side?.ToLower() is "stc" or "btc")
             {
-                _logger.LogInformation(
-                    "SignalR exit alert [{Category}] {Symbol} by {Trader} — ID previously seen as entry, routing to HandleExitAsync.",
-                    classification.Category, normalized.Symbol, normalized.UserName);
-                await _execution.HandleExitAsync(normalized, stoppingToken);
+                var matched = await _execution.HandleExitAsync(normalized, stoppingToken);
+
+                if (matched)
+                    _logger.LogInformation(
+                        "SignalR exit alert [{Category}] {Symbol} by {Trader} — matched open position, closing.",
+                        classification.Category, normalized.Symbol, normalized.UserName);
+                else
+                    _logger.LogDebug(
+                        "SignalR exit alert [{Category}] {Symbol} by {Trader} — no matching open position, skipping.",
+                        classification.Category, normalized.Symbol, normalized.UserName);
             }
             else
             {
