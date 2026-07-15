@@ -116,6 +116,29 @@ public interface IBrokerService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Cancels an existing standalone target order and replaces both it and the current
+    /// unprotected position with a genuine OCA trail+target pair, placed atomically together.
+    /// Unlike the entry-time PlaceTrailWithTargetAsync, this does NOT fall back to a bare
+    /// trail-only stop if the OCA placement is rejected, since existingTargetOrderId has
+    /// already been cancelled, silently falling back would leave the position protected by
+    /// an unlinked stop with its original target gone and nothing coordinating them.
+    /// Returns (null, null) on rejection so the caller can report it and require manual
+    /// placement, rather than silently degrading protection.
+    /// </summary>
+    Task<(string? StopId, string? TargetId)> PlaceProtectiveStopWithTargetAsync(
+        string symbol,
+        TradeType tradeType,
+        string? optionsContractSymbol,
+        string? direction,
+        decimal? strike,
+        string? expiration,
+        int quantity,
+        double trailPercent,
+        string existingTargetOrderId,
+        decimal targetPrice,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Returns the net liquidation value of the account.
     /// Used by TradeGuard for exposure checks before placing orders.
     /// </summary>

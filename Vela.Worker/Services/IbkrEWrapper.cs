@@ -650,6 +650,31 @@ public class IbkrEWrapper : EWrapper
             _logger.LogWarning(
                 "IBKR Order held while locating [404] Id {Id} — {Message}", id, errorMsg);
         }
+        else if (errorCode == 103)
+        {
+            // Duplicate order id — an unseeded or colliding order ID counter is a real
+            // rejection, not noise, and must never be silently swallowed here. Every caller
+            // of _stopRejectionCallbacks (PlaceTrailWithFallbackAsync, PlaceTrailWithTargetAsync,
+            // PlaceProtectiveStopAsync) treats "no rejection detected within the detection
+            // window" as acceptance. Without resolving the TCS here, a 103 would fall through
+            // to the catch-all branch below (log only), the detection window would expire
+            // unresolved, and the caller would report the stop as placed when it never was.
+            lock (_lock)
+            {
+                _rejectionReasons[id] = errorMsg;
+
+                if (_stopRejectionCallbacks.TryGetValue(id, out var stopRejTcs))
+                {
+                    stopRejTcs.TrySetResult(errorMsg);
+                    _stopRejectionCallbacks.Remove(id);
+                }
+            }
+
+            _logger.LogWarning(
+                "IBKR Duplicate order id [103] Id {Id} — order will not execute. " +
+                "If this is a target or stop order, the position may be unprotected. Reason: {Message}",
+                id, errorMsg);
+        }
         else if (errorCode == 399)
         {
             // Advisory order timing message, not an execution failure

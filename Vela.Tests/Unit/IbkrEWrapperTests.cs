@@ -57,4 +57,24 @@ public class IbkrEWrapperTests
         var mapped = Assert.Single(orders);
         Assert.Equal(200.00, mapped.AuxPrice);
     }
+
+    // PlaceProtectiveStopAsync (and PlaceTrailWithFallbackAsync/PlaceTrailWithTargetAsync)
+    // can't be exercised end-to-end here — EnsureConnected() requires a real live socket to
+    // Gateway, same reason IbkrBrokerServiceTests don't exist and IbkrConnectionTests are
+    // gated behind SKIP_IBKR_TESTS. This instead verifies the actual mechanism the 103 fix
+    // touches: error() must resolve a registered _stopRejectionCallbacks entry for code 103,
+    // exactly as it already does for 201 and 404, so callers waiting on that TCS see the
+    // rejection within their detection window instead of timing out into a false "accepted".
+    [Fact]
+    public async Task Error_DuplicateOrderId103_ResolvesStopRejectionCallback()
+    {
+        var wrapper = new IbkrEWrapper(NullLogger<IbkrEWrapper>.Instance);
+        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        wrapper.RegisterStopRejectionCallback(42, tcs);
+
+        wrapper.error(42, 103, "Duplicate order id");
+
+        Assert.True(tcs.Task.IsCompleted);
+        Assert.Equal("Duplicate order id", await tcs.Task);
+    }
 }
