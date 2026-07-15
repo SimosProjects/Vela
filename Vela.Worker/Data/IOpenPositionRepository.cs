@@ -18,6 +18,13 @@ public interface IOpenPositionRepository
     /// <summary>Updates the quantity of an open position after a partial close.</summary>
     Task UpdateQuantityAsync(string orderId, int newQuantity, CancellationToken ct = default);
 
+    /// <summary>Updates the stop order ID after a protective stop is placed on a previously unprotected position.</summary>
+    Task UpdateStopOrderIdAsync(string orderId, string newStopOrderId, CancellationToken ct = default);
+
+    /// <summary>Updates both the stop and target order IDs after a protective OCA trail+target pair is placed on a previously unprotected position.</summary>
+    Task UpdateStopAndTargetOrderIdsAsync(
+        string orderId, string newStopOrderId, string newTargetOrderId, CancellationToken ct = default);
+
     /// <summary>Finds an open position by symbol and trader username.</summary>
     Task<OpenPosition?> GetBySymbolAndUserAsync(
         string symbol, string userName, CancellationToken ct = default);

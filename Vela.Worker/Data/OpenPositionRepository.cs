@@ -84,6 +84,43 @@ public class OpenPositionRepository : IOpenPositionRepository
     }
 
     /// <inheritdoc/>
+    public async Task UpdateStopOrderIdAsync(string orderId, string newStopOrderId, CancellationToken ct = default)
+    {
+        try
+        {
+            await _db.OpenPositions
+                .Where(p => p.OrderId == orderId)
+                .ExecuteUpdateAsync(s => s.SetProperty(p => p.StopOrderId, newStopOrderId), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to update stop order ID for open position OrderId: {OrderId}", orderId);
+            throw;
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task UpdateStopAndTargetOrderIdsAsync(
+        string orderId, string newStopOrderId, string newTargetOrderId, CancellationToken ct = default)
+    {
+        try
+        {
+            await _db.OpenPositions
+                .Where(p => p.OrderId == orderId)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(p => p.StopOrderId, newStopOrderId)
+                    .SetProperty(p => p.TargetOrderId, newTargetOrderId), ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to update stop and target order IDs for open position OrderId: {OrderId}", orderId);
+            throw;
+        }
+    }
+
+    /// <inheritdoc/>
     public async Task<OpenPosition?> GetBySymbolAndUserAsync(
         string symbol, string userName, CancellationToken ct = default)
     {

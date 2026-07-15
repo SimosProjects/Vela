@@ -1203,6 +1203,24 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// Seeds the internal reqId counter from Gateway's own advancing nextValidId, offset well
+    /// clear of anything SyncOrderId or a normal session would use.
+    /// </summary>
+    public void SyncReqId(int gatewayNextValidId)
+    {
+        // reqId and orderId are separate ID spaces in the IBKR API, but both exist to
+        // guarantee freshness against whatever Gateway may still consider active from a
+        // prior session. Guardian reconnects with a fresh instance (and _nextReqId reset
+        // to its default) on every run, which deterministically requested the same low
+        // reqIds every time — observed colliding with a dangling PnL subscription from
+        // the previous run (errors 102/10185). Seeding from Gateway's own advancing
+        // counter, offset well clear of anything SyncOrderId or a normal session would
+        // use, breaks the determinism regardless of the exact server-side mechanism.
+        var target = gatewayNextValidId + 100_000;
+        Interlocked.Exchange(ref _nextReqId, target);
+    }
+
+    /// <summary>
     /// Fetches daily OHLCV bars for a stock symbol via Gateway's reqHistoricalData.
     /// Used by MarketConditionsLogger to compute moving averages and ADX.
     /// Requests barCount + 28 extra bars so ADX(14) has enough warmup data.
@@ -1378,6 +1396,110 @@ public class IbkrBrokerService : IBrokerService
         }
 
         return stopId.ToString();
+    }
+
+    public async Task<(string? StopId, string? TargetId)> PlaceProtectiveStopWithTargetAsync(
+        string symbol,
+        TradeType tradeType,
+        string? optionsContractSymbol,
+        string? direction,
+        decimal? strike,
+        string? expiration,
+        int quantity,
+        double trailPercent,
+        string existingTargetOrderId,
+        decimal targetPrice,
+        CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return (null, null);
+
+        if (!int.TryParse(existingTargetOrderId, out var existingTargetId))
+        {
+            _logger.LogWarning(
+                "PlaceProtectiveStopWithTargetAsync — cannot parse existing target order ID: {Id}",
+                existingTargetOrderId);
+            return (null, null);
+        }
+
+        // Confirmed cancel via the same orderStatus callback mechanism used for fill
+        // confirmation, rather than a fixed delay — a fixed delay only hopes IBKR processed
+        // the cancel in time, this waits for IBKR to actually say so before the new pair
+        // is placed.
+        var cancelTcs = _connection.Wrapper.RegisterOrderCallback(existingTargetId);
+        _connection.Client.cancelOrder(existingTargetId);
+
+        try
+        {
+            using var cancelCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cancelCts.CancelAfter(TimeSpan.FromSeconds(5));
+            var result = await cancelTcs.Task.WaitAsync(cancelCts.Token);
+
+            if (result.Status is not ("Cancelled" or "Inactive"))
+            {
+                _logger.LogError(
+                    "Cancel of existing target {OrderId} for {Symbol} returned unexpected status " +
+                    "{Status} — aborting OCA re-pair, not placing anything.",
+                    existingTargetId, symbol, result.Status);
+                return (null, null);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _connection.Wrapper.UnregisterOrderCallback(existingTargetId);
+            _logger.LogError(
+                "Cancel of existing target {OrderId} for {Symbol} was not confirmed within 5s — " +
+                "aborting OCA re-pair, not placing anything. The original target order may still be live.",
+                existingTargetId, symbol);
+            return (null, null);
+        }
+
+        var contract = BuildContract(symbol, tradeType, direction, strike, expiration);
+        var trailStopId = GetNextOrderId();
+        var targetOrderId = GetNextOrderId();
+        var ocaGroup = $"OCA_{trailStopId}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+
+        var trailOrder = BuildOcaTrailOrder(trailStopId, quantity, trailPercent, ocaGroup);
+        trailOrder.Transmit = false; // held until target order triggers transmission
+
+        var targetOrder = BuildOcaLimitOrder(targetOrderId, quantity, targetPrice, ocaGroup);
+
+        var rejectionTcs = new TaskCompletionSource<string?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _connection.Wrapper.RegisterStopRejectionCallback(trailStopId, rejectionTcs);
+
+        _connection.Client.placeOrder(trailStopId, contract, trailOrder);
+        _connection.Client.placeOrder(targetOrderId, contract, targetOrder);
+
+        string? rejection = null;
+        try
+        {
+            using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            checkCts.CancelAfter(TimeSpan.FromMilliseconds(600));
+            rejection = await rejectionTcs.Task.WaitAsync(checkCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _connection.Wrapper.UnregisterStopRejectionCallback(trailStopId);
+        }
+
+        if (rejection is null)
+            return (trailStopId.ToString(), targetOrderId.ToString());
+
+        // Deliberately no fallback to trail-only here, unlike PlaceTrailWithTargetAsync
+        // (the fresh-entry path), which falls back to a bare trail stop on OCA rejection —
+        // correct there because no pre-existing target order is ever cancelled first. Here
+        // one was (existingTargetOrderId, already cancelled above), so silently degrading to
+        // trail-only would leave the position protected by an unlinked stop with its
+        // original target gone and nothing coordinating them — the exact dangling-order
+        // state this method exists to eliminate. Cancel the rejected attempt and report the
+        // failure precisely instead of masking it.
+        _connection.Client.cancelOrder(targetOrderId);
+        _logger.LogError(
+            "Protective OCA trail+target rejected for {Symbol} — position remains unprotected " +
+            "and the previous target order was already cancelled. Reason: {Reason}",
+            optionsContractSymbol ?? symbol, rejection);
+
+        return (null, null);
     }
 
     // -- Helpers --
