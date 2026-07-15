@@ -1,3 +1,4 @@
+using Vela.Worker.Formatting;
 using Vela.Worker.Services;
 
 namespace Vela.Tests.Unit;
@@ -27,7 +28,7 @@ public class DiscordNotificationServiceTests
             // AAPL intentionally has no matching order at all
         };
 
-        var message = DiscordNotificationService.BuildSnapshotMessage(account, positions, orders);
+        var message = IbSnapshotFormatter.BuildSnapshotMessage(account, positions, orders);
 
         message.Should().Contain("Net Liquidation: $127,843");
         message.Should().Contain("Today's P&L: +$623");

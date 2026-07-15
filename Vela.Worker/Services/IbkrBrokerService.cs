@@ -1326,6 +1326,60 @@ public class IbkrBrokerService : IBrokerService
         return replacedStopId;
     }
 
+    /// <summary>
+    /// Places a standalone TRAIL stop (SELL, no OCA group, no ParentId) on an existing IBKR
+    /// position that currently has no resting protection. Contract primitives are taken
+    /// directly rather than a TradeOrder, the caller is acting on a position discovered
+    /// independently rather than a fresh entry, so no exec-detail fill callbacks are
+    /// registered, there is no entryOrderId to associate a fill with in this context.
+    /// Returns the order ID on success, or null if the broker is unavailable or IBKR
+    /// rejects the order within the standard 600ms rejection detection window.
+    /// </summary>
+    public async Task<string?> PlaceProtectiveStopAsync(
+        string symbol,
+        TradeType tradeType,
+        string? optionsContractSymbol,
+        string? direction,
+        decimal? strike,
+        string? expiration,
+        int quantity,
+        double trailPercent,
+        CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return null;
+
+        var contract = BuildContract(symbol, tradeType, direction, strike, expiration);
+        var stopId = GetNextOrderId();
+        var order = BuildStandaloneTrailOrder(stopId, quantity, trailPercent);
+
+        var rejectionTcs = new TaskCompletionSource<string?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _connection.Wrapper.RegisterStopRejectionCallback(stopId, rejectionTcs);
+        _connection.Client.placeOrder(stopId, contract, order);
+
+        string? rejection = null;
+        try
+        {
+            using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            checkCts.CancelAfter(TimeSpan.FromMilliseconds(600));
+            rejection = await rejectionTcs.Task.WaitAsync(checkCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _connection.Wrapper.UnregisterStopRejectionCallback(stopId);
+        }
+
+        if (rejection is not null)
+        {
+            _logger.LogError(
+                "Protective stop rejected for {Symbol} — position remains unprotected. Reason: {Reason}",
+                optionsContractSymbol ?? symbol, rejection);
+            return null;
+        }
+
+        return stopId.ToString();
+    }
+
     // -- Helpers --
 
     // Returns true for stock entries with a computed price target above entry price.
@@ -1408,21 +1462,29 @@ public class IbkrBrokerService : IBrokerService
             : 0.05;
     }
 
-    private static Contract BuildContract(TradeOrder order)
+    private static Contract BuildContract(TradeOrder order) =>
+        BuildContract(order.Symbol, order.TradeType, order.Direction, order.Strike, order.Expiration);
+
+    private static Contract BuildContract(
+        string symbol,
+        TradeType tradeType,
+        string? direction,
+        decimal? strike,
+        string? expiration)
     {
-        if (order.TradeType == TradeType.Options)
+        if (tradeType == TradeType.Options)
         {
             return new Contract
             {
-                Symbol = order.Symbol,
+                Symbol = symbol,
                 SecType = "OPT",
                 Exchange = "SMART",
                 Currency = "USD",
-                Right = order.Direction?.ToUpper() == "CALL" ? "C" : "P",
-                Strike = (double)(order.Strike ?? 0),
+                Right = direction?.ToUpper() == "CALL" ? "C" : "P",
+                Strike = (double)(strike ?? 0),
                 LastTradeDateOrContractMonth =
-                    order.Expiration is not null
-                        ? DateTimeOffset.Parse(order.Expiration).ToString("yyyyMMdd")
+                    expiration is not null
+                        ? DateTimeOffset.Parse(expiration).ToString("yyyyMMdd")
                         : string.Empty,
                 Multiplier = "100",
             };
@@ -1430,7 +1492,7 @@ public class IbkrBrokerService : IBrokerService
 
         return new Contract
         {
-            Symbol = order.Symbol,
+            Symbol = symbol,
             SecType = "STK",
             Exchange = "SMART",
             Currency = "USD",
