@@ -21,6 +21,11 @@ public class IbkrBrokerService : IBrokerService
     private readonly Dictionary<int, (string EntryOrderId, TradeOutcome Outcome)> _stopOrderMap = new();
     private readonly Lock _stopMapLock = new();
 
+    // Serializes reqPositions()/cancelPositions() calls. IB API's reqPositions() has no reqId,
+    // it is a single global subscription shared by every caller on this connection, so
+    // concurrent callers must queue rather than interleave on the same position() stream.
+    private readonly SemaphoreSlim _positionRequestLock = new(1, 1);
+
     // Subscribed by PositionMonitorService to handle broker-side stop and target fills
     private Action<string, decimal, TradeOutcome>? _brokerFillHandler;
 
@@ -155,31 +160,39 @@ public class IbkrBrokerService : IBrokerService
             ? $"{trade.Symbol}::{trade.OptionsContract}"
             : $"{trade.Symbol}::STK";
 
-        var tcs = _connection.Wrapper.RegisterPositionCallback(key);
-        _connection.Client.reqPositions();
-
+        await _positionRequestLock.WaitAsync(ct);
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(_options.TimeoutMs);
-            var (price, qty) = await tcs.Task.WaitAsync(cts.Token);
+            var tcs = _connection.Wrapper.RegisterPositionCallback(key);
+            _connection.Client.reqPositions();
 
-            _logger.LogDebug(
-                "IBKR position for {Symbol}: avgCost ${Price:F2} qty {Qty}",
-                trade.Symbol, price, qty);
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(_options.TimeoutMs);
+                var (price, qty) = await tcs.Task.WaitAsync(cts.Token);
 
-            return (price, qty);
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogWarning(
-                "IBKR GetCurrentPositionPrice timed out for {Symbol}.", trade.Symbol);
-            _connection.Wrapper.UnregisterPositionCallback(key);
-            return (0m, 0);
+                _logger.LogDebug(
+                    "IBKR position for {Symbol}: avgCost ${Price:F2} qty {Qty}",
+                    trade.Symbol, price, qty);
+
+                return (price, qty);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning(
+                    "IBKR GetCurrentPositionPrice timed out for {Symbol}.", trade.Symbol);
+                _connection.Wrapper.UnregisterPositionCallback(key);
+                return (0m, 0);
+            }
+            finally
+            {
+                _connection.Client.cancelPositions();
+            }
         }
         finally
         {
-            _connection.Client.cancelPositions();
+            _positionRequestLock.Release();
         }
     }
 
@@ -187,29 +200,49 @@ public class IbkrBrokerService : IBrokerService
     {
         if (!EnsureConnected()) return new PositionsSnapshot([], false);
 
-        var tcs = _connection.Wrapper.RegisterAllPositionsCallback();
-        _connection.Client.reqPositions();
+        // NOTE: IB API's reqPositions() takes no reqId, it is a single global un-tagged
+        // subscription shared by every caller on this connection. TraceId below is a
+        // locally generated correlation id for log tracing only, it is never sent to IBKR.
+        var traceId = Guid.NewGuid().ToString("N")[..8];
 
+        await _positionRequestLock.WaitAsync(ct);
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(60));
-            var positions = await tcs.Task.WaitAsync(cts.Token);
-
             _logger.LogDebug(
-                "IBKR GetAllPositions — {Count} positions received", positions.Count);
+                "IBKR GetAllPositionsAsync — issuing reqPositions() [TraceId {TraceId}]", traceId);
 
-            return new PositionsSnapshot(positions, false);
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogWarning("IBKR GetAllPositions timed out.");
-            _connection.Wrapper.UnregisterAllPositionsCallback();
-            return new PositionsSnapshot([], true);
+            var tcs = _connection.Wrapper.RegisterAllPositionsCallback();
+            _connection.Client.reqPositions();
+
+            try
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(TimeSpan.FromSeconds(60));
+                var positions = await tcs.Task.WaitAsync(cts.Token);
+
+                _logger.LogDebug(
+                    "IBKR GetAllPositionsAsync — TCS resolved [TraceId {TraceId}] with {Count} positions.",
+                    traceId, positions.Count);
+
+                _logger.LogDebug(
+                    "IBKR GetAllPositions — {Count} positions received", positions.Count);
+
+                return new PositionsSnapshot(positions, false);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("IBKR GetAllPositions timed out.");
+                _connection.Wrapper.UnregisterAllPositionsCallback();
+                return new PositionsSnapshot([], true);
+            }
+            finally
+            {
+                _connection.Client.cancelPositions();
+            }
         }
         finally
         {
-            _connection.Client.cancelPositions();
+            _positionRequestLock.Release();
         }
     }
 

@@ -166,11 +166,16 @@ public class AlertPollingService : BackgroundService
                     var normalized = _normalizer.Normalize(rawExit);
                     var riskResult = _riskEngine.Evaluate(normalized);
 
-                    _logger.LogInformation(
-                        "REST exit alert [{Side}] {Symbol} by {Trader} — routing to HandleExitAsync",
-                        rawExit.Side, rawExit.Symbol, rawExit.UserName);
+                    var matched = await _execution.HandleExitAsync(normalized, stoppingToken);
 
-                    await _execution.HandleExitAsync(normalized, stoppingToken);
+                    if (matched)
+                        _logger.LogInformation(
+                            "REST exit alert [{Side}] {Symbol} by {Trader} — matched open position, closing.",
+                            rawExit.Side, rawExit.Symbol, rawExit.UserName);
+                    else
+                        _logger.LogDebug(
+                            "REST exit alert [{Side}] {Symbol} by {Trader} — no matching open position, skipping.",
+                            rawExit.Side, rawExit.Symbol, rawExit.UserName);
 
                     // Only save if genuinely new — skip if the ID already exists as a BTO row
                     // to avoid a primary key conflict or unintentionally overwriting entry data.

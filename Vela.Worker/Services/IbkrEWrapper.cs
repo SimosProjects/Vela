@@ -39,8 +39,11 @@ public class IbkrEWrapper : EWrapper
     // Batch account summary snapshot, keyed by reqId, accumulates tags until accountSummaryEnd fires
     private readonly Dictionary<int, Dictionary<string, string>> _accountSnapshotBuffers = new();
     private readonly Dictionary<int, TaskCompletionSource<Dictionary<string, string>>> _accountSnapshotCallbacks = new();
-    // Single-shot PnL callbacks keyed by reqId, resolved on the first pnl() callback
+    // Single-shot PnL callbacks keyed by reqId, resolved on the second pnl() callback.
+    // IB often sends a stale/zero value on the very first callback right after reqPnL
+    // subscribes, before the account's PnL has actually been computed.
     private readonly Dictionary<int, TaskCompletionSource<double>> _pnlCallbacks = new();
+    private readonly HashSet<int> _pnlFirstCallbackSeen = new();
 
     private Action? _onConnectionClosed;
     private readonly Lock _lock = new();
@@ -140,6 +143,10 @@ public class IbkrEWrapper : EWrapper
         _logger.LogDebug(
             "IBKR Position {Symbol} qty: {Pos} avgCost: {Cost}", contract.Symbol, pos, avgCost);
 
+        _logger.LogDebug(
+            "IBKR position() raw callback — Symbol: {Symbol} SecType: {SecType} Qty: {Pos} AvgCost: {Cost}",
+            contract.Symbol, contract.SecType, pos, avgCost);
+
         lock (_lock)
         {
             // Resolve per-symbol callback (used by GetCurrentPositionPriceAsync)
@@ -168,6 +175,12 @@ public class IbkrEWrapper : EWrapper
         {
             if (_allPositionsTcs is not null)
             {
+                _logger.LogDebug(
+                    "IBKR positionEnd() — resolving TCS with buffer contents ({Count}): {Buffer}",
+                    _allPositionsBuffer.Count,
+                    string.Join(", ", _allPositionsBuffer.Select(p =>
+                        $"{p.Symbol}({p.SecType}) qty={p.Quantity} avgCost={p.AvgCost}")));
+
                 _allPositionsTcs.TrySetResult(new List<IbkrPosition>(_allPositionsBuffer));
                 _allPositionsBuffer.Clear();
                 _allPositionsTcs = null;
@@ -249,7 +262,9 @@ public class IbkrEWrapper : EWrapper
                     OrderType: order.OrderType,
                     Quantity: order.TotalQuantity,
                     Status: orderState.Status,
-                    AuxPrice: order.AuxPrice == double.MaxValue ? null : order.AuxPrice,
+                    AuxPrice: order.OrderType.Contains("TRAIL", StringComparison.OrdinalIgnoreCase)
+                        ? (order.TrailStopPrice == double.MaxValue ? null : order.TrailStopPrice)
+                        : (order.AuxPrice == double.MaxValue ? null : order.AuxPrice),
                     LmtPrice: order.LmtPrice == double.MaxValue ? null : order.LmtPrice));
             }
         }
@@ -508,8 +523,9 @@ public class IbkrEWrapper : EWrapper
     }
 
     /// <summary>
-    /// Registers a single-shot PnL callback, resolved on the first pnl() callback for this reqId.
-    /// Used by GetAccountSnapshotAsync to fetch TodayPnL.
+    /// Registers a single-shot PnL callback, resolved on the second pnl() callback for this
+    /// reqId (the first is skipped, see _pnlFirstCallbackSeen). Used by GetAccountSnapshotAsync
+    /// to fetch TodayPnL.
     /// </summary>
     public TaskCompletionSource<double> RegisterPnLCallback(int reqId)
     {
@@ -523,7 +539,11 @@ public class IbkrEWrapper : EWrapper
     /// </summary>
     public void UnregisterPnLCallback(int reqId)
     {
-        lock (_lock) { _pnlCallbacks.Remove(reqId); }
+        lock (_lock)
+        {
+            _pnlCallbacks.Remove(reqId);
+            _pnlFirstCallbackSeen.Remove(reqId);
+        }
     }
 
     /// <summary>
@@ -844,8 +864,25 @@ public class IbkrEWrapper : EWrapper
         {
             if (_pnlCallbacks.TryGetValue(reqId, out var tcs))
             {
+                // Skip the first callback, IB frequently sends a stale/zero value immediately
+                // after reqPnL subscribes, before it has actually computed today's PnL.
+                if (_pnlFirstCallbackSeen.Add(reqId))
+                {
+                    _logger.LogDebug(
+                        "IBKR pnl() — discarding first callback [ReqId {ReqId}] dailyPnL: {DailyPnL} " +
+                        "unrealizedPnL: {UnrealizedPnL} realizedPnL: {RealizedPnL}",
+                        reqId, dailyPnL, unrealizedPnL, realizedPnL);
+                    return;
+                }
+
+                _logger.LogDebug(
+                    "IBKR pnl() — resolving TCS on second callback [ReqId {ReqId}] dailyPnL: {DailyPnL} " +
+                    "unrealizedPnL: {UnrealizedPnL} realizedPnL: {RealizedPnL}",
+                    reqId, dailyPnL, unrealizedPnL, realizedPnL);
+
                 tcs.TrySetResult(dailyPnL);
                 _pnlCallbacks.Remove(reqId);
+                _pnlFirstCallbackSeen.Remove(reqId);
             }
         }
     }

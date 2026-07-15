@@ -137,8 +137,10 @@ public class BrokerExecutionService
     /// Handles a STC or BTC exit alert by matching it to an open position, closing
     /// the position with the broker, and updating the CSV and Discord with the P&amp;L result.
     /// Skips silently if no matching open position is found.
+    /// Returns true if a matching open position was found and processing proceeded,
+    /// false if it exited early for any reason.
     /// </summary>
-    public async Task HandleExitAsync(
+    public async Task<bool> HandleExitAsync(
         Alert alert,
         CancellationToken ct = default)
     {
@@ -153,7 +155,7 @@ public class BrokerExecutionService
             _logger.LogDebug(
                 "Exit alert for {Symbol}, no matching open position found",
                 alert.Symbol);
-            return;
+            return false;
         }
 
         // Single-closer election: mark the position as closing before touching the broker.
@@ -164,7 +166,7 @@ public class BrokerExecutionService
             _logger.LogInformation(
                 "Exit for {Symbol} already in progress on a concurrent path — skipping duplicate.",
                 alert.Symbol);
-            return;
+            return false;
         }
 
         BrokerOrderResult closeResult;
@@ -177,7 +179,7 @@ public class BrokerExecutionService
             _guard.RevertClosing(alert.UserName ?? "", alert.OptionsContractSymbol, alert.Symbol ?? "");
             _logger.LogError(ex,
                 "Broker ClosePositionAsync failed for {Symbol}, skipping", alert.Symbol);
-            return;
+            return false;
         }
 
         // Both fill and execDetails callbacks timed out. Verify whether the close actually
@@ -193,7 +195,7 @@ public class BrokerExecutionService
                     "Close order timed out for {Symbol} — position may still be open at IBKR. " +
                     "Not recording close to prevent data loss. Manual reconciliation required.",
                     alert.Symbol);
-                return;
+                return false;
             }
 
             // Position confirmed absent via reqPositions — close executed despite callback failure.
@@ -218,7 +220,7 @@ public class BrokerExecutionService
             closeResult.FillPrice,
             TradeOutcome.XtradesExit);
 
-        if (closedTrade is null) return;
+        if (closedTrade is null) return false;
 
         closedTrade.ExitLatencyMs   = exitLatencyMs;
         closedTrade.ExitSlippagePct = exitSlippagePct;
@@ -256,6 +258,8 @@ public class BrokerExecutionService
                 exitSlippagePct: exitSlippagePct,
                 ct:              ct);
         }
+
+        return true;
     }
 
     /// <summary>

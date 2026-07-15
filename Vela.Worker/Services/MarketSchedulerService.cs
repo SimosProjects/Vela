@@ -557,21 +557,21 @@ public class MarketSchedulerService : BackgroundService
         return
         [
             (9,           0,            "HealthCheck"),
-            (9,           0,            "PositionSummary"),   // pre-market, before 9:30 open
+            (9,           10,           "PositionSummary"),   
             (9,           20,           "MarketConditions"),
             (11,          0,            "MarketConditions"),
-            (11,          0,            "PositionSummary"),
+            (11,          10,           "PositionSummary"),   
             (11,          23,           "HealthCheck"),
             (13,          0,            "MarketConditions"),
-            (13,          0,            "PositionSummary"),
+            (13,          10,           "PositionSummary"),   
             (13,          17,           "HealthCheck"),
             (cutoff.Hour, cutoff.Minute,"SameDayExpiryClose"),
             (14,          0,            "MarketConditions"),
+            (14,          10,           "PositionSummary"),   
             (15,          0,            "OneDteProfitClose"),
-            (15,          0,            "PositionSummary"),
             (15,          55,           "OneDteLottoConvert"),
             (16,          5,            "HealthCheck"),
-            (16,          5,            "PositionSummary"),   // just after 4:00 close
+            (16,          10,           "PositionSummary"), 
             (16,          20,           "WeeklyReport"),
             (16,          25,           "MonthlyReport"),
             (16,          30,           "WeeklyArchive"),
