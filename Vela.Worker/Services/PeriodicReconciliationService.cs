@@ -102,7 +102,7 @@ public class PeriodicReconciliationService : BackgroundService
     // After AutoCleanupAfterMisses consecutive misses the position is removed
     // from TradeGuard and the DB so it does not block future entries on the
     // same contract or consume risk budget.
-    private async Task CheckManagedPositionsAsync(
+    internal async Task CheckManagedPositionsAsync(
         List<IbkrPosition> ibkrPositions,
         CancellationToken ct)
     {
@@ -111,7 +111,8 @@ public class PeriodicReconciliationService : BackgroundService
 
         foreach (var trade in openTrades)
         {
-            if (FindIbkrPositionForTrade(ibkrPositions, trade) is not null)
+            var match = FindIbkrPositionForTrade(ibkrPositions, trade);
+            if (match is not null && match.Quantity > 0)
             {
                 // Position confirmed — clear any previous miss streak
                 _missedChecks.Remove(trade.OrderId);
