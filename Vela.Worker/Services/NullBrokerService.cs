@@ -183,6 +183,26 @@ public class NullBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// No-op standalone limit sell placement for testing. Always returns null.
+    /// </summary>
+    public Task<string?> PlaceStandaloneLimitSellAsync(
+        string symbol,
+        TradeType tradeType,
+        string? optionsContractSymbol,
+        string? direction,
+        decimal? strike,
+        string? expiration,
+        int quantity,
+        decimal limitPrice,
+        CancellationToken ct = default)
+    {
+        _logger.LogDebug(
+            "[NullBroker] PlaceStandaloneLimitSell {Symbol} @ ${Price:F2} (simulated, returns null)",
+            optionsContractSymbol ?? symbol, limitPrice);
+        return Task.FromResult<string?>(null);
+    }
+
+    /// <summary>
     /// No-op order cancellation for testing.
     /// </summary>
     public Task CancelOrderAsync(int orderId, CancellationToken ct = default) =>
@@ -233,6 +253,11 @@ public class NullBrokerService : IBrokerService
     /// No-op, NullBrokerService never fires broker-side fills.
     /// </summary>
     public void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler) { }
+
+    /// <summary>
+    /// No-op, NullBrokerService never fires broker-side partial fills.
+    /// </summary>
+    public void RegisterBrokerPartialFillHandler(Action<BrokerPartialFillEvent> handler) { }
 
     /// <summary>
     /// Returns an empty list, no Gateway available in simulation.

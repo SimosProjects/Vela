@@ -14,8 +14,13 @@ public class IbkrEWrapper : EWrapper
     private readonly Dictionary<int, TaskCompletionSource<string>> _accountCallbacks = new();
     private readonly Dictionary<string, TaskCompletionSource<(decimal Price, int Quantity)>> _positionCallbacks = new();
     private readonly Dictionary<int, string> _rejectionReasons = new();
-    private readonly Dictionary<int, Action<decimal>> _execDetailsCallbacks = new();
-    private readonly Dictionary<int, TaskCompletionSource<decimal>> _execDetailsTcsCallbacks = new();
+    // RequestedQuantity gates resolution — execDetails fires once per partial execution, and
+    // an order can take several before it's genuinely done. Resolving/invoking on the first
+    // partial mistakes "some of it filled" for "all of it filled" (the 2026-07-17 UBER
+    // incident). OnPartial is an optional side-channel for callers that need to observe
+    // partial progress (e.g. to start a bounded completion timer) without treating it as done.
+    private readonly Dictionary<int, (Action<decimal> OnFilled, int RequestedQuantity, Action<OrderFill>? OnPartial)> _execDetailsCallbacks = new();
+    private readonly Dictionary<int, (TaskCompletionSource<OrderFill> Tcs, int RequestedQuantity, Action<OrderFill>? OnPartial)> _execDetailsTcsCallbacks = new();
 
     // Market data streaming callbacks keyed by reqId, resolves with midpoint or LAST price
     private readonly Dictionary<int, TaskCompletionSource<decimal>> _marketDataCallbacks = new();
@@ -97,18 +102,43 @@ public class IbkrEWrapper : EWrapper
             execution.OrderId, contract.Symbol, execution.Side,
             execution.AvgPrice, execution.CumQty);
 
+        var fill = new OrderFill(
+            "Filled", (decimal)execution.AvgPrice, (int)execution.CumQty, contract.LocalSymbol);
+
         lock (_lock)
         {
-            if (_execDetailsCallbacks.TryGetValue(execution.OrderId, out var handler))
+            if (_execDetailsCallbacks.TryGetValue(execution.OrderId, out var actionReg))
             {
-                handler((decimal)execution.AvgPrice);
-                _execDetailsCallbacks.Remove(execution.OrderId);
+                if (execution.CumQty >= actionReg.RequestedQuantity)
+                {
+                    actionReg.OnFilled(fill.AvgFillPrice);
+                    _execDetailsCallbacks.Remove(execution.OrderId);
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "IBKR ExecDetails partial fill — OrderId: {OrderId} CumQty: {CumQty}/{Requested} " +
+                        "— awaiting full fill.",
+                        execution.OrderId, execution.CumQty, actionReg.RequestedQuantity);
+                    actionReg.OnPartial?.Invoke(fill);
+                }
             }
 
-            if (_execDetailsTcsCallbacks.TryGetValue(execution.OrderId, out var tcs))
+            if (_execDetailsTcsCallbacks.TryGetValue(execution.OrderId, out var tcsReg))
             {
-                tcs.TrySetResult((decimal)execution.AvgPrice);
-                _execDetailsTcsCallbacks.Remove(execution.OrderId);
+                if (execution.CumQty >= tcsReg.RequestedQuantity)
+                {
+                    tcsReg.Tcs.TrySetResult(fill);
+                    _execDetailsTcsCallbacks.Remove(execution.OrderId);
+                }
+                else
+                {
+                    _logger.LogDebug(
+                        "IBKR ExecDetails partial fill — OrderId: {OrderId} CumQty: {CumQty}/{Requested} " +
+                        "— awaiting full fill.",
+                        execution.OrderId, execution.CumQty, tcsReg.RequestedQuantity);
+                    tcsReg.OnPartial?.Invoke(fill);
+                }
             }
         }
     }
@@ -330,29 +360,42 @@ public class IbkrEWrapper : EWrapper
     }
 
     /// <summary>
-    /// Registers a callback that fires when IBKR reports an execution for the given order ID.
+    /// Registers a callback that fires only once IBKR confirms the order has reached
+    /// requestedQuantity cumulative filled (i.e. genuinely done, not just partially filled).
+    /// onPartialFill is an optional side-channel invoked on every callback that falls short of
+    /// requestedQuantity, letting the caller observe progress without treating it as complete.
     /// </summary>
-    public void RegisterExecDetailsCallback(int orderId, Action<decimal> handler)
+    public void RegisterExecDetailsCallback(
+        int orderId, int requestedQuantity, Action<decimal> handler, Action<OrderFill>? onPartialFill = null)
     {
-        lock (_lock) { _execDetailsCallbacks[orderId] = handler; }
+        lock (_lock) { _execDetailsCallbacks[orderId] = (handler, requestedQuantity, onPartialFill); }
     }
 
     /// <summary>
     /// Removes an exec details callback — called when a position is closed by other means.
+    /// Returns true if a pending registration was actually removed, false if it had already
+    /// resolved (or was never registered) — callers use this to detect losing a race against
+    /// the real fill arriving concurrently.
     /// </summary>
-    public void UnregisterExecDetailsCallback(int orderId)
+    public bool UnregisterExecDetailsCallback(int orderId)
     {
-        lock (_lock) { _execDetailsCallbacks.Remove(orderId); }
+        lock (_lock) { return _execDetailsCallbacks.Remove(orderId); }
     }
 
     /// <summary>
-    /// Registers an awaitable callback that resolves when IBKR reports an execution for the given order ID.
-    /// Used by ClosePositionAsync to recover the actual fill price after a close order timeout.
+    /// Registers an awaitable callback that resolves only once IBKR confirms the order has
+    /// reached requestedQuantity cumulative filled. Used by ClosePositionAsync/PartialCloseAsync
+    /// to recover the actual fill price and true filled quantity after a close order timeout, and
+    /// by PlaceOrderAsync to recover both the fill price and IBKR's resolved LocalSymbol after a
+    /// late fill. onPartialFill is an optional side-channel invoked on every callback that falls
+    /// short of requestedQuantity, letting the caller track the latest confirmed partial without
+    /// the TCS itself resolving early.
     /// </summary>
-    public TaskCompletionSource<decimal> RegisterExecDetailsTcsCallback(int orderId)
+    public TaskCompletionSource<OrderFill> RegisterExecDetailsTcsCallback(
+        int orderId, int requestedQuantity, Action<OrderFill>? onPartialFill = null)
     {
-        var tcs = new TaskCompletionSource<decimal>(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_lock) { _execDetailsTcsCallbacks[orderId] = tcs; }
+        var tcs = new TaskCompletionSource<OrderFill>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_lock) { _execDetailsTcsCallbacks[orderId] = (tcs, requestedQuantity, onPartialFill); }
         return tcs;
     }
 

@@ -444,7 +444,7 @@ public class TradeGuard
                 DiscordRank     = order.DiscordRank,
                 Symbol          = order.Symbol,
                 TradeType       = order.TradeType,
-                OptionsContract = order.OptionsContractSymbol,
+                OptionsContract = ResolveOptionsContract(order, result),
                 Direction       = order.Direction,
                 Strike          = order.Strike,
                 Expiration      = order.Expiration,
@@ -696,6 +696,30 @@ public class TradeGuard
     }
 
     // -- Helpers --
+
+    // Prefers IBKR's own resolved contract identifier over the alert-supplied one when they
+    // disagree — the alert source (e.g. Xtrades) occasionally reports an ambiguous root symbol
+    // (e.g. "SPX" for a contract IBKR actually lists as "SPXW"), which then fails every later
+    // exact-string match against IBKR's live positions/orders and gets silently treated as a
+    // ghost. The match key used elsewhere in this class deliberately stays keyed on
+    // order.OptionsContractSymbol — this only corrects the value persisted for reconciliation.
+    private string? ResolveOptionsContract(TradeOrder order, BrokerOrderResult result)
+    {
+        if (string.IsNullOrEmpty(result.LocalSymbol))
+            return order.OptionsContractSymbol;
+
+        var alertValue = order.OptionsContractSymbol?.Replace(" ", "") ?? "";
+        var ibkrValue  = result.LocalSymbol.Replace(" ", "");
+
+        if (string.Equals(alertValue, ibkrValue, StringComparison.OrdinalIgnoreCase))
+            return order.OptionsContractSymbol;
+
+        _logger.LogWarning(
+            "TradeGuard: options contract symbol mismatch corrected: {AlertValue} -> {IbkrValue}",
+            order.OptionsContractSymbol, result.LocalSymbol);
+
+        return result.LocalSymbol;
+    }
 
     // Pending reservation key includes trade type so stocks and options count independently.
     private static string GetPendingKey(TradeOrder order) =>

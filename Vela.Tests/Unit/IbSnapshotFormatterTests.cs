@@ -179,4 +179,42 @@ public class IbSnapshotFormatterTests
         target.Should().BeNull();
         ambiguous.Should().BeTrue();
     }
+
+    // IBKR reports OrderId 0 for a live order placed outside any API client (e.g. directly in
+    // the TWS/IB Gateway desktop app — confirmed for BROS/GE/V, 2026-07-15). It's still a real,
+    // matchable order and must not be discarded just because the ID is unresolvable.
+    [Fact]
+    public void GetMatchingStopOrders_LiveOrderIdZero_StillMatches()
+    {
+        var position = new IbkrPosition("GE", "STK", null, 11, 359.92m);
+        var orders = new List<IbkrOpenOrder>
+        {
+            new(0, "GE", "STK", null, "SELL", "TRAIL", 11, "PreSubmitted", 305.91, null),
+        };
+
+        var (stop, ambiguous) = IbSnapshotFormatter.GetMatchingStopOrders(position, orders);
+
+        stop.Should().NotBeNull();
+        stop!.OrderId.Should().Be(0);
+        ambiguous.Should().BeFalse();
+    }
+
+    // Two live OrderId-0 orders on the same symbol are just as unsafe to resolve via
+    // FirstOrDefault as two live orders with real IDs — the existing ambiguous-match
+    // safety must still apply.
+    [Fact]
+    public void GetMatchingStopOrders_TwoLiveOrderIdZeroOrders_ReturnsAmbiguousAndNoOrder()
+    {
+        var position = new IbkrPosition("GE", "STK", null, 11, 359.92m);
+        var orders = new List<IbkrOpenOrder>
+        {
+            new(0, "GE", "STK", null, "SELL", "TRAIL", 11, "PreSubmitted", 305.91, null),
+            new(0, "GE", "STK", null, "SELL", "STP",   11, "Submitted",    306.00, null),
+        };
+
+        var (stop, ambiguous) = IbSnapshotFormatter.GetMatchingStopOrders(position, orders);
+
+        stop.Should().BeNull();
+        ambiguous.Should().BeTrue();
+    }
 }

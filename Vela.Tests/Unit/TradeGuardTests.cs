@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Vela.Worker.Configuration;
@@ -307,6 +308,87 @@ public class TradeGuardTests
         secondBlock.Should().NotBeNull();
         secondBlock!.IsRoutine.Should().BeTrue("pending-reservation duplicate is expected concurrent-path behaviour");
         secondBlock.Reason.Should().Contain("concurrent path");
+    }
+
+    // -- RegisterOpen options contract correction --
+
+    [Fact]
+    public void RegisterOpen_WhenLocalSymbolDiffersFromAlertContract_UsesIbkrValueAndLogsWarning()
+    {
+        var loggerMock = new Mock<ILogger<TradeGuard>>();
+        var guard = new TradeGuard(
+            _brokerMock.Object,
+            Options.Create(new RiskEngineOptions()),
+            loggerMock.Object);
+
+        var order = BuildOrder(symbol: "SPX", contractSymbol: "SPX260717C07500000");
+        var result = new BrokerOrderResult(
+            OrderId: "ORDER-001",
+            StopOrderId: "STOP-001",
+            TargetOrderId: null,
+            FillPrice: 3.10m,
+            FillQuantity: 1,
+            FillAmount: 310m,
+            Status: OrderStatus.Filled,
+            FilledAt: DateTimeOffset.UtcNow,
+            LocalSymbol: "SPXW260717C07500000");
+
+        guard.RegisterOpen(order, result);
+
+        // FindOpenTrade still looks up by the alert-supplied contract — the match key is
+        // deliberately unaffected by the correction, only the persisted OptionsContract is.
+        var trade = guard.FindOpenTrade("TestTrader", "SPX260717C07500000", "SPX");
+        trade.Should().NotBeNull();
+        trade!.OptionsContract.Should().Be("SPXW260717C07500000");
+
+        loggerMock.Verify(
+            l => l.Log(
+                LogLevel.Warning,
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, t) =>
+                    v.ToString()!.Contains("symbol mismatch corrected") &&
+                    v.ToString()!.Contains("SPX260717C07500000") &&
+                    v.ToString()!.Contains("SPXW260717C07500000")),
+                null,
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public void RegisterOpen_WhenLocalSymbolMatchesAlertContract_KeepsAlertValueAndDoesNotLogWarning()
+    {
+        var loggerMock = new Mock<ILogger<TradeGuard>>();
+        var guard = new TradeGuard(
+            _brokerMock.Object,
+            Options.Create(new RiskEngineOptions()),
+            loggerMock.Object);
+
+        var order = BuildOrder(contractSymbol: "TSLA260620C00450000");
+        var result = new BrokerOrderResult(
+            OrderId: "ORDER-001",
+            StopOrderId: "STOP-001",
+            TargetOrderId: null,
+            FillPrice: 4.95m,
+            FillQuantity: 2,
+            FillAmount: 990m,
+            Status: OrderStatus.Filled,
+            FilledAt: DateTimeOffset.UtcNow,
+            LocalSymbol: "TSLA260620C00450000");
+
+        guard.RegisterOpen(order, result);
+
+        var trade = guard.FindOpenTrade("TestTrader", "TSLA260620C00450000", "TSLA");
+        trade.Should().NotBeNull();
+        trade!.OptionsContract.Should().Be("TSLA260620C00450000");
+
+        loggerMock.Verify(
+            l => l.Log(
+                It.IsAny<LogLevel>(),
+                It.IsAny<EventId>(),
+                It.Is<It.IsAnyType>((v, t) => v.ToString()!.Contains("symbol mismatch corrected")),
+                null,
+                It.IsAny<Func<It.IsAnyType, Exception?, string>>()),
+            Times.Never);
     }
 
     // -- Close and find --

@@ -264,19 +264,41 @@ try
 
         if (newOrderId is not null)
         {
-            using var scope = host.Services.CreateScope();
-            var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+            // A non-null return from PlaceProtectiveStopAsync is not proof the order is
+            // actually live — see the 2026-07-15 BROS incident, where a Guardian-placed
+            // order ID was written to the database and trusted, but was never durably
+            // reserved against Gateway's own order counter and was later recycled for an
+            // unrelated trade, silently closing BROS's trade record. Re-fetching a fresh
+            // open orders snapshot and confirming the ID actually appears there, live,
+            // before printing success or touching the database closes that gap.
+            var stopConfirmed = await ConfirmOrderIsLiveAsync(broker, newOrderId);
+            var targetConfirmed = newTargetOrderId is null || await ConfirmOrderIsLiveAsync(broker, newTargetOrderId);
 
-            if (newTargetOrderId is not null)
+            if (!stopConfirmed || !targetConfirmed)
             {
-                await repo.UpdateStopAndTargetOrderIdsAsync(matched.OrderId, newOrderId, newTargetOrderId);
                 Console.WriteLine(
-                    $"✅ Stop placed — OrderId {newOrderId}, Target OrderId {newTargetOrderId}. Database updated.");
+                    $"❌ {ibkrPosition.Symbol} — IBKR returned OrderId {newOrderId}" +
+                    (newTargetOrderId is not null ? $" / Target OrderId {newTargetOrderId}" : "") +
+                    " but it does not appear live in a fresh open orders snapshot. " +
+                    "Database NOT updated — manual verification required in IB before trusting this order.");
             }
             else
             {
-                await repo.UpdateStopOrderIdAsync(matched.OrderId, newOrderId);
-                Console.WriteLine($"✅ Stop placed — OrderId {newOrderId}. Database updated.");
+                using var scope = host.Services.CreateScope();
+                var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+
+                if (newTargetOrderId is not null)
+                {
+                    await repo.UpdateStopAndTargetOrderIdsAsync(matched.OrderId, newOrderId, newTargetOrderId);
+                    Console.WriteLine(
+                        $"✅ Stop placed — OrderId {newOrderId}, Target OrderId {newTargetOrderId}. " +
+                        "Confirmed live at IB. Database updated.");
+                }
+                else
+                {
+                    await repo.UpdateStopOrderIdAsync(matched.OrderId, newOrderId);
+                    Console.WriteLine($"✅ Stop placed — OrderId {newOrderId}. Confirmed live at IB. Database updated.");
+                }
             }
         }
         else if (existingTarget is not null && existingTarget.LmtPrice.HasValue)
@@ -348,6 +370,21 @@ finally
 // Display label for a position: LocalSymbol (options, e.g. "TSLA260620C00450000") or Symbol (stocks).
 static string Label(IbkrPosition position) =>
     position.SecType == "OPT" ? position.LocalSymbol ?? position.Symbol : position.Symbol;
+
+// Confirms a just-placed order ID is actually live at IB, via a fresh reqAllOpenOrders
+// snapshot, rather than trusting PlaceProtectiveStopAsync's return value on its own.
+static async Task<bool> ConfirmOrderIsLiveAsync(IbkrBrokerService broker, string orderId)
+{
+    if (!int.TryParse(orderId, out var id))
+        return false;
+
+    var snapshot = await broker.GetAllOpenOrdersAsync();
+    if (snapshot.TimedOut)
+        return false;
+
+    return snapshot.Orders.Any(o =>
+        o.OrderId == id && IbSnapshotFormatter.LiveOrderStatuses.Contains(o.Status));
+}
 
 // Same matching logic as PeriodicReconciliationService's private HasDbMatch helper, duplicated
 // here rather than shared since it's a few lines and the two callers have no other coupling.

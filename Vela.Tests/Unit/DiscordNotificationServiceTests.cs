@@ -41,4 +41,37 @@ public class DiscordNotificationServiceTests
         message.Should().Contain("⚠️ NO STOP LOSS FOUND");
         message.Should().NotContain("NO TAKE PROFIT");
     }
+
+    [Fact]
+    public void SplitSnapshotIntoChunks_ManyPositions_SplitsOnPositionBoundariesWithoutCuttingAny()
+    {
+        var account = new AccountSnapshot(
+            NetLiquidation: 500000m,
+            TotalCash:      100000m,
+            BuyingPower:    900000m,
+            TodayPnL:       1500m,
+            TimedOut:       false);
+
+        var positions = Enumerable.Range(0, 40)
+            .Select(i => new IbkrPosition($"SYM{i:D3}", "STK", null, 10 + i, 100m + i))
+            .ToList();
+
+        var message = IbSnapshotFormatter.BuildSnapshotMessage(account, positions, new List<IbkrOpenOrder>());
+
+        var chunks = DiscordNotificationService.SplitSnapshotIntoChunks(message);
+
+        chunks.Count.Should().BeGreaterThan(1);
+
+        foreach (var chunk in chunks)
+            (chunk.Length + 8).Should().BeLessOrEqualTo(2000);
+
+        foreach (var i in Enumerable.Range(0, 40))
+        {
+            var symbol = $"SYM{i:D3}";
+            chunks.Count(c => c.Contains(symbol)).Should().Be(1);
+        }
+
+        var reconstructed = string.Join($"\n{IbSnapshotFormatter.PositionSeparator}\n", chunks);
+        reconstructed.Should().Be(message);
+    }
 }

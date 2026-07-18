@@ -5,8 +5,10 @@ export function PositionRow({ position, isLast }) {
   const { contract, direction, quantity, entryPrice, costBasis, stopPrice,
           targetPrice, openedAt, trader, xScore, riskTier } = position;
 
-  const stopPct   = ((stopPrice   - entryPrice) / entryPrice * 100).toFixed(0);
-  const targetPct = ((targetPrice - entryPrice) / entryPrice * 100).toFixed(0);
+  // Manual positions have no stop/target recorded (0) — a percentage against that baseline
+  // is meaningless (always -100%), so omit it entirely rather than rendering a false figure.
+  const stopPct   = stopPrice   > 0 ? ((stopPrice   - entryPrice) / entryPrice * 100).toFixed(0) : null;
+  const targetPct = targetPrice > 0 ? ((targetPrice - entryPrice) / entryPrice * 100).toFixed(0) : null;
   const riskColor = riskTier === 'Lotto' ? B.rd : riskTier === 'High' ? B.am : B.mu;
 
   return (
@@ -49,12 +51,12 @@ export function PositionRow({ position, isLast }) {
         <div>
           <div style={{ color: B.mu2 }}>Stop</div>
           <div style={{ color: B.rd, fontWeight: 500 }}>${stopPrice.toFixed(2)}</div>
-          <div style={{ color: B.mu, fontSize: 10 }}>{stopPct}%</div>
+          {stopPct !== null && <div style={{ color: B.mu, fontSize: 10 }}>{stopPct}%</div>}
         </div>
         <div>
           <div style={{ color: B.mu2 }}>Target</div>
           <div style={{ color: B.gr, fontWeight: 500 }}>${targetPrice.toFixed(2)}</div>
-          <div style={{ color: B.mu, fontSize: 10 }}>+{targetPct}%</div>
+          {targetPct !== null && <div style={{ color: B.mu, fontSize: 10 }}>+{targetPct}%</div>}
         </div>
         <div style={{ textAlign: 'right' }}>
           <div style={{ color: B.mu2 }}>Opened</div>

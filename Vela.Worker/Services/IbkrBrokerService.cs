@@ -1,4 +1,5 @@
 using IBApi;
+using Vela.Worker.Formatting;
 using Vela.Worker.Models;
 
 namespace Vela.Worker.Services;
@@ -28,6 +29,10 @@ public class IbkrBrokerService : IBrokerService
 
     // Subscribed by PositionMonitorService to handle broker-side stop and target fills
     private Action<string, decimal, TradeOutcome>? _brokerFillHandler;
+
+    // Subscribed by PositionMonitorService to handle a stop/target order whose bounded
+    // completion wait expired with only a partial fill confirmed — see BrokerPartialFillEvent.
+    private Action<BrokerPartialFillEvent>? _brokerPartialFillHandler;
 
     // Fill window for limit orders before the unfilled portion is cancelled
     private const int LimitOrderFillWindowSeconds = 10;
@@ -60,50 +65,113 @@ public class IbkrBrokerService : IBrokerService
     }
 
     /// <summary>
+    /// Subscribes a handler that fires when a stop/target order's bounded completion wait
+    /// (see ExecDetailsFullFillWaitSeconds) expires with the order confirmed only partially
+    /// filled — see BrokerPartialFillEvent for what's reported.
+    /// </summary>
+    public void RegisterBrokerPartialFillHandler(Action<BrokerPartialFillEvent> handler)
+    {
+        _brokerPartialFillHandler = handler;
+    }
+
+    /// <summary>
     /// Re-registers stop and target order callbacks for positions restored from the database on restart.
     /// Without this, broker-side trail stop or target fills after a restart are silently ignored
     /// because _stopOrderMap is empty and execDetails callbacks are never wired up.
     /// Positions with no TargetOrderId (0DTE) only register the trail stop callback.
+    /// Each stored stop/target order ID is checked against a fresh reqAllOpenOrders snapshot before
+    /// being trusted — a DB value that no longer names a live order is never re-registered, because
+    /// IBKR eventually recycles unused order IDs, and blindly trusting a stale ID lets a completely
+    /// unrelated later fill be misattributed to this position (see the 2026-07-15 BROS incident,
+    /// where a stale StopOrderId reused by an unrelated SPX order closed BROS's trade record for a
+    /// fill that never happened).
     /// Called from Program.cs after LoadFromDatabase.
     /// </summary>
-    public void ReRegisterStopCallbacks(IEnumerable<OpenPosition> positions)
+    public async Task ReRegisterStopCallbacksAsync(IEnumerable<OpenPosition> positions)
     {
+        var positionList = positions.ToList();
+
+        var liveOrders = new List<IbkrOpenOrder>();
+        if (positionList.Count > 0)
+        {
+            var orders = await GetAllOpenOrdersAsync();
+            liveOrders = orders.Orders
+                .Where(o => IbSnapshotFormatter.LiveOrderStatuses.Contains(o.Status))
+                .ToList();
+        }
+        var liveOrderIds = liveOrders.Select(o => o.OrderId).ToHashSet();
+
         var count = 0;
-        foreach (var p in positions)
+        foreach (var p in positionList)
         {
             if (!int.TryParse(p.StopOrderId, out var stopId) ||
                 !int.TryParse(p.OrderId, out _))
                 continue;
 
-            var hasTarget = p.TargetOrderId is not null &&
-                            int.TryParse(p.TargetOrderId, out var _);
-            int.TryParse(p.TargetOrderId, out var targetId);
-
             var entryOrderId = p.OrderId;
+            var positionKey = IbSnapshotFormatter.PositionKeyForOpenPosition(p);
 
-            lock (_stopMapLock)
-            {
-                _stopOrderMap[stopId] = (entryOrderId, TradeOutcome.StoppedOut);
-                if (hasTarget)
-                    _stopOrderMap[targetId] = (entryOrderId, TradeOutcome.TargetHit);
-            }
+            var (stopLive, stopTrackable) = liveOrderIds.Contains(stopId)
+                ? (true, true)
+                : ClassifyStaleOrderId(p.Symbol, "Stop", stopId, positionKey, liveOrders, isStop: true);
 
-            _connection.Wrapper.RegisterExecDetailsCallback(stopId, fillPrice =>
-                OnStopOrderFilled(stopId, fillPrice));
+            var hasTarget = int.TryParse(p.TargetOrderId, out var targetId);
+            var (targetLive, targetTrackable) = !hasTarget
+                ? (false, false)
+                : liveOrderIds.Contains(targetId)
+                    ? (true, true)
+                    : ClassifyStaleOrderId(p.Symbol, "Target", targetId, positionKey, liveOrders, isStop: false);
 
-            if (hasTarget)
-                _connection.Wrapper.RegisterExecDetailsCallback(targetId, fillPrice =>
-                    OnStopOrderFilled(targetId, fillPrice));
+            if (!stopLive && !targetLive)
+                continue;
+
+            if (stopTrackable)
+                RegisterStopOrderWatch(entryOrderId, stopId, p.Quantity, TradeOutcome.StoppedOut);
+
+            if (targetTrackable)
+                RegisterStopOrderWatch(entryOrderId, targetId, p.Quantity, TradeOutcome.TargetHit);
 
             count++;
 
             _logger.LogDebug(
                 "IBKR re-registered stop callbacks for {Symbol} — StopOrderId: {StopId} TargetOrderId: {TargetId}",
-                p.Symbol, stopId, hasTarget ? targetId : null);
+                p.Symbol, stopTrackable ? stopId : null, targetTrackable ? targetId : null);
         }
 
         _logger.LogInformation(
             "IBKR stop callback re-registration complete — {Count} position(s) re-wired", count);
+    }
+
+    // A stored order ID missing from the live snapshot has two possible explanations, and they
+    // must never be conflated: it's genuinely stale (IBKR recycled the integer for something
+    // else — the 2026-07-15 BROS incident), or the position is still protected by a real live
+    // order that IBKR reports as OrderId 0 because it was placed outside any API client (the
+    // 2026-07-15 GE/V case, confirmed against tonight's own investigation). The second case is
+    // neither "stale" nor "fully tracked" — it's live but not Trackable, because RegisterExecDetailsCallback
+    // needs a real order ID and 0 cannot be used to detect this specific order's eventual fill.
+    private (bool Live, bool Trackable) ClassifyStaleOrderId(
+        string symbol, string kind, int storedId, string positionKey, List<IbkrOpenOrder> liveOrders, bool isStop)
+    {
+        var (fallbackOrder, ambiguous) = isStop
+            ? IbSnapshotFormatter.GetMatchingStopOrders(positionKey, liveOrders)
+            : IbSnapshotFormatter.GetMatchingTargetOrder(positionKey, liveOrders);
+
+        if (!ambiguous && fallbackOrder is { OrderId: 0 })
+        {
+            _logger.LogWarning(
+                "IBKR live protective {Kind} order found for {Symbol} but IBKR reports OrderId 0 " +
+                "(likely placed outside any API client) — position is protected, but Worker cannot " +
+                "register fill detection for this specific order.",
+                kind, symbol);
+            return (true, false);
+        }
+
+        _logger.LogWarning(
+            "IBKR stale {Kind}OrderId for {Symbol} — {Id} does not appear live in a fresh open orders " +
+            "snapshot. Not re-registering — the database value can no longer be trusted to still mean " +
+            "this order.",
+            kind, symbol, storedId);
+        return (false, false);
     }
 
     /// <summary>
@@ -485,7 +553,12 @@ public class IbkrBrokerService : IBrokerService
         // Register exec details TCS before placing. For the normal fill path this is cleaned up
         // immediately. For the fill-window-timeout path it becomes the primary fill detector:
         // execDetails fires within seconds of a fill while reqPositions can take 3-25 minutes.
-        var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId);
+        // requestedQuantity: 1 preserves this entry path's exact prior behaviour (resolve on the
+        // first execution, not gated on full quantity) — the partial-fill quantity-gating fix is
+        // scoped to the three exit paths (ClosePositionAsync, PartialCloseAsync, stop/target
+        // watch); entries already independently re-verify actual filled quantity via a follow-up
+        // reqPositions check regardless of what this TCS reports.
+        var lateExecTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(orderId, requestedQuantity: 1);
 
         // Place entry with a temporary fixed STP as bracket child so there is always
         // stop protection in place while we wait for the actual fill confirmation.
@@ -536,7 +609,12 @@ public class IbkrBrokerService : IBrokerService
                     RejectionReason: priceProtectionReason);
             }
 
-            // Normal fill, exec details TCS no longer needed
+            // Normal fill, exec details TCS no longer needed. execDetails typically arrives at or
+            // before orderStatus "Filled" (confirmed in production logs), so the TCS is usually
+            // already resolved here — grab IBKR's own resolved contract symbol before discarding it.
+            var resolvedLocalSymbol = lateExecTcs.Task.IsCompletedSuccessfully
+                ? lateExecTcs.Task.Result.LocalSymbol
+                : null;
             _connection.Wrapper.UnregisterExecDetailsTcsCallback(orderId);
 
             _logger.LogDebug(
@@ -588,7 +666,8 @@ public class IbkrBrokerService : IBrokerService
                 FillQuantity:  fillQty,
                 FillAmount:    fillPrice * fillQty * multiplier,
                 Status:        OrderStatus.Filled,
-                FilledAt:      DateTimeOffset.UtcNow);
+                FilledAt:      DateTimeOffset.UtcNow,
+                LocalSymbol:   resolvedLocalSymbol);
         }
         catch (OperationCanceledException)
         {
@@ -642,7 +721,8 @@ public class IbkrBrokerService : IBrokerService
                 {
                     using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     execCts.CancelAfter(TimeSpan.FromSeconds(ExecDetailsPostCancelWaitSeconds));
-                    var execFillPrice = await lateExecTcs.Task.WaitAsync(execCts.Token);
+                    var execFill = await lateExecTcs.Task.WaitAsync(execCts.Token);
+                    var execFillPrice = execFill.AvgFillPrice;
 
                     _logger.LogInformation(
                         "IBKR execDetails confirmed fill for {Symbol} @ ${Price:F2} after fill window — " +
@@ -709,7 +789,8 @@ public class IbkrBrokerService : IBrokerService
                         FillQuantity:  execFillQty,
                         FillAmount:    execFillPrice * execFillQty * multiplier,
                         Status:        OrderStatus.Filled,
-                        FilledAt:      DateTimeOffset.UtcNow);
+                        FilledAt:      DateTimeOffset.UtcNow,
+                        LocalSymbol:   execFill.LocalSymbol);
                 }
                 catch (OperationCanceledException)
                 {
@@ -822,7 +903,8 @@ public class IbkrBrokerService : IBrokerService
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 execCts.CancelAfter(TimeSpan.FromSeconds(10));
-                var lateFillPrice = await lateExecTcs.Task.WaitAsync(execCts.Token);
+                var lateFill = await lateExecTcs.Task.WaitAsync(execCts.Token);
+                var lateFillPrice = lateFill.AvgFillPrice;
 
                 _logger.LogInformation(
                     "IBKR PlaceOrder late fill detected for {Symbol} @ ${Price:F2} — verifying actual position qty.",
@@ -896,7 +978,8 @@ public class IbkrBrokerService : IBrokerService
                     FillQuantity:  actualLateFillQty,
                     FillAmount:    lateFillPrice * actualLateFillQty * multiplier,
                     Status:        OrderStatus.Filled,
-                    FilledAt:      DateTimeOffset.UtcNow);
+                    FilledAt:      DateTimeOffset.UtcNow,
+                    LocalSymbol:   lateFill.LocalSymbol);
             }
             catch (OperationCanceledException)
             {
@@ -953,7 +1036,9 @@ public class IbkrBrokerService : IBrokerService
 
         var closeOrderId = GetNextOrderId();
         var tcs = _connection.Wrapper.RegisterOrderCallback(closeOrderId);
-        var execTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
+        OrderFill? lastPartialFill = null;
+        var execTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(
+            closeOrderId, quantityToClose, onPartialFill: fill => lastPartialFill = fill);
         var contract = BuildCloseContract(trade);
 
         var partialCloseOrder = new Order
@@ -1002,24 +1087,58 @@ public class IbkrBrokerService : IBrokerService
             try
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                execCts.CancelAfter(TimeSpan.FromSeconds(30));
-                var execFillPrice = await execTcs.Task.WaitAsync(execCts.Token);
+                execCts.CancelAfter(TimeSpan.FromSeconds(_options.ExecDetailsFullFillWaitSeconds));
+                var execFill = await execTcs.Task.WaitAsync(execCts.Token);
                 var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
+
+                _logger.LogDebug(
+                    "IBKR partial close recovered fill via execDetails — Symbol: {Symbol} " +
+                    "FillPrice: {Price:F2} Qty: {Qty}",
+                    trade.Symbol, execFill.AvgFillPrice, execFill.FilledQuantity);
 
                 return new BrokerOrderResult(
                     OrderId:       closeOrderId.ToString(),
                     StopOrderId:   null,
                     TargetOrderId: null,
-                    FillPrice:     execFillPrice,
-                    FillQuantity:  quantityToClose,
-                    FillAmount:    execFillPrice * quantityToClose * multiplier,
+                    FillPrice:     execFill.AvgFillPrice,
+                    FillQuantity:  execFill.FilledQuantity,
+                    FillAmount:    execFill.AvgFillPrice * execFill.FilledQuantity * multiplier,
                     Status:        OrderStatus.Filled,
                     FilledAt:      DateTimeOffset.UtcNow);
             }
             catch (OperationCanceledException)
             {
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
-                return FailedResult("Partial close timed out");
+
+                if (lastPartialFill is null)
+                {
+                    _logger.LogWarning(
+                        "IBKR PartialClose execDetails also timed out for {Symbol} — no fill confirmed at all.",
+                        trade.Symbol);
+                    return FailedResult("Partial close timed out");
+                }
+
+                // A genuine, confirmed partial fill — never report this as the full requested
+                // quantity. The original stop was never touched by this method, so the position
+                // remains protected; the caller must not cancel/replace it in this branch.
+                var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
+                var confirmedQty = lastPartialFill.FilledQuantity;
+
+                _logger.LogError(
+                    "IBKR PartialClose for {Symbol} confirmed only {SoldQty} of {Requested} filled " +
+                    "@ ${Price:F2} within {Wait}s.",
+                    trade.Symbol, confirmedQty, quantityToClose, lastPartialFill.AvgFillPrice,
+                    _options.ExecDetailsFullFillWaitSeconds);
+
+                return new BrokerOrderResult(
+                    OrderId:       closeOrderId.ToString(),
+                    StopOrderId:   null,
+                    TargetOrderId: null,
+                    FillPrice:     lastPartialFill.AvgFillPrice,
+                    FillQuantity:  confirmedQty,
+                    FillAmount:    lastPartialFill.AvgFillPrice * confirmedQty * multiplier,
+                    Status:        OrderStatus.PartialFill,
+                    FilledAt:      DateTimeOffset.UtcNow);
             }
         }
     }
@@ -1104,7 +1223,9 @@ public class IbkrBrokerService : IBrokerService
 
         var closeOrderId = GetNextOrderId();
         var tcs = _connection.Wrapper.RegisterOrderCallback(closeOrderId);
-        var execTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(closeOrderId);
+        OrderFill? lastPartialFill = null;
+        var execTcs = _connection.Wrapper.RegisterExecDetailsTcsCallback(
+            closeOrderId, closeQty, onPartialFill: fill => lastPartialFill = fill);
         var contract = BuildCloseContract(trade);
         var closeOrder = BuildCloseOrder(closeOrderId, closeQty);
 
@@ -1145,40 +1266,69 @@ public class IbkrBrokerService : IBrokerService
             try
             {
                 using var execCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                execCts.CancelAfter(TimeSpan.FromSeconds(30));
-                var execFillPrice = await execTcs.Task.WaitAsync(execCts.Token);
+                execCts.CancelAfter(TimeSpan.FromSeconds(_options.ExecDetailsFullFillWaitSeconds));
+                var execFill = await execTcs.Task.WaitAsync(execCts.Token);
                 var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
 
                 _logger.LogDebug(
-                    "IBKR ClosePosition recovered fill via execDetails — Symbol: {Symbol} FillPrice: {Price:F2}",
-                    trade.Symbol, execFillPrice);
+                    "IBKR ClosePosition recovered fill via execDetails — Symbol: {Symbol} " +
+                    "FillPrice: {Price:F2} Qty: {Qty}",
+                    trade.Symbol, execFill.AvgFillPrice, execFill.FilledQuantity);
 
                 return new BrokerOrderResult(
                     OrderId:       closeOrderId.ToString(),
                     StopOrderId:   null,
                     TargetOrderId: null,
-                    FillPrice:     execFillPrice,
-                    FillQuantity:  closeQty,
-                    FillAmount:    execFillPrice * closeQty * multiplier,
+                    FillPrice:     execFill.AvgFillPrice,
+                    FillQuantity:  execFill.FilledQuantity,
+                    FillAmount:    execFill.AvgFillPrice * execFill.FilledQuantity * multiplier,
                     Status:        OrderStatus.Filled,
                     FilledAt:      DateTimeOffset.UtcNow);
             }
             catch (OperationCanceledException)
             {
-                _logger.LogWarning(
-                    "IBKR ClosePosition execDetails also timed out for {Symbol} — using entry price fallback.",
-                    trade.Symbol);
-
                 _connection.Wrapper.UnregisterExecDetailsTcsCallback(closeOrderId);
+
+                if (lastPartialFill is null)
+                {
+                    _logger.LogWarning(
+                        "IBKR ClosePosition execDetails also timed out for {Symbol} — " +
+                        "no fill confirmed at all, using entry price fallback.",
+                        trade.Symbol);
+
+                    return new BrokerOrderResult(
+                        OrderId:       closeOrderId.ToString(),
+                        StopOrderId:   null,
+                        TargetOrderId: null,
+                        FillPrice:     trade.EntryPrice,
+                        FillQuantity:  trade.Quantity,
+                        FillAmount:    trade.EntryAmount,
+                        Status:        OrderStatus.Pending,
+                        FilledAt:      DateTimeOffset.UtcNow);
+                }
+
+                // A genuine, confirmed partial fill — never report this as the full requested
+                // quantity. The original stop/target was already cancelled above before this
+                // close was attempted, so the remainder is now unprotected — the caller must
+                // surface this loudly rather than silently recording a false full close (the
+                // 2026-07-17 UBER incident).
+                var multiplier = trade.TradeType == TradeType.Options ? 100m : 1m;
+                var confirmedQty = lastPartialFill.FilledQuantity;
+
+                _logger.LogError(
+                    "IBKR ClosePosition for {Symbol} confirmed only {SoldQty} of {Requested} filled " +
+                    "@ ${Price:F2} within {Wait}s — remainder still open at IBKR and unprotected.",
+                    trade.Symbol, confirmedQty, closeQty, lastPartialFill.AvgFillPrice,
+                    _options.ExecDetailsFullFillWaitSeconds);
 
                 return new BrokerOrderResult(
                     OrderId:       closeOrderId.ToString(),
                     StopOrderId:   null,
                     TargetOrderId: null,
-                    FillPrice:     trade.EntryPrice,
-                    FillQuantity:  trade.Quantity,
-                    FillAmount:    trade.EntryAmount,
-                    Status:        OrderStatus.Pending,
+                    FillPrice:     lastPartialFill.AvgFillPrice,
+                    FillQuantity:  confirmedQty,
+                    FillAmount:    lastPartialFill.AvgFillPrice * confirmedQty * multiplier,
+                    Status:        OrderStatus.PartialFill,
                     FilledAt:      DateTimeOffset.UtcNow);
             }
         }
@@ -1502,6 +1652,55 @@ public class IbkrBrokerService : IBrokerService
         return (null, null);
     }
 
+    public async Task<string?> PlaceStandaloneLimitSellAsync(
+        string symbol,
+        TradeType tradeType,
+        string? optionsContractSymbol,
+        string? direction,
+        decimal? strike,
+        string? expiration,
+        int quantity,
+        decimal limitPrice,
+        CancellationToken ct = default)
+    {
+        if (!EnsureConnected()) return null;
+
+        var contract = BuildContract(symbol, tradeType, direction, strike, expiration);
+        var orderId = GetNextOrderId();
+
+        // BuildLimitOrder defaults to Transmit=false (built for use as a held bracket leg
+        // transmitted by a sibling order) — this order has no sibling, so it must transmit itself.
+        var order = BuildLimitOrder(orderId, quantity, "SELL", limitPrice);
+        order.Transmit = true;
+
+        var rejectionTcs = new TaskCompletionSource<string?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        _connection.Wrapper.RegisterStopRejectionCallback(orderId, rejectionTcs);
+        _connection.Client.placeOrder(orderId, contract, order);
+
+        string? rejection = null;
+        try
+        {
+            using var checkCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            checkCts.CancelAfter(TimeSpan.FromMilliseconds(600));
+            rejection = await rejectionTcs.Task.WaitAsync(checkCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            _connection.Wrapper.UnregisterStopRejectionCallback(orderId);
+        }
+
+        if (rejection is not null)
+        {
+            _logger.LogError(
+                "Standalone limit sell rejected for {Symbol} — nothing placed. Reason: {Reason}",
+                optionsContractSymbol ?? symbol, rejection);
+            return null;
+        }
+
+        return orderId.ToString();
+    }
+
     // -- Helpers --
 
     // Returns true for stock entries with a computed price target above entry price.
@@ -1511,23 +1710,54 @@ public class IbkrBrokerService : IBrokerService
         order.TradeType == TradeType.Stock &&
         order.TargetPrice > order.EstimatedEntryPrice;
 
-    private void RegisterStopOrderCallbacks(int entryOrderId, int trailStopId, int? targetOrderId)
+    private void RegisterStopOrderCallbacks(int entryOrderId, int trailStopId, int? targetOrderId, int quantity)
     {
         var entryIdStr = entryOrderId.ToString();
 
-        lock (_stopMapLock)
-        {
-            _stopOrderMap[trailStopId] = (entryIdStr, TradeOutcome.StoppedOut);
-            if (targetOrderId.HasValue)
-                _stopOrderMap[targetOrderId.Value] = (entryIdStr, TradeOutcome.TargetHit);
-        }
-
-        _connection.Wrapper.RegisterExecDetailsCallback(trailStopId, fillPrice =>
-            OnStopOrderFilled(trailStopId, fillPrice));
-
+        RegisterStopOrderWatch(entryIdStr, trailStopId, quantity, TradeOutcome.StoppedOut);
         if (targetOrderId.HasValue)
-            _connection.Wrapper.RegisterExecDetailsCallback(targetOrderId.Value, fillPrice =>
-                OnStopOrderFilled(targetOrderId.Value, fillPrice));
+            RegisterStopOrderWatch(entryIdStr, targetOrderId.Value, quantity, TradeOutcome.TargetHit);
+    }
+
+    // Registers exec-details tracking for a stop or target order. Fires the normal broker-fill
+    // handler once IBKR confirms the order is genuinely fully filled (cumulative filled reaches
+    // requestedQuantity). A resting order with zero fills waits indefinitely, exactly as before
+    // this method existed — the bounded ExecDetailsFullFillWaitSeconds clock only starts once a
+    // partial fill is actually observed, so it never misfires on a stop that simply hasn't
+    // triggered yet.
+    private void RegisterStopOrderWatch(string entryOrderId, int orderId, int requestedQuantity, TradeOutcome outcome)
+    {
+        lock (_stopMapLock) { _stopOrderMap[orderId] = (entryOrderId, outcome); }
+
+        OrderFill? lastPartialFill = null;
+        var watchdogStarted = false;
+
+        _connection.Wrapper.RegisterExecDetailsCallback(
+            orderId,
+            requestedQuantity,
+            fillPrice => OnStopOrderFilled(orderId, fillPrice),
+            onPartialFill: fill =>
+            {
+                lastPartialFill = fill;
+
+                lock (_stopMapLock)
+                {
+                    if (watchdogStarted) return;
+                    watchdogStarted = true;
+                }
+
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(_options.ExecDetailsFullFillWaitSeconds));
+
+                    // Race-safe: only proceed if we actually removed the pending registration.
+                    // If the real completion arrived first, this returns false and
+                    // OnStopOrderFilled has already handled it normally — nothing more to do.
+                    if (!_connection.Wrapper.UnregisterExecDetailsCallback(orderId)) return;
+
+                    await HandleStopOrderPartialTimeoutAsync(orderId, requestedQuantity, lastPartialFill);
+                });
+            });
     }
 
     private void OnStopOrderFilled(int stopOrderId, decimal fillPrice)
@@ -1547,6 +1777,74 @@ public class IbkrBrokerService : IBrokerService
 
         _ = Task.Run(() => _brokerFillHandler?.Invoke(
             mapping.EntryOrderId, fillPrice, mapping.Outcome));
+    }
+
+    // Fired when a stop/target order's bounded completion wait expires with only a partial
+    // fill confirmed (see the 2026-07-17 UBER incident — a partial execDetails event was
+    // mistaken for a full close). lastPartialFill is null only if the watchdog somehow fires
+    // without ever having observed a partial, which the caller guards against defensively.
+    private async Task HandleStopOrderPartialTimeoutAsync(int orderId, int requestedQuantity, OrderFill? lastPartialFill)
+    {
+        (string EntryOrderId, TradeOutcome Outcome) mapping;
+        lock (_stopMapLock)
+        {
+            if (!_stopOrderMap.TryGetValue(orderId, out mapping)) return;
+            _stopOrderMap.Remove(orderId);
+        }
+
+        if (lastPartialFill is null)
+        {
+            _logger.LogWarning(
+                "IBKR stop/target watchdog fired for OrderId {OrderId} EntryOrderId {EntryId} with " +
+                "no confirmed partial fill data — leaving position untouched for reconciliation.",
+                orderId, mapping.EntryOrderId);
+            return;
+        }
+
+        var remainingQty = requestedQuantity - lastPartialFill.FilledQuantity;
+
+        _logger.LogError(
+            "IBKR {Outcome} order {OrderId} for EntryOrderId {EntryId} confirmed only {SoldQty} of " +
+            "{Requested} filled @ ${Price:F2} within {Wait}s — remainder still open at IBKR.",
+            mapping.Outcome, orderId, mapping.EntryOrderId, lastPartialFill.FilledQuantity,
+            requestedQuantity, lastPartialFill.AvgFillPrice, _options.ExecDetailsFullFillWaitSeconds);
+
+        // Check whether this same order is still live — tells the operator whether the
+        // remainder is still under active protection or needs a manual replacement.
+        var stillProtected = false;
+        string? protectionNote;
+        try
+        {
+            var orders = await GetAllOpenOrdersAsync();
+            if (!orders.TimedOut)
+            {
+                stillProtected = orders.Orders.Any(o =>
+                    o.OrderId == orderId && IbSnapshotFormatter.LiveOrderStatuses.Contains(o.Status));
+                protectionNote = stillProtected
+                    ? $"Order {orderId} still appears live — remainder likely still protected."
+                    : $"Order {orderId} no longer appears live in IBKR's open orders — " +
+                      "verify protection manually.";
+            }
+            else
+            {
+                protectionNote = "Could not verify order status (Gateway timeout) — verify protection manually.";
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "IBKR failed to verify remaining protection status for OrderId {OrderId}", orderId);
+            protectionNote = "Could not verify order status — verify protection manually.";
+        }
+
+        _brokerPartialFillHandler?.Invoke(new BrokerPartialFillEvent(
+            mapping.EntryOrderId,
+            lastPartialFill.FilledQuantity,
+            remainingQty,
+            lastPartialFill.AvgFillPrice,
+            mapping.Outcome,
+            stillProtected,
+            protectionNote));
     }
 
     private void RemoveStopOrderMapping(int orderId)
@@ -1774,7 +2072,7 @@ public class IbkrBrokerService : IBrokerService
 
         if (rejection is null)
         {
-            RegisterStopOrderCallbacks(int.Parse(entryOrderId), trailStopId, targetOrderId);
+            RegisterStopOrderCallbacks(int.Parse(entryOrderId), trailStopId, targetOrderId, quantity);
             return (trailStopId.ToString(), targetOrderId.ToString());
         }
 
@@ -1826,7 +2124,7 @@ public class IbkrBrokerService : IBrokerService
 
         if (rejection is null)
         {
-            RegisterTrailCallbacks(entryOrderId, trailStopId);
+            RegisterTrailCallbacks(entryOrderId, trailStopId, quantity);
             return trailStopId.ToString();
         }
 
@@ -1862,7 +2160,7 @@ public class IbkrBrokerService : IBrokerService
 
         if (standaloneRejection is null)
         {
-            RegisterTrailCallbacks(entryOrderId, standaloneId);
+            RegisterTrailCallbacks(entryOrderId, standaloneId, quantity);
             _logger.LogDebug(
                 "Standalone trail stop placed for {Symbol} StopId {StopId} (OCA fallback).",
                 symbol, standaloneId);
@@ -1879,15 +2177,9 @@ public class IbkrBrokerService : IBrokerService
 
     // Registers exec callbacks for a trail stop using a string entry order ID.
     // String version required for ReplaceTrailStopAsync where entryOrderId is a string.
-    private void RegisterTrailCallbacks(string entryOrderId, int stopId)
+    private void RegisterTrailCallbacks(string entryOrderId, int stopId, int quantity)
     {
-        lock (_stopMapLock)
-        {
-            _stopOrderMap[stopId] = (entryOrderId, TradeOutcome.StoppedOut);
-        }
-
-        _connection.Wrapper.RegisterExecDetailsCallback(stopId, fillPrice =>
-            OnStopOrderFilled(stopId, fillPrice));
+        RegisterStopOrderWatch(entryOrderId, stopId, quantity, TradeOutcome.StoppedOut);
     }
 
     private static Order BuildCloseOrder(int orderId, int quantity) =>

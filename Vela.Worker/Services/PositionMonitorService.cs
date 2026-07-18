@@ -45,6 +45,11 @@ public class PositionMonitorService : BackgroundService
             (entryOrderId, fillPrice, outcome) =>
                 _ = HandleBrokerFillAsync(entryOrderId, fillPrice, outcome, stoppingToken));
 
+        // Fires when a stop/target order's bounded completion wait expires with only a
+        // partial fill confirmed — must correct quantity, never record a false full close.
+        _broker.RegisterBrokerPartialFillHandler(
+            partialFill => _ = HandleBrokerPartialFillAsync(partialFill, stoppingToken));
+
         return Task.CompletedTask;
     }
 
@@ -74,6 +79,49 @@ public class PositionMonitorService : BackgroundService
             outcome, trade.Symbol, fillPrice);
 
         await CloseAndRecordAsync(trade, fillPrice, outcome, ct);
+    }
+
+    // Fired by IbkrBrokerService when a stop/target order's bounded completion wait expires
+    // with the order confirmed only partially filled (see the 2026-07-17 UBER incident — a
+    // partial execDetails event was previously mistaken for a full close). Must NOT close
+    // trade_metrics/open_positions/TradeGuard as if the full position closed — only the
+    // confirmed-sold quantity is corrected, and the position stays open and tracked for
+    // whatever genuinely remains.
+    private async Task HandleBrokerPartialFillAsync(BrokerPartialFillEvent partialFill, CancellationToken ct)
+    {
+        var trade = _guard.GetOpenTrades()
+            .FirstOrDefault(t => t.OrderId == partialFill.EntryOrderId);
+
+        if (trade is null)
+        {
+            _logger.LogWarning(
+                "Broker partial fill received for OrderId {OrderId} but no matching open position found.",
+                partialFill.EntryOrderId);
+            return;
+        }
+
+        _guard.UpdatePositionQuantity(trade.OrderId, partialFill.RemainingQty);
+
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+            await repo.UpdateQuantityAsync(trade.OrderId, partialFill.RemainingQty, ct);
+        }
+
+        _logger.LogError(
+            "PARTIAL {Outcome} ONLY — {Symbol} confirmed {SoldQty} of {OriginalQty} sold @ " +
+            "${Price:F2}. {RemainingQty} contracts remain open at IBKR. {ProtectionNote}",
+            partialFill.Outcome, trade.Symbol, partialFill.ConfirmedSoldQty, trade.Quantity,
+            partialFill.FillPrice, partialFill.RemainingQty, partialFill.ProtectionNote);
+
+        await _discord.NotifyCriticalAsync(
+            $"⚠️ Partial {partialFill.Outcome} Only — {trade.Symbol}",
+            $"**{trade.Symbol}** {partialFill.Outcome} order confirmed only " +
+            $"{partialFill.ConfirmedSoldQty} of {trade.Quantity} sold @ ${partialFill.FillPrice:F2} " +
+            $"within the fill-confirmation window. {partialFill.RemainingQty} contracts remain open " +
+            $"at IBKR — position quantity has been corrected in Vela, trade_metrics was NOT closed.\n" +
+            $"{partialFill.ProtectionNote}",
+            ct);
     }
 
     private async Task CloseAndRecordAsync(
