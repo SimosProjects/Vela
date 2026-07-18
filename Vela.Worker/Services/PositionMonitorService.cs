@@ -19,6 +19,13 @@ public class PositionMonitorService : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<PositionMonitorService> _logger;
 
+    // Test-only observability hook: the broker-fill handler is registered as a fire-and-forget
+    // Action (matching IBrokerService's callback-style contract), so there is no return value
+    // for a caller to await. Tests that invoke the captured handler directly can await this
+    // instead of a fixed delay to know the dispatched HandleBrokerFillAsync call has genuinely
+    // completed. Never read by production code.
+    internal Task? LastFillDispatch { get; private set; }
+
     public PositionMonitorService(
         TradeGuard guard,
         IBrokerService broker,
@@ -43,7 +50,7 @@ public class PositionMonitorService : BackgroundService
         // IBKR fires execDetails when an OCA stop or target order fills — no polling needed.
         _broker.RegisterBrokerFillHandler(
             (entryOrderId, fillPrice, outcome) =>
-                _ = HandleBrokerFillAsync(entryOrderId, fillPrice, outcome, stoppingToken));
+                LastFillDispatch = HandleBrokerFillAsync(entryOrderId, fillPrice, outcome, stoppingToken));
 
         // Fires when a stop/target order's bounded completion wait expires with only a
         // partial fill confirmed — must correct quantity, never record a false full close.
