@@ -139,6 +139,24 @@ public interface IBrokerService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Places a standalone LMT sell (no OCA group, no ParentId, transmitted immediately) on an
+    /// existing IBKR position — for restoring a take-profit leg independently of any stop,
+    /// unlike PlaceProtectiveStopWithTargetAsync which requires an existing target order to
+    /// cancel first. Returns the order ID on success, or null if IBKR rejects it within the
+    /// detection window.
+    /// </summary>
+    Task<string?> PlaceStandaloneLimitSellAsync(
+        string symbol,
+        TradeType tradeType,
+        string? optionsContractSymbol,
+        string? direction,
+        decimal? strike,
+        string? expiration,
+        int quantity,
+        decimal limitPrice,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Returns the net liquidation value of the account.
     /// Used by TradeGuard for exposure checks before placing orders.
     /// </summary>
@@ -154,6 +172,12 @@ public interface IBrokerService
     /// Subscribes a handler that fires when a broker-side stop or target order fills.
     /// </summary>
     void RegisterBrokerFillHandler(Action<string, decimal, TradeOutcome> handler);
+
+    /// <summary>
+    /// Subscribes a handler that fires when a stop/target order's bounded completion wait
+    /// expires with the order confirmed only partially filled, rather than genuinely done.
+    /// </summary>
+    void RegisterBrokerPartialFillHandler(Action<BrokerPartialFillEvent> handler);
 
     /// <summary>
     /// Fetches daily OHLCV bars for a stock symbol from the broker's historical data feed.

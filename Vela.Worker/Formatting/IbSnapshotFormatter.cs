@@ -1,7 +1,16 @@
+using Vela.Worker.Data;
+
 namespace Vela.Worker.Formatting;
 
 public static class IbSnapshotFormatter
 {
+    /// <summary>
+    /// Line separating consecutive positions in the snapshot message. Shared with
+    /// DiscordNotificationService so it can split a too-long message on exact position
+    /// boundaries without duplicating the literal.
+    /// </summary>
+    public const string PositionSeparator = "-------------------------";
+
     /// <summary>
     /// Builds a plain text account and open positions snapshot for the Discord snapshot alert.
     /// Stop loss orders are matched by LocalSymbol (options, spaces stripped) or Symbol (stocks)
@@ -41,7 +50,7 @@ public static class IbSnapshotFormatter
             {
                 AppendPositionLines(lines, positions[i], orders);
                 if (i < positions.Count - 1)
-                    lines.Add("-------------------------");
+                    lines.Add(PositionSeparator);
             }
         }
 
@@ -157,11 +166,19 @@ public static class IbSnapshotFormatter
     /// it must treat this as "cannot safely proceed, manual cleanup required."
     /// </summary>
     public static (IbkrOpenOrder? Order, bool Ambiguous) GetMatchingTargetOrder(
-        IbkrPosition position, List<IbkrOpenOrder> orders)
+        IbkrPosition position, List<IbkrOpenOrder> orders) =>
+        GetMatchingTargetOrder(PositionKey(position), orders);
+
+    /// <summary>
+    /// Same matching as the IbkrPosition overload above, keyed directly by a pre-computed
+    /// position key (see PositionKeyForOpenPosition) — for callers validating a stored
+    /// open_positions DB row, which has no IbkrPosition to match against.
+    /// </summary>
+    public static (IbkrOpenOrder? Order, bool Ambiguous) GetMatchingTargetOrder(
+        string positionKey, List<IbkrOpenOrder> orders)
     {
-        var key = PositionKey(position);
         var matches = orders.Where(o =>
-            OrderKey(o) == key &&
+            OrderKey(o) == positionKey &&
             LiveOrderStatuses.Contains(o.Status) &&
             o.OrderType == "LMT")
             .ToList();
@@ -173,6 +190,17 @@ public static class IbSnapshotFormatter
             _ => (null, true)
         };
     }
+
+    /// <summary>
+    /// Computes the same order-matching key as PositionKey, but from an open_positions DB row
+    /// instead of a live IbkrPosition — lets IbkrBrokerService.ReRegisterStopCallbacksAsync
+    /// validate a stored stop/target order ID against a fresh open orders snapshot using the
+    /// exact same symbol/LocalSymbol matching BuildSnapshotMessage and Guardian already rely on.
+    /// </summary>
+    public static string PositionKeyForOpenPosition(OpenPosition position) =>
+        string.Equals(position.TradeType, "Options", StringComparison.OrdinalIgnoreCase)
+            ? (position.OptionsContract ?? "").Replace(" ", "")
+            : position.Symbol;
 
     // -- Helpers --
 
@@ -234,7 +262,9 @@ public static class IbSnapshotFormatter
     // orders from prior sessions (see GetAllOpenOrdersAsync's own doc comment), including
     // historical remnants (Cancelled, Filled, Inactive, ...) that must never be mistaken
     // for real protection just because they still momentarily appear in the snapshot.
-    private static readonly HashSet<string> LiveOrderStatuses = new(StringComparer.OrdinalIgnoreCase)
+    // Public (not private) so IbkrBrokerService.ReRegisterStopCallbacksAsync and Vela.Guardian's
+    // post-placement confirmation can validate order IDs against the same definition of "live".
+    public static readonly HashSet<string> LiveOrderStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
         "Submitted", "PreSubmitted", "ApiPending", "PendingSubmit"
     };
@@ -245,12 +275,24 @@ public static class IbSnapshotFormatter
     // display and Guardian's unprotected/duplicate detection both go through this so they
     // can never disagree with each other. More than one live match is ambiguous — the
     // caller must not guess which one is real via FirstOrDefault.
-    private static (IbkrOpenOrder? Order, bool Ambiguous) GetMatchingStopOrders(
-        IbkrPosition position, List<IbkrOpenOrder> orders)
+    // Public (not private) so IbkrBrokerService.ReRegisterStopCallbacksAsync can reuse the exact
+    // same matching for the string-keyed overload below. An order's OrderId == 0 is not filtered
+    // out here — IBKR reports 0 for orders placed outside any API client (confirmed for BROS/GE/V,
+    // 2026-07-15), not for orders that don't exist. It's still a real, live, matchable order.
+    public static (IbkrOpenOrder? Order, bool Ambiguous) GetMatchingStopOrders(
+        IbkrPosition position, List<IbkrOpenOrder> orders) =>
+        GetMatchingStopOrders(PositionKey(position), orders);
+
+    /// <summary>
+    /// Same matching as the IbkrPosition overload above, keyed directly by a pre-computed
+    /// position key (see PositionKeyForOpenPosition) — for callers validating a stored
+    /// open_positions DB row, which has no IbkrPosition to match against.
+    /// </summary>
+    public static (IbkrOpenOrder? Order, bool Ambiguous) GetMatchingStopOrders(
+        string positionKey, List<IbkrOpenOrder> orders)
     {
-        var key = PositionKey(position);
         var matches = orders.Where(o =>
-            OrderKey(o) == key &&
+            OrderKey(o) == positionKey &&
             LiveOrderStatuses.Contains(o.Status) &&
             (o.OrderType.Contains("TRAIL", StringComparison.OrdinalIgnoreCase) ||
              o.OrderType.Contains("STP", StringComparison.OrdinalIgnoreCase)))

@@ -5,14 +5,16 @@ export function MobilePositionCard({ position }) {
   const { contract, direction, quantity, entryPrice, costBasis, stopPrice,
           targetPrice, openedAt, trader, xScore, riskTier } = position;
 
-  const stopPct   = ((stopPrice   - entryPrice) / entryPrice * 100).toFixed(0);
-  const targetPct = ((targetPrice - entryPrice) / entryPrice * 100).toFixed(0);
+  // Manual positions have no stop/target recorded (0) — a percentage against that baseline
+  // is meaningless (always -100%), so omit it entirely rather than rendering a false figure.
+  const stopPct   = stopPrice   > 0 ? ((stopPrice   - entryPrice) / entryPrice * 100).toFixed(0) : null;
+  const targetPct = targetPrice > 0 ? ((targetPrice - entryPrice) / entryPrice * 100).toFixed(0) : null;
   const riskColor = riskTier === 'Lotto' ? B.rd : riskTier === 'High' ? B.am : B.mu;
 
   const columns = [
-    { label: 'Entry',  value: `$${entryPrice.toFixed(2)}`,  color: B.tx, sub: null             },
-    { label: 'Stop',   value: `$${stopPrice.toFixed(2)}`,   color: B.rd, sub: `${stopPct}%`    },
-    { label: 'Target', value: `$${targetPrice.toFixed(2)}`, color: B.gr, sub: `+${targetPct}%` },
+    { label: 'Entry',  value: `$${entryPrice.toFixed(2)}`,  color: B.tx, sub: null                                       },
+    { label: 'Stop',   value: `$${stopPrice.toFixed(2)}`,   color: B.rd, sub: stopPct   !== null ? `${stopPct}%`    : null },
+    { label: 'Target', value: `$${targetPrice.toFixed(2)}`, color: B.gr, sub: targetPct !== null ? `+${targetPct}%` : null },
   ];
 
   return (

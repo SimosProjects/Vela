@@ -238,7 +238,7 @@ using (var scope = host.Services.CreateScope())
         if (ibkrEnabled)
         {
             var broker = host.Services.GetRequiredService<IbkrBrokerService>();
-            broker.ReRegisterStopCallbacks(managedPositions);
+            await broker.ReRegisterStopCallbacksAsync(managedPositions);
         }
     }
 }

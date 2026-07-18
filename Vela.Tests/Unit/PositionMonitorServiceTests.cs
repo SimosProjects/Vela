@@ -92,7 +92,7 @@ public class PositionMonitorServiceTests : IDisposable
         capturedHandler.Should().NotBeNull();
         capturedHandler!("ORDER-100", 7.50m, TradeOutcome.StoppedOut);
 
-        await Task.Delay(300);
+        await _monitor.LastFillDispatch!.WaitAsync(TimeSpan.FromSeconds(5));
 
         _guard.GetOpenTrades().Should().BeEmpty();
         await cts.CancelAsync();
@@ -110,10 +110,10 @@ public class PositionMonitorServiceTests : IDisposable
         await _monitor.StartAsync(cts.Token);
         await Task.Delay(50);
 
-        var act = () =>
+        var act = async () =>
         {
             capturedHandler!("UNKNOWN-ORDER", 5.00m, TradeOutcome.StoppedOut);
-            return Task.Delay(300);
+            await _monitor.LastFillDispatch!.WaitAsync(TimeSpan.FromSeconds(5));
         };
 
         await act.Should().NotThrowAsync();
@@ -136,7 +136,7 @@ public class PositionMonitorServiceTests : IDisposable
         await Task.Delay(50);
 
         capturedHandler!("ORDER-200", 2.48m, TradeOutcome.StoppedOut);
-        await Task.Delay(300);
+        await _monitor.LastFillDispatch!.WaitAsync(TimeSpan.FromSeconds(5));
 
         var optionsPath = Path.Combine(_tempDir, "options_trades.csv");
         var content     = await File.ReadAllTextAsync(optionsPath);
@@ -160,7 +160,7 @@ public class PositionMonitorServiceTests : IDisposable
         await Task.Delay(50);
 
         capturedHandler!("ORDER-300", 14.85m, TradeOutcome.TargetHit);
-        await Task.Delay(300);
+        await _monitor.LastFillDispatch!.WaitAsync(TimeSpan.FromSeconds(5));
 
         var optionsPath = Path.Combine(_tempDir, "options_trades.csv");
         var content     = await File.ReadAllTextAsync(optionsPath);

@@ -22,6 +22,7 @@ public class BrokerExecutionServiceTests
 
     private readonly Mock<IBrokerService> _brokerMock = new();
     private readonly Mock<ITradeMetricsRepository> _metricsMock = new();
+    private readonly Mock<IOpenPositionRepository> _repoMock = new();
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly TradeGuard _guard;
     private readonly PositionSizer _sizer;
@@ -86,6 +87,11 @@ public class BrokerExecutionServiceTests
             It.IsAny<decimal>(), It.IsAny<decimal>(), It.IsAny<string>(),
             It.IsAny<DateTimeOffset>(), It.IsAny<int?>(), It.IsAny<decimal?>(),
             default)).Returns(Task.CompletedTask);
+        _repoMock.Setup(r => r.UpdateQuantityAsync(
+            It.IsAny<string>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        _repoMock.Setup(r => r.DeleteAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
 
         var riskOptions = Options.Create(new RiskEngineOptions());
         _guard = new TradeGuard(_brokerMock.Object, riskOptions, NullLogger<TradeGuard>.Instance);
@@ -93,7 +99,7 @@ public class BrokerExecutionServiceTests
 
         var services = new ServiceCollection();
         services.AddScoped<ITradeMetricsRepository>(_ => _metricsMock.Object);
-        services.AddScoped<IOpenPositionRepository>(_ => Mock.Of<IOpenPositionRepository>());
+        services.AddScoped<IOpenPositionRepository>(_ => _repoMock.Object);
         _scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
 
         var config = TestConfig;
@@ -1031,5 +1037,84 @@ public class BrokerExecutionServiceTests
 
         _brokerMock.Verify(b => b.PlaceOrderAsync(
             It.IsAny<TradeOrder>(), default), Times.Once);
+    }
+
+    // -- Partial fill degraded state (2026-07-17 UBER incident) --
+
+    [Fact]
+    public async Task HandleExitAsync_PartialFill_CorrectsQuantityAndDoesNotCloseTradeMetrics()
+    {
+        var order = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(), UserName: "TestTrader", Symbol: "UBER",
+            TradeType: TradeType.Options, OptionsContractSymbol: "UBER270617C00100000",
+            Direction: "call", Strike: 100, Expiration: "2027-06-17",
+            Quantity: 5, EstimatedEntryPrice: 4.90m, BudgetUsed: 2450m,
+            StopPrice: 2.45m, TargetPrice: 13.5m, TrailPercent: 50.0);
+
+        _guard.RegisterOpen(order, new BrokerOrderResult(
+            OrderId: "ORDER-PF1", StopOrderId: "STOP-PF1", TargetOrderId: null,
+            FillPrice: 4.90m, FillQuantity: 5, FillAmount: 2450m,
+            Status: OrderStatus.Filled, FilledAt: DateTimeOffset.UtcNow));
+
+        // Only 1 of the 5 requested confirmed sold within the bounded wait — the exact UBER shape.
+        _brokerMock
+            .Setup(b => b.ClosePositionAsync(It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "CLOSE-PF1", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 4.25m, FillQuantity: 1, FillAmount: 425m,
+                Status: OrderStatus.PartialFill, FilledAt: DateTimeOffset.UtcNow));
+
+        var exitAlert = BuildAlert(
+            side: "stc", userName: "TestTrader", contractSymbol: "UBER270617C00100000");
+        var result = await _executionMarketOpen.HandleExitAsync(exitAlert);
+
+        result.Should().BeFalse("a partial fill is not a completed exit");
+
+        var trade = _guard.FindOpenTrade("TestTrader", "UBER270617C00100000", "UBER");
+        trade.Should().NotBeNull("the position must stay open and tracked, not vanish");
+        trade!.Quantity.Should().Be(4, "5 requested minus 1 confirmed sold");
+
+        _repoMock.Verify(r => r.UpdateQuantityAsync("ORDER-PF1", 4, It.IsAny<CancellationToken>()), Times.Once);
+        _repoMock.Verify(r => r.DeleteAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _metricsMock.Verify(m => m.CloseAsync(
+            It.IsAny<string>(), It.IsAny<decimal>(), It.IsAny<decimal>(),
+            It.IsAny<decimal>(), It.IsAny<decimal>(), It.IsAny<string>(),
+            It.IsAny<DateTimeOffset>(), It.IsAny<int?>(), It.IsAny<decimal?>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ForceCloseAsync_PartialFill_ReturnsPartialFillOutcomeAndCorrectsQuantity()
+    {
+        var order = new TradeOrder(
+            AlertId: Guid.NewGuid().ToString(), UserName: "TestTrader", Symbol: "UBER",
+            TradeType: TradeType.Options, OptionsContractSymbol: "UBER270617C00100000",
+            Direction: "call", Strike: 100, Expiration: "2027-06-17",
+            Quantity: 5, EstimatedEntryPrice: 4.90m, BudgetUsed: 2450m,
+            StopPrice: 2.45m, TargetPrice: 13.5m, TrailPercent: 50.0);
+
+        _guard.RegisterOpen(order, new BrokerOrderResult(
+            OrderId: "ORDER-PF2", StopOrderId: "STOP-PF2", TargetOrderId: null,
+            FillPrice: 4.90m, FillQuantity: 5, FillAmount: 2450m,
+            Status: OrderStatus.Filled, FilledAt: DateTimeOffset.UtcNow));
+
+        _brokerMock
+            .Setup(b => b.ClosePositionAsync(It.IsAny<TradeRecord>(), It.IsAny<TradeOutcome>(), default))
+            .ReturnsAsync(new BrokerOrderResult(
+                OrderId: "CLOSE-PF2", StopOrderId: null, TargetOrderId: null,
+                FillPrice: 4.25m, FillQuantity: 1, FillAmount: 425m,
+                Status: OrderStatus.PartialFill, FilledAt: DateTimeOffset.UtcNow));
+
+        var trade = _guard.FindOpenTrade("TestTrader", "UBER270617C00100000", "UBER")!;
+        var outcome = await _executionMarketOpen.ForceCloseAsync(trade, TradeOutcome.ForcedClose);
+
+        outcome.Should().Be(ForceCloseOutcome.PartialFill);
+
+        var remaining = _guard.FindOpenTrade("TestTrader", "UBER270617C00100000", "UBER");
+        remaining.Should().NotBeNull();
+        remaining!.Quantity.Should().Be(4);
+
+        _repoMock.Verify(r => r.UpdateQuantityAsync("ORDER-PF2", 4, It.IsAny<CancellationToken>()), Times.Once);
+        _repoMock.Verify(r => r.DeleteAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 }

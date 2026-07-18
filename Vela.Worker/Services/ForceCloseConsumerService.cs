@@ -111,7 +111,9 @@ public class ForceCloseConsumerService : BackgroundService
                     request.Id, trade.Symbol, request.OrderId, outcome);
 
                 // Pending or Failed means the position may still be open at IBKR with its stop
-                // already cancelled. Surface it on the critical channel for manual handling.
+                // already cancelled. PartialFill means it's confirmed still open (quantity
+                // already corrected by ForceCloseAsync) and definitely unprotected. All three
+                // need the critical channel for manual handling.
                 if (outcome is ForceCloseOutcome.Pending or ForceCloseOutcome.Failed)
                 {
                     await _discord.NotifyCriticalAsync(
@@ -119,6 +121,16 @@ public class ForceCloseConsumerService : BackgroundService
                         $"Dashboard force close for **{trade.Symbol}** (order {request.OrderId}) " +
                         $"returned {outcome}. The position may still be open at IBKR. " +
                         "Manual reconciliation required.",
+                        ct);
+                }
+                else if (outcome is ForceCloseOutcome.PartialFill)
+                {
+                    await _discord.NotifyCriticalAsync(
+                        $"🚨 Force Close Partial Fill — {trade.Symbol} UNPROTECTED",
+                        $"Dashboard force close for **{trade.Symbol}** (order {request.OrderId}) only " +
+                        "partially filled within the fill-confirmation window. Position quantity has " +
+                        "been corrected in Vela but the remainder is unprotected — the original stop " +
+                        "was cancelled before this close attempt. Manual stop placement required immediately.",
                         ct);
                 }
             }

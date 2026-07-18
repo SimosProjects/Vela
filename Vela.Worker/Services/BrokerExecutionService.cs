@@ -207,6 +207,43 @@ public class BrokerExecutionService
                 ct);
         }
 
+        // Confirmed only a partial fill within the bounded wait — must not be recorded as a
+        // full close (the 2026-07-17 UBER incident). Correct quantity to the confirmed
+        // remainder and leave trade_metrics/open_positions untouched; a later exit alert or
+        // reconciliation can act on what's left.
+        if (closeResult.Status == OrderStatus.PartialFill)
+        {
+            var remainingQty = trade.Quantity - closeResult.FillQuantity;
+
+            _guard.UpdatePositionQuantity(trade.OrderId, remainingQty);
+
+            using (var scope = _scopeFactory.CreateScope())
+            {
+                var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+                await repo.UpdateQuantityAsync(trade.OrderId, remainingQty, ct);
+            }
+
+            _logger.LogError(
+                "PARTIAL CLOSE ONLY — {Symbol} confirmed {SoldQty} of {TotalQty} sold @ ${Price:F2}. " +
+                "{RemainingQty} contracts remain open at IBKR and UNPROTECTED — the original stop " +
+                "was cancelled before this close attempt. Manual stop placement required immediately.",
+                trade.Symbol, closeResult.FillQuantity, trade.Quantity, closeResult.FillPrice, remainingQty);
+
+            await _discord.NotifyCriticalAsync(
+                $"🚨 Partial Close Only — {trade.Symbol} UNPROTECTED",
+                $"Close order for **{trade.Symbol}** only filled {closeResult.FillQuantity} of " +
+                $"{trade.Quantity} contracts @ ${closeResult.FillPrice:F2} within the fill-confirmation " +
+                $"window. {remainingQty} contracts remain open at IBKR with NO stop protection — " +
+                "the original stop was cancelled before this close attempt. " +
+                "Manual stop placement required immediately.\n" +
+                $"Position quantity has been corrected to {remainingQty} in Vela — " +
+                "trade_metrics was NOT closed.",
+                ct);
+
+            _guard.RevertClosing(alert.UserName ?? "", alert.OptionsContractSymbol, alert.Symbol ?? "");
+            return false;
+        }
+
         var alertedExitPrice = alert.PriceAtExit ?? alert.ActualPriceAtTimeOfExit ?? 0m;
         var exitLatencyMs    = (int)(closeResult.FilledAt - alertReceivedAt).TotalMilliseconds;
         var exitSlippagePct  = alertedExitPrice > 0
@@ -325,6 +362,32 @@ public class BrokerExecutionService
                 ct);
         }
 
+        // Confirmed only a partial fill within the bounded wait — must not be recorded as a
+        // full close (the 2026-07-17 UBER incident). Correct quantity to the confirmed
+        // remainder; leave trade_metrics/open_positions untouched. Discord alert is left to the
+        // caller (ForceCloseConsumerService), matching the existing Pending/Failed convention.
+        if (closeResult.Status == OrderStatus.PartialFill)
+        {
+            var remainingQty = trade.Quantity - closeResult.FillQuantity;
+
+            _guard.UpdatePositionQuantity(trade.OrderId, remainingQty);
+
+            using (var scope = _scopeFactory.CreateScope())
+            {
+                var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+                await repo.UpdateQuantityAsync(trade.OrderId, remainingQty, ct);
+            }
+
+            _logger.LogError(
+                "PARTIAL FORCE CLOSE ONLY — {Symbol} confirmed {SoldQty} of {TotalQty} sold @ " +
+                "${Price:F2}. {RemainingQty} contracts remain open at IBKR and UNPROTECTED — the " +
+                "original stop was cancelled before this close attempt.",
+                trade.Symbol, closeResult.FillQuantity, trade.Quantity, closeResult.FillPrice, remainingQty);
+
+            _guard.RevertClosing(trade.UserName, trade.OptionsContract, trade.Symbol);
+            return ForceCloseOutcome.PartialFill;
+        }
+
         var closedTrade = _guard.RegisterClose(
             trade.UserName,
             trade.OptionsContract,
@@ -397,6 +460,39 @@ public class BrokerExecutionService
         {
             _logger.LogError(ex,
                 "Broker PartialCloseAsync failed for {Symbol}", trade.Symbol);
+            return;
+        }
+
+        // Confirmed less than the intended quantityToClose within the bounded wait — must not
+        // be recorded as if the full intended amount sold (the 2026-07-17 UBER incident).
+        // PartialCloseAsync never touches the original stop before placing its sell order, so
+        // — unlike a full ClosePositionAsync attempt — the remainder here is still protected by
+        // the existing stop; do not cancel it.
+        if (closeResult.Status == OrderStatus.PartialFill)
+        {
+            var confirmedRemainingQty = trade.Quantity - closeResult.FillQuantity;
+
+            _guard.UpdatePositionQuantity(trade.OrderId, confirmedRemainingQty);
+
+            using (var scope = _scopeFactory.CreateScope())
+            {
+                var repo = scope.ServiceProvider.GetRequiredService<IOpenPositionRepository>();
+                await repo.UpdateQuantityAsync(trade.OrderId, confirmedRemainingQty, ct);
+            }
+
+            _logger.LogError(
+                "PARTIAL CLOSE (intentional 3pm reduction) ONLY PARTIALLY FILLED — {Symbol} confirmed " +
+                "{SoldQty} of {Requested} requested sold @ ${Price:F2}. Existing stop was not touched " +
+                "and continues protecting the remaining {RemainingQty} contracts.",
+                trade.Symbol, closeResult.FillQuantity, quantityToClose, closeResult.FillPrice, confirmedRemainingQty);
+
+            await _discord.NotifyCriticalAsync(
+                $"⚠️ Partial Close Incomplete — {trade.Symbol}",
+                $"3pm partial-close for **{trade.Symbol}** only sold {closeResult.FillQuantity} of the " +
+                $"{quantityToClose} contracts requested @ ${closeResult.FillPrice:F2}. Position quantity " +
+                $"corrected to {confirmedRemainingQty} in Vela — trade_metrics was NOT closed. " +
+                "The existing stop was not modified and continues protecting the remainder.",
+                ct);
             return;
         }
 

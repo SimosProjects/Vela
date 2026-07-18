@@ -1,3 +1,4 @@
+using Vela.Worker.Formatting;
 using Vela.Worker.Models;
 
 namespace Vela.Worker.Services;
@@ -273,26 +274,68 @@ public class DiscordNotificationService
     {
         if (string.IsNullOrWhiteSpace(_summaryWebhookUrl)) return;
 
-        try
+        // Discord's 2000 char content limit is not optional (see the 2026-07-15 BadRequest),
+        // and this message's length scales with open position count, which only grows —
+        // so a single-message assumption will keep failing as the account adds positions.
+        foreach (var chunk in SplitSnapshotIntoChunks(content))
         {
-            var payload = new { content = $"```\n{content}\n```" };
-            var response = await _httpClient.PostAsJsonAsync(_summaryWebhookUrl, payload, cancellationToken);
-
-            if (!response.IsSuccessStatusCode)
+            try
             {
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                _logger.LogWarning(
-                    "IB snapshot Discord POST failed: {StatusCode} — {Body}",
-                    response.StatusCode, body);
+                var payload = new { content = $"```\n{chunk}\n```" };
+                var response = await _httpClient.PostAsJsonAsync(_summaryWebhookUrl, payload, cancellationToken);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                    _logger.LogWarning(
+                        "IB snapshot Discord POST failed: {StatusCode} — {Body}",
+                        response.StatusCode, body);
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to send IB snapshot Discord notification.");
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to send IB snapshot Discord notification.");
+            }
         }
     }
 
     // -- Helpers --
+
+    // Splits a snapshot message on position separator boundaries so no chunk's wrapped
+    // length (content + 8 for the ```\n / \n``` code block fence) exceeds Discord's 2000
+    // char limit. The ACCOUNT header rides with the first position in segments[0] and is
+    // never repeated in later chunks; the closing footer rides with the last position.
+    private const int DiscordContentLimit = 2000;
+    private const int CodeBlockOverhead = 8;
+
+    internal static List<string> SplitSnapshotIntoChunks(string content)
+    {
+        if (content.Length + CodeBlockOverhead <= DiscordContentLimit)
+            return [content];
+
+        var delimiter = $"\n{IbSnapshotFormatter.PositionSeparator}\n";
+        var segments = content.Split(delimiter);
+
+        var chunks = new List<string>();
+        var current = segments[0];
+
+        for (var i = 1; i < segments.Length; i++)
+        {
+            var candidate = current + delimiter + segments[i];
+            if (candidate.Length + CodeBlockOverhead > DiscordContentLimit)
+            {
+                chunks.Add(current);
+                current = segments[i];
+            }
+            else
+            {
+                current = candidate;
+            }
+        }
+
+        chunks.Add(current);
+        return chunks;
+    }
 
     // Builds a human readable contract description for the execution embed.
     // Options: "RBLX Aug 21 2026 $60.00 Call"

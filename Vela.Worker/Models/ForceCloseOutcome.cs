@@ -11,5 +11,6 @@ public enum ForceCloseOutcome
     Pending,
     AlreadyClosing,
     Failed,
-    NotFound
+    NotFound,
+    PartialFill
 }
