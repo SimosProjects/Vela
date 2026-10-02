@@ -102,25 +102,15 @@ builder.Services.AddSingleton(sp =>
     var riskOptions = sp.GetRequiredService<IOptions<RiskEngineOptions>>().Value;
     var regime      = sp.GetRequiredService<MarketRegimeService>();
 
-    var rules = new List<IRiskRule>
-    {
-        new EntryOnlyRule(),
-        new AllowOptionsRule(riskOptions.AllowOptions),
-        new ApprovedOrHighScoreRule(riskOptions.ApprovedTraders, riskOptions.MinXScore),
-        new NoHighRiskRule(() => regime.BlockHigh),
-        new NoLottoRule(() => regime.BlockLotto),
-    };
+    if (riskOptions.SpyglassOnlyMode)
+        sp.GetRequiredService<ILogger<RiskEngineService>>().LogWarning(
+            "SpyglassOnlyMode is ENABLED — all non-Spyglass entry alerts will be rejected.");
 
-    if (riskOptions.RegimeBearishBlockCalls)
-        rules.Add(new BearishCallBlockRule(() => regime.BlockCalls));
-
-    if (riskOptions.MinStockPriceDollars > 0)
-        rules.Insert(1, new MinStockPriceRule(riskOptions.MinStockPriceDollars));
-
-    rules.Insert(1, new No0DTEAfterCutoffRule(riskOptions.ZeroDteEntryCutoffHour));
-
-    if (riskOptions.BlockedSymbols.Count > 0)
-        rules.Insert(0, new BlockedSymbolsRule(riskOptions.BlockedSymbols));
+    var rules = RiskRuleComposer.Compose(
+        riskOptions,
+        () => regime.BlockHigh,
+        () => regime.BlockLotto,
+        () => regime.BlockCalls);
 
     return new RiskEngineService(rules);
 });
