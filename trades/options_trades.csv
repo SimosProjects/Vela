@@ -1,7 +1,16 @@
 Date Opened,Time Opened,Date Closed,Time Closed,Symbol,Contract,Direction,Strike,Expiration,Contracts,Entry Price,Entry Amount,Entry Latency (ms),Entry Slippage %,Exit Price,Exit Amount,Exit Latency (ms),Exit Slippage %,Status,Result,UserName,XScore,DiscordRank,P&L,P&L %,OrderId
+2026-08-13,11:35:18,,,CSCO,CSCO270617C00150000,call,150,Jun 17 2027,1,6.85,685.00,9739,+17.09%,,,,,Open,Open,Theo,81,Top Analyst XIV,,,16238
+2026-08-18,10:40:25,,,DKNG,DKNG280121C00037500,call,38,Jan 21 2028,2,3.70,740.00,2907,+4.23%,,,,,Open,Open,Theo,81,Top Analyst XVII,,,16929
+2026-08-20,11:11:26,,,PBA,PBA260918C00055000,call,55,Sep 18 2026,33,0.15,495.00,3234,+0.00%,,,,,Open,Open,Paltrader SPY scalps,90,,,,17721
+2026-08-20,11:49:29,,,KWEB,KWEB280121C00030000,call,30,Jan 21 2028,2,3.50,700.00,2751,+2.94%,,,,,Open,Open,Theo,81,Top Analyst XVII,,,17761
+2026-08-21,15:27:15,,,FXY,FXY280121C00060000,call,60,Jan 21 2028,3,3.50,1050.00,2852,+12.90%,,,,,Open,Open,Theo,81,Top Analyst XVII,,,21803
+2026-08-26,14:34:46,,,CARR,CARR270617C00072500,call,73,Jun 17 2027,3,3.50,1050.00,2841,+6.06%,,,,,Open,Open,Theo,81,Top Analyst XVII,,,22568
+2026-08-26,14:40:37,,,WMT,WMT280121C00150000,call,150,Jan 21 2028,2,3.85,770.00,2742,+5.48%,,,,,Open,Open,Theo,81,Top Analyst XVII,,,22598
+2026-10-09,10:12:57,2026-10-09,10:21:23,SPY,SPY261016P00774000,put,774,Oct 16 2026,3,3.39,1017.00,2765,+5.94%,3.26,978.00,15959,-2.69%,Closed,XtradesExit,Hydra,86,Junior Analyst I,-39.00,-3.83%,25290
+2026-10-09,11:00:48,2026-10-09,12:51:13,HOOD,HOOD261016C00110000,call,110,Oct 16 2026,3,2.73,819.00,2230,+3.02%,2.65,795.00,,,Closed,ClosedExternally,Hydra,86,Junior Analyst I,-24.00,-2.93%,25350
 
 ,,SUMMARY
-,,Total Trades,0
-,,Open,0,Closed,0
-,,Wins,0,Losses,0,Win Rate,0.0%
-,,Total P&L,+0.00
+,,Total Trades,9
+,,Open,7,Closed,2
+,,Wins,0,Losses,2,Win Rate,0.0%
+,,Total P&L,-63.00
