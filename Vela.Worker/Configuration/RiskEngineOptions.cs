@@ -11,7 +11,6 @@ public class RiskEngineOptions
     [Range(0, 100, ErrorMessage = "MinXScore must be between 0 and 100.")]
     public int MinXScore { get; init; } = 60;
 
-    [MinLength(1, ErrorMessage = "At least one approved trader must be specified.")]
     public List<string> ApprovedTraders { get; init; } = [];
 
     // Trader allocation restrictions, keyed by trader username, value is allocation percentage.
@@ -26,6 +25,12 @@ public class RiskEngineOptions
     public bool AllowHigh { get; init; } = true;
 
     public bool AllowOptions { get; init; } = true;
+
+    /// <summary>
+    /// When true, only Spyglass-sourced alerts pass the risk engine; everything else is rejected.
+    /// Startup-only, like AllowOptions.
+    /// </summary>
+    public bool SpyglassOnlyMode { get; init; } = false;
 
     public List<string> BlockedSymbols { get; init; } = [];
 
